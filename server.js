@@ -47,6 +47,10 @@ app.use("/api/devices", devices);
 app.use(notFound);
 app.use(errorHandler);
 
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime() });
+});
+
 app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
 app.head("/", (_req, res) => res.status(200).end());
 // Socket + Worker

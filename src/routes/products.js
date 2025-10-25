@@ -5,6 +5,7 @@ const { getPagination, buildPageInfo } = require('../utils/pagination');
 
 const router = Router();
 
+/* ----------------------------- Helpers ----------------------------- */
 function normalizeChannel(channel) {
   const c = String(channel || "").toLowerCase();
   if (c === "african-food") return "african-food";
@@ -40,28 +41,41 @@ async function listProducts(pool, { limit, offset, channel }) {
   return { rows, total };
 }
 
-router.get('/', async (req, res) => {
+/* ----------------------------- Listing ----------------------------- */
+// Handler factorisé
+async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const channel = normalizeChannel(req.query.channel);
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, { limit, offset, channel });
+    // NOTE: si ton buildPageInfo attend (total, page, pageSize), garde ceci :
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    // Si au contraire il attend un objet, remplace par :
+    // res.json({ items: rows, page: buildPageInfo({ total, limit, offset, baseUrl: req.baseUrl, query: req.query }) });
+  } catch (e) {
+    next(e);
+  }
+}
 
-// Aliases explicites
-router.get('/african-food', async (req, res) => {
-  req.query.channel = "african-food";
-  return router.handle(req, res);
-});
-router.get('/african-market', async (req, res) => {
-  req.query.channel = "african-market";
-  return router.handle(req, res);
-});
+// Route de base (une seule fois)
+router.get('/', listHandler);
 
-// Get by id
-router.get('/:id', async (req, res) => {
+// Aliases lisibles par canal
+router.get(
+  '/african-food',
+  (req, _res, next) => { req.query.channel = 'african-food'; next(); },
+  listHandler
+);
+
+router.get(
+  '/african-market',
+  (req, _res, next) => { req.query.channel = 'african-market'; next(); },
+  listHandler
+);
+
+/* ----------------------------- Read one ----------------------------- */
+router.get('/:id', async (req, res, next) => {
   const id = Number(req.params.id);
   const pool = getPool();
   try {
@@ -74,11 +88,11 @@ router.get('/:id', async (req, res) => {
       [id]
     );
     res.json({ ...product, images });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { next(e); }
 });
 
-// Create
-router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
+/* ----------------------------- Create ----------------------------- */
+router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res, next) => {
   const {
     shop_id, category_id,
     name, slug, price, currency,
@@ -87,7 +101,9 @@ router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) 
     sub_category, images = []
   } = req.body || {};
 
-  if (!shop_id || !name || !price) return res.status(400).json({ error: 'shop_id, name, price required' });
+  if (!shop_id || !name || price == null) {
+    return res.status(400).json({ error: 'shop_id, name, price required' });
+  }
 
   const sub = ['product','food','other'].includes(String(sub_category)) ? sub_category : 'product';
   const pool = getPool();
@@ -99,8 +115,9 @@ router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) 
       conn.release(); return res.status(403).json({ error: 'Forbidden: not your shop' });
     }
 
-    // slug unique si non fourni (coté Node)
-    const makeSlug = () => (slug && String(slug).trim()) || `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`.toLowerCase();
+    const makeSlug = () =>
+      (slug && String(slug).trim())
+      || `${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`.toLowerCase();
 
     await conn.beginTransaction();
     const [r] = await conn.query(
@@ -131,24 +148,29 @@ router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) 
 
     await conn.commit();
 
-    // Événement temps réel (optionnel): nouveau produit
-    const { getIO, emitToShops } = require('../ws');
-    const io = getIO();
-    if (io) emitToShops([shop_id], "product:created", { product_id: productId });
+    // Événement temps réel (optionnel)
+    try {
+      const { getIO, emitToShops } = require('../ws');
+      const io = getIO && getIO();
+      if (io && emitToShops) emitToShops([shop_id], "product:created", { product_id: productId });
+    } catch {}
 
-    // canal front: African Food si sub=food, sinon African Market
     const channel = sub === 'food' ? 'african-food' : 'african-market';
     res.status(201).json({ id: productId, channel });
   } catch (e) {
-    await conn.rollback();
-    res.status(500).json({ error: e.message });
+    try { await conn.rollback(); } catch {}
+    // duplicate slug → 409
+    if (e && e.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Duplicate slug' });
+    }
+    next(e);
   } finally {
     conn.release();
   }
 });
 
-// Update
-router.put('/:id', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
+/* ----------------------------- Update ----------------------------- */
+router.put('/:id', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res, next) => {
   const id = Number(req.params.id);
   const {
     name, price, currency, description, stock,
@@ -194,25 +216,30 @@ router.put('/:id', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res
       ]
     );
 
-    // Événement temps réel
-    const { getIO } = require('../ws');
-    const io = getIO();
-    if (io) io.broadcastToUser(prod.owner_id, "product:updated", { product_id: id });
+    // Événement temps réel (optionnel)
+    try {
+      const { getIO } = require('../ws');
+      const io = getIO && getIO();
+      if (io && io.broadcastToUser) io.broadcastToUser(prod.owner_id, "product:updated", { product_id: id });
+    } catch {}
 
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { next(e); }
   finally { conn.release(); }
 });
 
-// Replace images
-router.put('/:id/images', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
+/* ----------------------------- Replace images ----------------------------- */
+router.put('/:id/images', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res, next) => {
   const id = Number(req.params.id);
   const { images = [] } = req.body || {};
   const pool = getPool();
   const conn = await pool.getConnection();
 
   try {
-    const [[prod]] = await conn.query(`SELECT p.*, s.owner_id FROM products p JOIN shops s ON s.id=p.shop_id WHERE p.id=?`, [id]);
+    const [[prod]] = await conn.query(
+      `SELECT p.*, s.owner_id FROM products p JOIN shops s ON s.id=p.shop_id WHERE p.id=?`,
+      [id]
+    );
     if (!prod) { conn.release(); return res.status(404).json({ error: 'Not found' }); }
     if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
       conn.release(); return res.status(403).json({ error: 'Forbidden' });
@@ -226,7 +253,10 @@ router.put('/:id/images', authRequired, requireRole('VENDEUR','ADMIN'), async (r
     await conn.commit();
 
     res.json({ ok: true });
-  } catch (e) { await conn.rollback(); res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    next(e);
+  }
   finally { conn.release(); }
 });
 
