@@ -1,4 +1,3 @@
-// src/routes/shops.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
@@ -6,7 +5,6 @@ const { getPagination, buildPageInfo } = require('../utils/pagination');
 
 const router = Router();
 
-// List
 router.get('/', async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
@@ -24,18 +22,14 @@ router.get('/', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// My shops (vendeur/admin)
 router.get('/mine', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
   const pool = getPool();
   try {
-    const [rows] = await pool.query(
-      `SELECT * FROM shops WHERE owner_id=? ORDER BY created_at DESC`, [req.user.id]
-    );
+    const [rows] = await pool.query(`SELECT * FROM shops WHERE owner_id=? ORDER BY created_at DESC`, [req.user.id]);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Create (vendeur/admin)
 router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
   const { name, slug, category_id, address, city, country, lat, lng, logo, cover } = req.body || {};
   if (!name || !slug) return res.status(400).json({ error: 'name & slug required' });
@@ -53,7 +47,6 @@ router.post('/', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Update (owner ou admin)
 router.put('/:id', authRequired, requireRole('VENDEUR','ADMIN'), async (req, res) => {
   const id = Number(req.params.id);
   const { name, slug, category_id, address, city, country, lat, lng, logo, cover } = req.body || {};

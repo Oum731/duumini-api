@@ -1,4 +1,3 @@
-// src/routes/shopCategories.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { getPagination, buildPageInfo } = require('../utils/pagination');
@@ -6,7 +5,6 @@ const { authRequired, requireRole } = require('../middlewares/auth');
 
 const router = Router();
 
-// List
 router.get('/', async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
@@ -20,7 +18,6 @@ router.get('/', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Create (ADMIN only)
 router.post('/', authRequired, requireRole('ADMIN'), async (req, res) => {
   const { name, slug } = req.body || {};
   if (!name || !slug) return res.status(400).json({ error: 'name & slug required' });

@@ -1,4 +1,3 @@
-// src/utils/pagination.js
 function getPagination(req, defaults = { page: 1, pageSize: 20, maxPageSize: 100 }) {
   const page = Math.max(1, Number(req.query.page || defaults.page));
   const pageSize = Math.min(defaults.maxPageSize, Math.max(1, Number(req.query.pageSize || defaults.pageSize)));
