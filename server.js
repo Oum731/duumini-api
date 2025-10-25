@@ -47,6 +47,8 @@ app.use("/api/devices", devices);
 app.use(notFound);
 app.use(errorHandler);
 
+app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
+app.head("/", (_req, res) => res.status(200).end());
 // Socket + Worker
 const server = http.createServer(app);
 const { attachSocket } = require("./src/ws");
@@ -54,4 +56,4 @@ const io = attachSocket(server);
 const { startNotificationWorker } = require("./src/workers/notificationWorker");
 startNotificationWorker(io);
 
-server.listen(env.PORT, () => console.log(`API listening on :${env.PORT}`));
+server.listen(env.PORT, '0.0.0.0', () => console.log(`API listening on :${env.PORT}`));

@@ -7,13 +7,16 @@ function pick(...names) {
 }
 function required(nameArr) {
   const val = Array.isArray(nameArr) ? pick(...nameArr) : process.env[nameArr];
-  if (!val) throw new Error(`Missing env: ${Array.isArray(nameArr) ? nameArr.join("/") : nameArr}`);
+  if (!val)
+    throw new Error(
+      `Missing env: ${Array.isArray(nameArr) ? nameArr.join("/") : nameArr}`
+    );
   return val;
 }
 
 const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
-  PORT: Number(process.env.APP_PORT || process.env.PORT || 4000),
+  PORT: Number(process.env.PORT || process.env.APP_PORT || 4000),
   CORS_ORIGINS: pick("CORS_ORIGINS", "CORS_ORIGIN") || "*",
 
   DB_HOST: required(["DB_HOST", "MYSQL_HOST"]),
@@ -52,7 +55,8 @@ const env = {
 
   APP_PUBLIC_URL: process.env.APP_PUBLIC_URL || "http://localhost:4000",
 
-  LISTENERS_ENABLED: String(process.env.LISTENERS_ENABLED || "true").toLowerCase() === "true",
+  LISTENERS_ENABLED:
+    String(process.env.LISTENERS_ENABLED || "true").toLowerCase() === "true",
   POLL_INTERVAL_MS: Number(process.env.POLL_INTERVAL_MS || 10000),
 };
 
