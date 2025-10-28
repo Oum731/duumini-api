@@ -41,14 +41,11 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 function toPublicUrl(absPath) {
-  // absPath: .../uploads/...
-  // retourne un chemin web relatif /uploads/...
   const idx = absPath.lastIndexOf(path.sep + "uploads" + path.sep);
   if (idx >= 0) {
     const rel = absPath.slice(idx).replace(/\\/g, "/");
     return rel.startsWith("/") ? rel : `/${rel}`;
   }
-  // fallback: fichier hors /uploads
   return null;
 }
 
@@ -101,16 +98,8 @@ async function listHandler(req, res, next) {
   }
 }
 router.get("/", listHandler);
-router.get(
-  "/african-food",
-  (req, _res, next) => { req.query.channel = "african-food"; next(); },
-  listHandler
-);
-router.get(
-  "/african-market",
-  (req, _res, next) => { req.query.channel = "african-market"; next(); },
-  listHandler
-);
+router.get("/african-food", (req, _res, next) => { req.query.channel = "african-food"; next(); }, listHandler);
+router.get("/african-market", (req, _res, next) => { req.query.channel = "african-market"; next(); }, listHandler);
 
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
@@ -130,16 +119,20 @@ router.get("/:id", async (req, res, next) => {
 });
 
 /* ----------------------------- Create (multipart) ----------------------------- */
-// attend FormData: name, price, stock?, currency?, description?, sub_category?, category_id?, images[] (max 3)
+// FormData attendu: name, price, currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'|'other')
+// images[] (max ~ 3/8)
+// Règles:
+// - Si role = VENDEUR → shop_id déduit de req.user (shop du vendeur). Si pas de shop → 400.
+// - Si role = ADMIN    → shop_id peut être fourni dans body; sinon 400 (DB nécessite un shop_id).
 router.post(
   "/",
   authRequired,
   requireRole("VENDEUR", "ADMIN"),
-  upload.array("images[]", 3),
+  upload.array("images[]", 8),
   async (req, res, next) => {
     const {
-      shop_id,             // peut venir via JWT/role vendeur ? sinon exiger côté Admin
-      category_id,
+      shop_id: rawShopId,      // ignoré si vendeur; pris en compte si admin
+      category_id,             // géré backend si besoin; on peut l'ignorer ou l'accepter
       name,
       slug,
       price,
@@ -151,23 +144,32 @@ router.post(
       sub_category,
     } = req.body || {};
 
-    if (!shop_id || !name || price == null) {
-      // Pour un vendeur, shop_id doit être son shop (vérifié dessous)
-      return res.status(400).json({ error: "shop_id, name, price required" });
-    }
-
-    const sub =
-      ["product", "food", "other"].includes(String(sub_category)) ? sub_category : "product";
-
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
-      const [[shop]] = await conn.query(`SELECT owner_id FROM shops WHERE id=?`, [shop_id]);
-      if (!shop) { conn.release(); return res.status(400).json({ error: "Invalid shop_id" }); }
-      if (isVendor(req.user) && String(shop.owner_id) !== String(req.user.id)) {
-        conn.release(); return res.status(403).json({ error: "Forbidden: not your shop" });
+      // Détermination du shop_id selon le rôle
+      let finalShopId = null;
+
+      const role = String(req.user?.role || "").toUpperCase();
+      if (role === "VENDEUR") {
+        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`, [req.user.id]);
+        if (!shop) { conn.release(); return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" }); }
+        finalShopId = Number(shop.id);
+      } else if (role === "ADMIN") {
+        if (!rawShopId) { conn.release(); return res.status(400).json({ error: "shop_id requis pour ADMIN" }); }
+        finalShopId = Number(rawShopId);
+        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=?`, [finalShopId]);
+        if (!shop) { conn.release(); return res.status(400).json({ error: "Invalid shop_id" }); }
+      } else {
+        conn.release(); return res.status(403).json({ error: "Forbidden" });
       }
 
+      if (!name || price == null) {
+        conn.release();
+        return res.status(400).json({ error: "name et price requis" });
+      }
+
+      const sub = ["product", "food", "other"].includes(String(sub_category)) ? sub_category : "product";
       const makeSlug = () =>
         (slug && String(slug).trim())
         || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
@@ -177,8 +179,8 @@ router.post(
         `INSERT INTO products (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category)
          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
-          Number(shop_id),
-          category_id ? Number(category_id) : null,
+          finalShopId,
+          category_id ? Number(category_id) : null, // peut être null si "géré backend" autrement
           name,
           makeSlug(),
           Number(price),
@@ -192,7 +194,7 @@ router.post(
       );
       const productId = r.insertId;
 
-      // Images enregistrées par multer
+      // Images via multer
       const files = Array.isArray(req.files) ? req.files : [];
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
@@ -206,11 +208,11 @@ router.post(
 
       await conn.commit();
 
-      // Temps réel (optionnel)
+      // Notif temps réel (optionnel)
       try {
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
-        if (io && emitToShops) emitToShops([shop_id], "product:created", { product_id: productId });
+        if (io && emitToShops) emitToShops([finalShopId], "product:created", { product_id: productId });
       } catch {}
 
       const channel = sub === "food" ? "african-food" : "african-market";
@@ -228,19 +230,17 @@ router.post(
 );
 
 /* ----------------------------- Update (multipart ou JSON) ----------------------------- */
-// accepte soit multipart (images[] supplémentaires → remplacées via /:id/images si tu veux strict)
-// soit JSON simple pour les champs texte/nombres
 router.put(
   "/:id",
   authRequired,
   requireRole("VENDEUR", "ADMIN"),
-  upload.array("images[]", 3),
+  upload.array("images[]", 8),
   async (req, res, next) => {
     const id = Number(req.params.id);
     const {
       name, price, currency, description, stock,
       is_featured, promo_eligible, sub_category, category_id,
-      replace_images, // "true" pour remplacer la galerie par les files envoyés
+      replace_images,
     } = req.body || {};
 
     const pool = getPool();
@@ -251,6 +251,7 @@ router.put(
         [id]
       );
       if (!prod) { conn.release(); return res.status(404).json({ error: "Not found" }); }
+      // Vendeur ne peut toucher qu'à ses produits
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
         conn.release(); return res.status(403).json({ error: "Forbidden" });
       }
@@ -286,14 +287,12 @@ router.put(
         ]
       );
 
-      // Gestion images si multipart
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
         const doReplace = String(replace_images || "").toLowerCase() === "true";
         if (doReplace) {
           await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
         }
-        // Ajouter en fin
         const [[{ maxOrder }]] = await conn.query(
           `SELECT COALESCE(MAX(sort_order), -1) AS maxOrder FROM product_images WHERE product_id=?`,
           [id]
@@ -309,7 +308,7 @@ router.put(
         }
       }
 
-      // Temps réel (optionnel)
+      // Notifs (optionnel)
       try {
         const { getIO } = require("../ws");
         const io = getIO && getIO();
@@ -322,7 +321,7 @@ router.put(
   }
 );
 
-/* ----------------------------- Replace images (JSON ou multipart) ----------------------------- */
+/* ----------------------------- Replace images ----------------------------- */
 router.put(
   "/:id/images",
   authRequired,
@@ -348,7 +347,6 @@ router.put(
       await conn.beginTransaction();
       await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
 
-      // d’abord celles du body (URLs), puis les files uploadés
       let order = 0;
       for (const url of bodyImages) {
         const u = String(url || "").trim();
@@ -397,7 +395,6 @@ router.delete(
         conn.release(); return res.status(403).json({ error: "Forbidden" });
       }
 
-      // récupérer images pour suppression locale
       const [imgs] = await conn.query(
         `SELECT url FROM product_images WHERE product_id=? ORDER BY sort_order ASC, id ASC`,
         [id]
@@ -408,7 +405,6 @@ router.delete(
       await conn.query(`DELETE FROM products WHERE id=?`, [id]);
       await conn.commit();
 
-      // supprimer fichiers locaux si hébergés chez nous
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
@@ -416,7 +412,6 @@ router.delete(
         fs.promises.unlink(abs).catch(() => {});
       }
 
-      // temps réel (optionnel)
       try {
         const { getIO } = require("../ws");
         const io = getIO && getIO();

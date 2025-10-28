@@ -16,17 +16,17 @@ const users = require("./src/routes/users");
 const shops = require("./src/routes/shops");
 const categories = require("./src/routes/categories");
 const shopCategories = require("./src/routes/shopCategories");
-const products = require("./src/routes/products"); // upload/multipart géré ici
+const products = require("./src/routes/products");
 const orders = require("./src/routes/orders");
 const uploads = require("./src/routes/uploads");
 const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
 
 const app = express();
-app.set("trust proxy", 1); // Render/Proxy
+app.set("trust proxy", 1);
 
 /* =========================
- * CORS
+ * CORS (Express 5 compatible)
  * ========================= */
 const corsOrigins =
   env.CORS_ORIGINS === "*"
@@ -39,34 +39,11 @@ const corsOrigins =
 app.use(
   cors({
     origin(origin, cb) {
-      // true => renvoie l'Origin exact, compatible credentials:true
-      if (corsOrigins === true) return cb(null, true);
-      // autorise requêtes sans origin (ex: Postman, SSR)
-      if (!origin) return cb(null, true);
-      // whitelist stricte
+      if (corsOrigins === true) return cb(null, true);      // autorise tout
+      if (!origin) return cb(null, true);                    // Postman/SSR
       if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) return cb(null, true);
       return cb(new Error("CORS not allowed for origin: " + origin));
     },
-    credentials: true, // mets à true seulement si tu utilises les cookies/sessions
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Accept",
-      "Origin",
-      "X-Requested-With",
-      // "X-Access-Token", // inutile si le front ne l'envoie plus
-    ],
-    exposedHeaders: ["Content-Type", "Content-Length"],
-    maxAge: 86400,
-  })
-);
-
-// Preflight explicite (utile derrière certains proxies/CDN)
-app.options(
-  "*",
-  cors({
-    origin: corsOrigins,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
@@ -75,11 +52,34 @@ app.options(
       "Accept",
       "Origin",
       "X-Requested-With",
-      // "X-Access-Token",
+      "x-access-token",             // ← important pour tes requêtes actuelles
     ],
+    exposedHeaders: ["Content-Type", "Content-Length"],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
     maxAge: 86400,
   })
 );
+
+// ✅ Handler OPTIONS universel (pas de motif "*" qui casse en Express 5)
+app.use((req, res, next) => {
+  if (req.method !== "OPTIONS") return next();
+
+  const origin = req.headers.origin || "";
+  if (corsOrigins === true) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  } else if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Accept, Origin, X-Requested-With, x-access-token"
+  );
+  return res.sendStatus(204);
+});
 
 /* =========================
  * Body parsers & middlewares
@@ -100,9 +100,7 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
  * Healthcheck
  * ========================= */
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, pid: process.pid, uptime: process.uptime() })
-);
+app.get("/api/health", (_req, res) => res.json({ ok: true, pid: process.pid, uptime: process.uptime() }));
 
 /* =========================
  * Root
@@ -114,8 +112,8 @@ app.head("/", (_req, res) => res.status(200).end());
  * API routes
  * ========================= */
 app.use("/api/auth", auth);
-app.use("/api/auth", otpRoutes);
-app.use("/api/user", users); // /api/user/me
+app.use("/api/auth", otpRoutes);       // /api/auth/*
+app.use("/api/user", users);           // /api/user/me
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
@@ -142,6 +140,4 @@ startNotificationWorker(io);
 /* =========================
  * Start
  * ========================= */
-server.listen(env.PORT, "0.0.0.0", () =>
-  console.log(`API listening on :${env.PORT}`)
-);
+server.listen(env.PORT, "0.0.0.0", () => console.log(`API listening on :${env.PORT}`));
