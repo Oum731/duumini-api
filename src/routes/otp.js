@@ -2,7 +2,7 @@
 const { Router } = require("express");
 const bcrypt = require("bcryptjs");
 const { getPool } = require("../lib/db");
-const { sendOtpStart, checkOtpCode } = require("../lib/twilio");
+const { sendOtpStart, checkOtpCode } = require("../services/twilio");
 const router = Router();
 
 const otpVerified = new Map(); // phone -> { purpose, exp }
