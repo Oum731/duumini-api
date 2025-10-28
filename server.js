@@ -1,4 +1,4 @@
-// server.js (ou index.js racine)
+// server.js
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -70,6 +70,7 @@ app.use("/api/products", products);
 app.use("/api/orders", orders);
 app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
+app.use("/api/auth", otpRoutes);
 
 // 404 + Error handler
 app.use(notFound);
