@@ -20,6 +20,7 @@ const products = require("./src/routes/products"); // ← upload/multipart gér�
 const orders = require("./src/routes/orders");
 const uploads = require("./src/routes/uploads");
 const devices = require("./src/routes/devices");
+const otpRoutes = require("./src/routes/otp");
 
 // App
 const app = express();
