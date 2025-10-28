@@ -36,13 +36,21 @@ const corsOrigins =
 
 app.use(
   cors({
-    origin: corsOrigins,
+    origin: corsOrigins,               // true | [list]
     credentials: true,
-    // important pour l'auth Bearer
-    allowedHeaders: ["Content-Type", "Authorization"],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-access-token"],
+    exposedHeaders: ["Content-Type", "Content-Length"],
   })
 );
+// pour certains proxys/CDN
+app.options("*", cors({
+  origin: corsOrigins,
+  credentials: true,
+  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-access-token"],
+}));
+
 
 // Body parsers
 app.use(express.json({ limit: "10mb" }));
