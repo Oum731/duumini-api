@@ -52,7 +52,7 @@ app.use(
       "Accept",
       "Origin",
       "X-Requested-With",
-      "x-access-token",             // ← important pour tes requêtes actuelles
+      "x-access-token", // si jamais tu l'utilises encore côté front (sinon inutile)
     ],
     exposedHeaders: ["Content-Type", "Content-Length"],
     preflightContinue: false,
