@@ -1,43 +1,95 @@
+// src/middlewares/auth.js
 const { verifyAccess } = require("../../utils/jwt");
 
+/** Active (true) uniquement si tu DOIS supporter ?access_token=... */
+const ALLOW_QUERY_TOKEN = false;
+
 function extractToken(req) {
-  const h = String(req.headers.authorization || "");
-  if (/^Bearer\s+/i.test(h)) return h.replace(/^Bearer\s+/i, "").trim();
-  const x = String(req.headers["x-access-token"] || "");
-  if (x) return x.trim();
-  if (req.query?.access_token) return String(req.query.access_token).trim();
+  // 1) Authorization: Bearer <token>
+  const auth = req.headers.authorization;
+  if (typeof auth === "string") {
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (m) return m[1].trim();
+  }
+
+  // 2) x-access-token (fallback header interne)
+  const x = req.headers["x-access-token"];
+  if (typeof x === "string" && x.trim()) return x.trim();
+
+  // 3) (optionnel) query ?access_token=
+  if (ALLOW_QUERY_TOKEN && req.query && req.query.access_token) {
+    return String(req.query.access_token).trim();
+  }
+
   return null;
 }
 
-function attachUser(req) {
+function attachUserOrThrow(req) {
   const token = extractToken(req);
   if (!token) {
-    const err = new Error("Unauthorized");
+    const err = new Error("No token");
     err.status = 401;
     throw err;
   }
-  const p = verifyAccess(token);
-  req.user = { id: p.id, uid: p.uid ?? String(p.id ?? ""), role: p.role || "MEMBER" };
+  let payload;
+  try {
+    payload = verifyAccess(token); // doit throw si invalide/expiré
+  } catch (e) {
+    const err = new Error("Invalid token");
+    err.status = 401;
+    throw err;
+  }
+  // Normalisation user
+  const id = payload.id ?? payload.sub ?? payload.user_id;
+  req.user = {
+    id,
+    uid: payload.uid ?? String(id ?? ""),
+    role: (payload.role || "MEMBER").toString(),
+  };
 }
 
 function authRequired(req, res, next) {
-  try { if (req.method === "OPTIONS") return next(); attachUser(req); next(); }
-  catch (e) { res.status(e.status || 401).json({ error: "Unauthorized" }); }
+  // Toujours laisser passer les preflight CORS
+  if (req.method === "OPTIONS") return next();
+  try {
+    attachUserOrThrow(req);
+    return next();
+  } catch (e) {
+    const status = e?.status || 401;
+    return res.status(status).json({ error: e?.message || "Unauthorized" });
+  }
 }
 
 function optionalAuth(req, _res, next) {
-  try { if (req.method === "OPTIONS") return next(); const t = extractToken(req); if (t) attachUser(req); } finally { next(); }
+  if (req.method === "OPTIONS") return next();
+  try {
+    const token = extractToken(req);
+    if (token) attachUserOrThrow(req);
+  } catch {
+    // silencieux: on n'écrase pas la requête si le token est invalide
+    // le handler en aval décidera s'il faut 401/403
+  } finally {
+    return next();
+  }
 }
 
 function requireRole(...roles) {
-  const allowed = roles.map(r => String(r).toUpperCase());
+  const allowed = roles.map((r) => String(r).toUpperCase());
   return (req, res, next) => {
+    if (req.method === "OPTIONS") return next();
     try {
-      if (!req.user) attachUser(req);
+      if (!req.user) attachUserOrThrow(req); // s'assure qu'on a req.user
       const role = String(req.user?.role || "").toUpperCase();
-      if (allowed.length && !allowed.includes(role)) return res.status(403).json({ error: "Forbidden" });
-      next();
-    } catch { res.status(401).json({ error: "Unauthorized" }); }
+      if (allowed.length && !allowed.includes(role)) {
+        return res
+          .status(403)
+          .json({ error: `Forbidden: requires role ${allowed.join(" or ")}` });
+      }
+      return next();
+    } catch (e) {
+      const status = e?.status || 401;
+      return res.status(status).json({ error: e?.message || "Unauthorized" });
+    }
   };
 }
 

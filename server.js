@@ -16,13 +16,12 @@ const users = require("./src/routes/users");
 const shops = require("./src/routes/shops");
 const categories = require("./src/routes/categories");
 const shopCategories = require("./src/routes/shopCategories");
-const products = require("./src/routes/products"); // ← upload/multipart géré dans ce fichier
+const products = require("./src/routes/products"); // upload/multipart géré ici
 const orders = require("./src/routes/orders");
 const uploads = require("./src/routes/uploads");
 const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
 
-// App
 const app = express();
 app.set("trust proxy", 1); // Render/Proxy
 
@@ -39,6 +38,9 @@ app.use(
   cors({
     origin: corsOrigins,
     credentials: true,
+    // important pour l'auth Bearer
+    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
 
@@ -48,22 +50,27 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
 app.use(morgan("dev"));
 
-// Static media (si tu utilises /media ailleurs)
+// Static media
 app.use("/media", express.static("media"));
 
-// Static uploads pour les images produits (aligne avec routes/products.js)
+// Static uploads produits
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 
 // Health
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, pid: process.pid, uptime: process.uptime() });
-});
+app.get("/api/health", (_req, res) =>
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime() })
+);
+
+// Root
+app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
+app.head("/", (_req, res) => res.status(200).end());
 
 // API routes
 app.use("/api/auth", auth);
-app.use("/api/users", users);
+app.use("/api/auth", otpRoutes);          // même préfixe OK
+app.use("/api/user", users);              // 🔴 singulier: /api/user/me
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
@@ -71,15 +78,10 @@ app.use("/api/products", products);
 app.use("/api/orders", orders);
 app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
-app.use("/api/auth", otpRoutes);
 
-// 404 + Error handler
+// 404 + Error handler (toujours APRÈS les routes)
 app.use(notFound);
 app.use(errorHandler);
-
-// Root
-app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
-app.head("/", (_req, res) => res.status(200).end());
 
 // Socket + Worker
 const server = http.createServer(app);
