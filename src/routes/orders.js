@@ -10,6 +10,34 @@ const router = Router();
  * =======================*/
 
 /**
+ * Normalise l'objet adresse reçu du front en un objet stockable (JSON).
+ * input: { ville, commune, quartier|null, gps:{lat,lng}|null }
+ */
+function buildAddressObj(input = {}) {
+  const ville = input?.ville ?? null;
+  const commune = input?.commune ?? null;
+  const quartier = input?.quartier ?? null;
+  const gps = input?.gps && typeof input.gps === 'object'
+    ? { lat: Number(input.gps.lat), lng: Number(input.gps.lng) }
+    : null;
+
+  return {
+    city: ville,
+    commune,
+    district: quartier,
+    gps,
+  };
+}
+
+/**
+ * Construit un lien Google Maps à partir d'un gps {lat,lng}
+ */
+function buildGeoLink(gps) {
+  if (!gps || typeof gps.lat !== 'number' || typeof gps.lng !== 'number') return null;
+  return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
+}
+
+/**
  * Charge une commande + vérifie les permissions en fonction de req.user.
  * Règles:
  * - ADMIN: accès total
@@ -70,7 +98,12 @@ router.get('/', authRequired, async (req, res) => {
         `SELECT * FROM orders ORDER BY created_at DESC LIMIT ? OFFSET ?`,
         [limit, offset]
       );
-      return res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+      // Parse address JSON si nécessaire
+      const items = rows.map(r => ({
+        ...r,
+        address: safeParseJSON(r.address),
+      }));
+      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     } else {
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders WHERE user_id=?`,
@@ -80,17 +113,43 @@ router.get('/', authRequired, async (req, res) => {
         `SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
         [req.user.id, limit, offset]
       );
-      return res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+      const items = rows.map(r => ({
+        ...r,
+        address: safeParseJSON(r.address),
+      }));
+      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+/* petite utilitaire de parse JSON sans throw */
+function safeParseJSON(maybe) {
+  if (!maybe) return null;
+  if (typeof maybe === 'object') return maybe;
+  try { return JSON.parse(maybe); } catch { return maybe; }
+}
+
 /* =========================
  * Create order
- * Body: { address?, geo_link?, items: [{product_id, qty}] }
+ * Accepte le payload du Checkout:
+ * {
+ *   contact:{first_name,last_name,phone},
+ *   address:{ville,commune,quartier|null,gps:{lat,lng}|null},
+ *   delivery:{mode:"EXPRESS"|"SIMPLE", fee:number, currency:"MAD"},
+ *   items:[{product_id, qty, name?, price?}],
+ *   totals:{items_count, items_amount, delivery_fee, amount, currency:"MAD"},
+ *   (champs à plat optionnels ignorés pour l'insert direct)
+ * }
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
-  const { address, geo_link, items = [] } = req.body || {};
+  const {
+    contact = {},
+    address = {},
+    delivery = {},
+    items = [],
+    totals = {},
+  } = req.body || {};
+
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'items[] required' });
   }
@@ -101,11 +160,17 @@ router.post('/', authRequired, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    let total = 0;
+    // 1) Normaliser adresse et geo_link
+    const addressObj = buildAddressObj(address);
+    const geoLink = buildGeoLink(addressObj.gps);
+
+    // 2) Recalcule total articles côté serveur (ignore price du front)
+    let itemsAmount = 0;
     const cleanItems = [];
 
     for (const it of items) {
-      const { product_id, qty } = it || {};
+      const product_id = Number(it?.product_id);
+      const qty = Number(it?.qty);
       if (!product_id || !qty) throw new Error('product_id & qty required');
 
       const [[p]] = await conn.query(
@@ -114,17 +179,32 @@ router.post('/', authRequired, async (req, res) => {
       );
       if (!p) throw new Error('Product not found: ' + product_id);
 
-      cleanItems.push({ product_id: p.id, qty: Number(qty), unit_price: Number(p.price) });
-      total += Number(p.price) * Number(qty);
+      const unit_price = Number(p.price);
+      cleanItems.push({ product_id: p.id, qty, unit_price });
+      itemsAmount += unit_price * qty;
     }
 
+    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
+    const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
+    const orderTotal = itemsAmount + deliveryFee;
+
+    // 3) INSERT order — n’insère que les colonnes existantes
     const [r] = await conn.query(
-      `INSERT INTO orders (user_id, address, geo_link, total, currency, status)
-       VALUES (?,?,?,?, 'MAD', 'OPEN')`,
-      [req.user.id, address || null, geo_link || null, total]
+      `
+      INSERT INTO orders (user_id, status, address, geo_link, total, currency, created_at, updated_at)
+      VALUES (?, 'OPEN', ?, ?, ?, ?, NOW(), NOW())
+      `,
+      [
+        req.user.id,
+        JSON.stringify(addressObj), // JSON ou TEXT
+        geoLink,
+        orderTotal,
+        currency,
+      ]
     );
     const orderId = r.insertId;
 
+    // 4) INSERT order_items (snapshots des prix)
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -135,13 +215,13 @@ router.post('/', authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // Temps réel : informer l’acheteur
+    // 5) Notification temps réel
     try {
       const { notifyUser } = require('../services/notify');
-      await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total });
+      await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
     } catch {}
 
-    res.status(201).json({ id: orderId, total });
+    res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
   } catch (e) {
     try { await conn.rollback(); } catch {}
     res.status(500).json({ error: e.message });
@@ -161,13 +241,17 @@ router.get('/:id', authRequired, async (req, res) => {
     const result = await getOrderWithPerm(conn, id, req.user);
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
-    // Normaliser l'adresse si stockée en JSON string ailleurs
     let o = result.order;
-    if (o.shipping_address && typeof o.shipping_address === 'string') {
-      try { o.shipping_address = JSON.parse(o.shipping_address); } catch {}
-    }
+    // Parse l'adresse stockée
+    const addr = safeParseJSON(o.address);
 
-    res.json({ ...o, items: result.items });
+    res.json({
+      ...o,
+      address: addr,
+      items: result.items,
+      // Optionnel: shortcut vers un lien maps
+      geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { conn.release(); }
 });
@@ -207,7 +291,7 @@ router.put('/:id/status', authRequired, async (req, res) => {
       }
     }
 
-    await pool.query(`UPDATE orders SET status=? WHERE id=?`, [status, id]);
+    await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [status, id]);
 
     // Push temps réel à l’acheteur
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
@@ -235,13 +319,12 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
     const order = result.order;
-    // On empêche l'annulation si DONE/CANCELLED (sauf admin)
     const blocked = ['DONE', 'CANCELLED'].includes(order.status || '');
     if (blocked && !isAdmin(req.user)) {
       return res.status(409).json({ error: 'Cannot cancel at this stage' });
     }
 
-    await conn.query(`UPDATE orders SET status='CANCELLED' WHERE id=?`, [id]);
+    await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
 
     // Notif acheteur
     try {
