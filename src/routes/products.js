@@ -59,28 +59,24 @@ ensureDirSync(UPLOAD_DIR);
 const upload = multer({ storage: multer.memoryStorage() });
 
 /* ----------------------------- Helpers ----------------------------- */
-function normalizeChannel(channel) {
-  const c = String(channel || "").toLowerCase();
-  if (c === "african-food") return "african-food";
-  if (c === "african-market") return "african-market";
-  return null;
-}
 
 async function listProducts(pool, { limit, offset, channel }) {
-  // Normalisation côté SQL pour tolérer 'Food', ' food ', '', NULL, etc.
+  // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
   const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
 
   let where = "1=1";
   if (channel === "african-food") {
-    // Uniquement FOOD strict
+    // Uniquement FOOD (normalisé)
     where = `${norm} = 'food'`;
   } else if (channel === "african-market") {
-    // Tout ce qui n'est PAS 'food' : 'product', NULL, vide, legacy
+    // Tout ce qui n'est PAS 'food' : 'product', NULL, vide, legacy…
     where = `${norm} <> 'food'`;
   }
 
   const [[{ total }]] = await pool.query(
-    `SELECT COUNT(*) AS total FROM products p WHERE ${where}`
+    `SELECT COUNT(*) AS total
+       FROM products p
+      WHERE ${where}`
   );
 
   const [rows] = await pool.query(
@@ -101,34 +97,46 @@ async function listProducts(pool, { limit, offset, channel }) {
 }
 
 /* ----------------------------- Listing ----------------------------- */
+// Handler générique (sans canal)
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
-  const channel = normalizeChannel(req.query.channel);
   const pool = getPool();
   try {
-    const { rows, total } = await listProducts(pool, { limit, offset, channel });
+    const { rows, total } = await listProducts(pool, { limit, offset, channel: null });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
   }
 }
+
+// Handler spécifique FOOD
+async function listFoodHandler(req, res, next) {
+  const { page, pageSize, offset, limit } = getPagination(req);
+  const pool = getPool();
+  try {
+    const { rows, total } = await listProducts(pool, { limit, offset, channel: "african-food" });
+    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// Handler spécifique MARKET (non-food)
+async function listMarketHandler(req, res, next) {
+  const { page, pageSize, offset, limit } = getPagination(req);
+  const pool = getPool();
+  try {
+    const { rows, total } = await listProducts(pool, { limit, offset, channel: "african-market" });
+    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// Routes
 router.get("/", listHandler);
-router.get(
-  "/african-food",
-  (req, _res, next) => {
-    req.query.channel = "african-food";
-    next();
-  },
-  listHandler
-);
-router.get(
-  "/african-market",
-  (req, _res, next) => {
-    req.query.channel = "african-market";
-    next();
-  },
-  listHandler
-);
+router.get("/african-food", listFoodHandler);
+router.get("/african-market", listMarketHandler);
 
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
@@ -200,8 +208,7 @@ router.post(
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
-        // ADMIN: pas de système boutique → NULL
-        finalShopId = null;
+        finalShopId = null; // ADMIN: pas de système boutique
       } else {
         conn.release();
         return res.status(403).json({ error: "Forbidden" });
@@ -324,7 +331,7 @@ router.put(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      // Normaliser sub_category: n’appliquer que si valeur valide, sinon ne pas modifier
+      // Normaliser sub_category: appliquer uniquement si valeur valide
       const rawSub = sub_category != null ? String(sub_category).trim().toLowerCase() : null;
       const sub = rawSub === "food" || rawSub === "product" ? rawSub : null;
 
