@@ -2,7 +2,6 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const crypto = require("crypto");
 const multer = require("multer");
 
 const { getPool } = require("../lib/db");
@@ -69,27 +68,33 @@ function normalizeChannel(channel) {
 
 async function listProducts(pool, { limit, offset, channel }) {
   let where = "1=1";
-  const params = [];
 
   if (channel === "african-food") {
+    // Uniquement les produits food
     where = "p.sub_category = 'food'";
   } else if (channel === "african-market") {
-    where = "(p.sub_category IS NULL OR p.sub_category <> 'food')";
+    // Tout le reste: product ou NULL (non-food)
+    where = "(p.sub_category = 'product' OR p.sub_category IS NULL)";
   }
 
   const [[{ total }]] = await pool.query(
-    `SELECT COUNT(*) total FROM products p WHERE ${where}`,
-    params
+    `SELECT COUNT(*) AS total
+       FROM products p
+      WHERE ${where}`
   );
 
   const [rows] = await pool.query(
     `SELECT p.*,
-            (SELECT url FROM product_images pi WHERE pi.product_id=p.id ORDER BY sort_order ASC, id ASC LIMIT 1) AS cover
-     FROM products p
-     WHERE ${where}
-     ORDER BY p.created_at DESC
-     LIMIT ? OFFSET ?`,
-    [...params, limit, offset]
+            (SELECT url
+               FROM product_images pi
+              WHERE pi.product_id = p.id
+              ORDER BY sort_order ASC, id ASC
+              LIMIT 1) AS cover
+       FROM products p
+      WHERE ${where}
+      ORDER BY p.created_at DESC
+      LIMIT ? OFFSET ?`,
+    [Number(limit), Number(offset)]
   );
 
   return { rows, total };
@@ -135,7 +140,10 @@ router.get("/:id", async (req, res, next) => {
     if (!product) return res.status(404).json({ error: "Not found" });
 
     const [images] = await pool.query(
-      `SELECT id, url, sort_order FROM product_images WHERE product_id=? ORDER BY sort_order ASC, id ASC`,
+      `SELECT id, url, sort_order
+         FROM product_images
+        WHERE product_id=?
+        ORDER BY sort_order ASC, id ASC`,
       [id]
     );
     res.json({ ...product, images });
@@ -148,7 +156,7 @@ router.get("/:id", async (req, res, next) => {
 /**
  * FormData attendu:
  *  - name, price
- *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'|'other')
+ *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food')
  *  - images[] (max 8)
  *
  * Règles:
@@ -204,8 +212,9 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      const sub =
-        ["product", "food", "other"].includes(String(sub_category)) ? sub_category : "product";
+      // Normaliser sub_category: 'food' | 'product' (par défaut 'product')
+      const rawSub = String(sub_category || "").trim().toLowerCase();
+      const sub = rawSub === "food" || rawSub === "product" ? rawSub : "product";
 
       const makeSlug = () =>
         (slug && String(slug).trim()) ||
@@ -315,10 +324,9 @@ router.put(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const sub =
-        sub_category && ["product", "food", "other"].includes(String(sub_category))
-          ? sub_category
-          : null;
+      // Normaliser sub_category: n’appliquer que si valeur valide, sinon ne pas modifier
+      const rawSub = sub_category != null ? String(sub_category).trim().toLowerCase() : null;
+      const sub = rawSub === "food" || rawSub === "product" ? rawSub : null;
 
       await conn.query(
         `UPDATE products SET
