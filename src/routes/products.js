@@ -67,20 +67,20 @@ function normalizeChannel(channel) {
 }
 
 async function listProducts(pool, { limit, offset, channel }) {
-  let where = "1=1";
+  // Normalisation côté SQL pour tolérer 'Food', ' food ', '', NULL, etc.
+  const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
 
+  let where = "1=1";
   if (channel === "african-food") {
-    // Uniquement les produits food
-    where = "p.sub_category = 'food'";
+    // Uniquement FOOD strict
+    where = `${norm} = 'food'`;
   } else if (channel === "african-market") {
-    // Tout le reste: product ou NULL (non-food)
-    where = "(p.sub_category = 'product' OR p.sub_category IS NULL)";
+    // Tout ce qui n'est PAS 'food' : 'product', NULL, vide, legacy
+    where = `${norm} <> 'food'`;
   }
 
   const [[{ total }]] = await pool.query(
-    `SELECT COUNT(*) AS total
-       FROM products p
-      WHERE ${where}`
+    `SELECT COUNT(*) AS total FROM products p WHERE ${where}`
   );
 
   const [rows] = await pool.query(
