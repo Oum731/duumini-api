@@ -1,4 +1,3 @@
-// src/routes/orders.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
@@ -30,14 +29,9 @@ function buildAddressObj(input = {}) {
   };
 }
 
-/** Parse JSON sans throw */
-function safeParseJSON(maybe) {
-  if (!maybe) return null;
-  if (typeof maybe === 'object') return maybe;
-  try { return JSON.parse(maybe); } catch { return maybe; }
-}
-
-/** Lien Google Maps à partir d'un gps {lat,lng} */
+/**
+ * Construit un lien Google Maps à partir d'un gps {lat,lng}
+ */
 function buildGeoLink(gps) {
   if (!gps || typeof gps.lat !== 'number' || typeof gps.lng !== 'number') return null;
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
@@ -49,7 +43,8 @@ function buildGeoLink(gps) {
  * - ADMIN: accès total
  * - VENDEUR: doit être propriétaire d'au moins un shop lié à la commande
  * - CLIENT: doit être l'acheteur (orders.user_id)
- * Retour: { status: 200, order, items }  ou  { status, error }
+ * Retour:
+ *   { status: 200, order, items }  ou  { status, error }
  */
 async function getOrderWithPerm(conn, id, user) {
   const [[order]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
@@ -76,23 +71,12 @@ async function getOrderWithPerm(conn, id, user) {
     }
   }
 
-  // 🔥 Items avec nom + image (cover ou 1ʳᵉ image de product_images)
   const [items] = await conn.query(
     `
-    SELECT
-      oi.*,
-      p.name AS product_name,
-      p.cover AS product_cover,
-      (
-        SELECT pi.url
-        FROM product_images pi
-        WHERE pi.product_id = p.id
-        ORDER BY pi.sort_order ASC, pi.id ASC
-        LIMIT 1
-      ) AS image_url
+    SELECT oi.*, p.name AS product_name
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
-    WHERE oi.order_id = ?
+    WHERE oi.order_id=?
     ORDER BY oi.id ASC
     `,
     [id]
@@ -138,6 +122,13 @@ router.get('/', authRequired, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+/* petite utilitaire de parse JSON sans throw */
+function safeParseJSON(maybe) {
+  if (!maybe) return null;
+  if (typeof maybe === 'object') return maybe;
+  try { return JSON.parse(maybe); } catch { return maybe; }
+}
+
 /* =========================
  * Create order
  * Accepte le payload du Checkout:
@@ -147,7 +138,7 @@ router.get('/', authRequired, async (req, res) => {
  *   delivery:{mode:"EXPRESS"|"SIMPLE", fee:number, currency:"MAD"},
  *   items:[{product_id, qty, name?, price?}],
  *   totals:{items_count, items_amount, delivery_fee, amount, currency:"MAD"},
- *   (champs à plat optionnels ignorés)
+ *   (champs à plat optionnels ignorés pour l'insert direct)
  * }
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
@@ -197,7 +188,7 @@ router.post('/', authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 3) INSERT order — on n’insère que les colonnes existantes
+    // 3) INSERT order — n’insère que les colonnes existantes
     const [r] = await conn.query(
       `
       INSERT INTO orders (user_id, status, address, geo_link, total, currency, created_at, updated_at)
@@ -205,7 +196,7 @@ router.post('/', authRequired, async (req, res) => {
       `,
       [
         req.user.id,
-        JSON.stringify(addressObj), // JSON/TEXT
+        JSON.stringify(addressObj), // JSON ou TEXT
         geoLink,
         orderTotal,
         currency,
@@ -213,7 +204,7 @@ router.post('/', authRequired, async (req, res) => {
     );
     const orderId = r.insertId;
 
-    // 4) INSERT order_items (snapshot des prix)
+    // 4) INSERT order_items (snapshots des prix)
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -241,7 +232,6 @@ router.post('/', authRequired, async (req, res) => {
 
 /* =========================
  * Get one order (detail + items) avec permissions
- * -> renvoie aussi items_amount & delivery_fee calculés côté serveur
  * =======================*/
 router.get('/:id', authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -252,27 +242,14 @@ router.get('/:id', authRequired, async (req, res) => {
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
     let o = result.order;
+    // Parse l'adresse stockée
     const addr = safeParseJSON(o.address);
-
-    // calcule sous-total articles
-    const items = result.items || [];
-    const itemsAmount = items.reduce(
-      (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0
-    );
-    const total = Number(o.total || 0);
-    const deliveryFee = Math.max(0, total - itemsAmount);
 
     res.json({
       ...o,
       address: addr,
-      items,
-      totals: {
-        items_amount: itemsAmount,
-        delivery_fee: deliveryFee,
-        amount: total,
-        currency: (o.currency || 'MAD').toUpperCase(),
-      },
+      items: result.items,
+      // Optionnel: shortcut vers un lien maps
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
