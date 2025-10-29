@@ -9,45 +9,55 @@ const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { authRequired, requireRole, isVendor } = require("../middlewares/auth");
 
+// --- Cloudinary ---
+const cloudinary = require("cloudinary").v2;
+const { env } = require("../lib/env");
+
+cloudinary.config({
+  cloud_name: env.CLOUDINARY_CLOUD_NAME,
+  api_key: env.CLOUDINARY_API_KEY,
+  api_secret: env.CLOUDINARY_API_SECRET,
+});
+
+// Upload buffer -> Cloudinary (stream)
+function uploadBufferToCloudinary(buffer, filename) {
+  return new Promise((resolve, reject) => {
+    const now = new Date();
+    const folder = `products/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+    const upload = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        public_id: filename ? filename.replace(/\.[^.]+$/, "") : undefined,
+        resource_type: "image",
+        overwrite: false,
+        invalidate: false,
+      },
+      (err, res) => {
+        if (err) return reject(err);
+        resolve(res);
+      }
+    );
+
+    upload.end(buffer);
+  });
+}
+
 const router = express.Router();
 
 /* =========================
- * Upload local (multipart)
+ * Upload (Cloudinary via mémoire)
  * ========================= */
+
+// On garde ces constantes pour compat, même si on ne sert plus de local
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(UPLOAD_DIR);
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const now = new Date();
-    const dest = path.join(
-      UPLOAD_DIR,
-      "products",
-      String(now.getFullYear()),
-      String(now.getMonth() + 1).padStart(2, "0")
-    );
-    ensureDirSync(dest);
-    cb(null, dest);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const name = crypto.randomBytes(8).toString("hex");
-    cb(null, `${Date.now()}-${name}${ext || ".jpg"}`);
-  },
-});
-const upload = multer({ storage });
-
-function toPublicUrl(absPath) {
-  const idx = absPath.lastIndexOf(path.sep + "uploads" + path.sep);
-  if (idx >= 0) {
-    const rel = absPath.slice(idx).replace(/\\/g, "/");
-    return rel.startsWith("/") ? rel : `/${rel}`;
-  }
-  return null;
-}
+// ⚠️ On passe en mémoire : les fichiers ne sont plus écrits sur disque
+const upload = multer({ storage: multer.memoryStorage() });
 
 /* ----------------------------- Helpers ----------------------------- */
 function normalizeChannel(channel) {
@@ -222,11 +232,13 @@ router.post(
       );
       const productId = r.insertId;
 
-      // Images via multer
+      // Images -> Cloudinary
       const files = Array.isArray(req.files) ? req.files : [];
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
-        const webUrl = toPublicUrl(f.path);
+        if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
           `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
@@ -334,7 +346,7 @@ router.put(
         ]
       );
 
-      // Images
+      // Images -> Cloudinary
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
         const doReplace = String(replace_images || "").toLowerCase() === "true";
@@ -347,7 +359,10 @@ router.put(
         );
         let start = (maxOrder ?? -1) + 1;
         for (let i = 0; i < files.length; i++) {
-          const webUrl = toPublicUrl(files[i].path);
+          const f = files[i];
+          if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
+          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+          const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
             `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
@@ -408,6 +423,7 @@ router.put(
       await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
 
       let order = 0;
+      // URLs passées dans le body (Cloudinary direct)
       for (const url of bodyImages) {
         const u = String(url || "").trim();
         if (!u) continue;
@@ -416,8 +432,12 @@ router.put(
           [id, u, order++]
         );
       }
+      // Fichiers -> Cloudinary
       for (let i = 0; i < files.length; i++) {
-        const webUrl = toPublicUrl(files[i].path);
+        const f = files[i];
+        if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
           `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
@@ -474,7 +494,7 @@ router.delete(
       await conn.query(`DELETE FROM products WHERE id=?`, [id]);
       await conn.commit();
 
-      // supprime fichiers locaux si stockés chez nous
+      // Nettoyage local (inutile si Cloudinary, inoffensif sinon)
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
