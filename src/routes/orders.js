@@ -1,3 +1,4 @@
+// routes/orders.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
@@ -9,8 +10,14 @@ const router = Router();
  * Helpers
  * =======================*/
 
-/**
- * Normalise l'objet adresse reçu du front en un objet stockable (JSON).
+/** Parse JSON sans throw */
+function safeParseJSON(maybe) {
+  if (!maybe) return null;
+  if (typeof maybe === 'object') return maybe;
+  try { return JSON.parse(maybe); } catch { return null; }
+}
+
+/** Normalise l'objet adresse reçu du front en un objet stockable (JSON).
  * input: { ville, commune, quartier|null, gps:{lat,lng}|null }
  */
 function buildAddressObj(input = {}) {
@@ -29,12 +36,30 @@ function buildAddressObj(input = {}) {
   };
 }
 
-/**
- * Construit un lien Google Maps à partir d'un gps {lat,lng}
- */
+/** Construit un lien Google Maps à partir d'un gps {lat,lng} */
 function buildGeoLink(gps) {
   if (!gps || typeof gps.lat !== 'number' || typeof gps.lng !== 'number') return null;
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
+}
+
+/** Normalisation téléphone (+212...) */
+function normPhone(p) {
+  const raw = String(p || '').replace(/\s+/g, '');
+  if (!raw) return null;
+  if (raw.startsWith('+')) return raw;
+  if (raw.startsWith('00')) return '+' + raw.slice(2);
+  if (/^0\d{9,}$/.test(raw)) return '+212' + raw.slice(1);
+  return raw;
+}
+
+/** Construit un objet contact à partir d'un user row */
+function buildContactFromUser(u) {
+  if (!u) return { first_name: null, last_name: null, phone: null };
+  return {
+    first_name: u.first_name || null,
+    last_name: u.last_name || null,
+    phone: normPhone(u.phone) || null,
+  };
 }
 
 /**
@@ -87,6 +112,7 @@ async function getOrderWithPerm(conn, id, user) {
 
 /* =========================
  * List (admin : tout / client : ses commandes)
+ * → ajoute toujours un champ contact (fallback users)
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -95,14 +121,32 @@ router.get('/', authRequired, async (req, res) => {
     if (isAdmin(req.user)) {
       const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders`);
       const [rows] = await pool.query(
-        `SELECT * FROM orders ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `
+        SELECT o.*, u.first_name AS u_first, u.last_name AS u_last, u.phone AS u_phone
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
+        ORDER BY o.created_at DESC
+        LIMIT ? OFFSET ?
+        `,
         [limit, offset]
       );
-      // Parse address JSON si nécessaire
-      const items = rows.map(r => ({
-        ...r,
-        address: safeParseJSON(r.address),
-      }));
+
+      const items = rows.map(r => {
+        const address = safeParseJSON(r.address);
+        // Si un jour tu ajoutes o.contact JSON, tu peux le parser ici:
+        const contactFromOrder = safeParseJSON(r.contact); // souvent null/absent
+        const contact =
+          (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+            ? contactFromOrder
+            : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+
+        return {
+          ...r,
+          address,
+          contact,
+        };
+      });
+
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     } else {
       const [[{ total }]] = await pool.query(
@@ -110,40 +154,45 @@ router.get('/', authRequired, async (req, res) => {
         [req.user.id]
       );
       const [rows] = await pool.query(
-        `SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `
+        SELECT o.*, u.first_name AS u_first, u.last_name AS u_last, u.phone AS u_phone
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
+        WHERE o.user_id=?
+        ORDER BY o.created_at DESC
+        LIMIT ? OFFSET ?
+        `,
         [req.user.id, limit, offset]
       );
-      const items = rows.map(r => ({
-        ...r,
-        address: safeParseJSON(r.address),
-      }));
+
+      const items = rows.map(r => {
+        const address = safeParseJSON(r.address);
+        const contactFromOrder = safeParseJSON(r.contact);
+        const contact =
+          (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+            ? contactFromOrder
+            : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+
+        return {
+          ...r,
+          address,
+          contact,
+        };
+      });
+
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* petite utilitaire de parse JSON sans throw */
-function safeParseJSON(maybe) {
-  if (!maybe) return null;
-  if (typeof maybe === 'object') return maybe;
-  try { return JSON.parse(maybe); } catch { return maybe; }
-}
-
 /* =========================
  * Create order
- * Accepte le payload du Checkout:
- * {
- *   contact:{first_name,last_name,phone},
- *   address:{ville,commune,quartier|null,gps:{lat,lng}|null},
- *   delivery:{mode:"EXPRESS"|"SIMPLE", fee:number, currency:"MAD"},
- *   items:[{product_id, qty, name?, price?}],
- *   totals:{items_count, items_amount, delivery_fee, amount, currency:"MAD"},
- *   (champs à plat optionnels ignorés pour l'insert direct)
- * }
+ * Accepte le payload du Checkout (contact/address/delivery/items/totals/payment).
+ * ⚠️ Aucun changement de schéma requis. On ne stocke pas contact (fallback users en lecture).
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
   const {
-    contact = {},
+    // contact ignoré au stockage (fallback users)
     address = {},
     delivery = {},
     items = [],
@@ -188,7 +237,7 @@ router.post('/', authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 3) INSERT order — n’insère que les colonnes existantes
+    // 3) INSERT order — uniquement colonnes existantes
     const [r] = await conn.query(
       `
       INSERT INTO orders (user_id, status, address, geo_link, total, currency, created_at, updated_at)
@@ -196,7 +245,7 @@ router.post('/', authRequired, async (req, res) => {
       `,
       [
         req.user.id,
-        JSON.stringify(addressObj), // JSON ou TEXT
+        JSON.stringify(addressObj), // JSON/TEXT
         geoLink,
         orderTotal,
         currency,
@@ -215,7 +264,7 @@ router.post('/', authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // 5) Notification temps réel
+    // 5) Notification temps réel (best effort)
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
@@ -232,6 +281,7 @@ router.post('/', authRequired, async (req, res) => {
 
 /* =========================
  * Get one order (detail + items) avec permissions
+ * → ajoute toujours un champ contact (fallback users)
  * =======================*/
 router.get('/:id', authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -241,15 +291,25 @@ router.get('/:id', authRequired, async (req, res) => {
     const result = await getOrderWithPerm(conn, id, req.user);
     if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
-    let o = result.order;
-    // Parse l'adresse stockée
+    const o = result.order;
     const addr = safeParseJSON(o.address);
+
+    // Charger user pour fallback contact
+    const [[u]] = await conn.query(
+      'SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1',
+      [o.user_id]
+    );
+    const contactFromOrder = safeParseJSON(o.contact); // si jamais tu l’as un jour
+    const contact =
+      (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+        ? contactFromOrder
+        : buildContactFromUser(u);
 
     res.json({
       ...o,
+      contact,                // <<<<<< IMPORTANT
       address: addr,
       items: result.items,
-      // Optionnel: shortcut vers un lien maps
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
