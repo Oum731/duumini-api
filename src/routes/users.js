@@ -1,7 +1,7 @@
 // users.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
-const { authRequired } = require('../middlewares/auth');
+const { authRequired, requireRole } = require('../middlewares/auth');
 const bcrypt = require('bcryptjs');
 
 const router = Router();
@@ -99,7 +99,7 @@ router.put('/me', authRequired, async (req, res) => {
  * GET /api/user?page=&pageSize=&q=
  * Liste paginée des utilisateurs (recherche phone/nom/role)
  */
-router.get('/', authRequired, adminRequired, async (req, res) => {
+router.get('/', authRequired, requireRole('ADMIN'), async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page || '1', 10));
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '20', 10)));
   const q = (req.query.q || '').toString().trim();
