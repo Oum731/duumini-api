@@ -1,4 +1,4 @@
-// src/middlewares/auth.js
+// src/middlewares/auth/index.js
 const { verifyAccess } = require("../../utils/jwt");
 
 /** Active (true) uniquement si tu DOIS supporter ?access_token=... */
@@ -97,3 +97,4 @@ const isAdmin  = (u) => String(u?.role).toUpperCase() === "ADMIN";
 const isVendor = (u) => String(u?.role).toUpperCase() === "VENDEUR";
 
 module.exports = { authRequired, optionalAuth, requireRole, isAdmin, isVendor };
+module.exports = require('./auth');
