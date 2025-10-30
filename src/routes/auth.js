@@ -1,3 +1,4 @@
+// api/auth.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const bcrypt = require('bcryptjs');
@@ -7,14 +8,11 @@ const router = Router();
 
 /**
  * POST /api/auth/register
- * Crée un compte MEMBER par défaut.
- * Champs acceptés: phone*, password*, first_name?, last_name?, avatar?, ville?, commune?, quartier?, sexe? ('M'|'F')
  */
 router.post('/register', async (req, res) => {
   const { phone, password, first_name, last_name, avatar, ville, commune, quartier, sexe } = req.body || {};
   if (!phone || !password) return res.status(400).json({ error: 'phone & password required' });
 
-  // Normalisation sexe (uniquement M / F)
   const _sexe = ['M','F'].includes(sexe) ? sexe : null;
 
   const pool = getPool();
@@ -30,7 +28,7 @@ router.post('/register', async (req, res) => {
       [
         String(phone).trim(),
         hash,
-        'MEMBER', // 🔒 forcer MEMBER
+        'MEMBER',
         first_name || null,
         last_name || null,
         avatar || null,
@@ -52,7 +50,6 @@ router.post('/register', async (req, res) => {
 
 /**
  * POST /api/auth/login
- * Renvoie access_token, refresh_token et user complet.
  */
 router.post('/login', async (req, res) => {
   const { phone, password } = req.body || {};
@@ -97,13 +94,25 @@ router.post('/login', async (req, res) => {
 
 /**
  * POST /api/auth/refresh
+ * ⚠️ Reprend le rôle ACTUEL en base avant de signer un nouveau access_token.
  */
 router.post('/refresh', async (req, res) => {
   const { refresh_token } = req.body || {};
   if (!refresh_token) return res.status(400).json({ error: 'refresh_token required' });
+
   try {
-    const p = verifyRefresh(refresh_token);
-    const access_token = signAccess({ id: p.id, role: p.role });
+    const payload = verifyRefresh(refresh_token); // { id, role } (role potentiellement obsolète)
+    const pool = getPool();
+
+    // 🔎 Relire le rôle courant en base
+    const [rows] = await pool.query(
+      `SELECT id, role FROM users WHERE id=? LIMIT 1`,
+      [payload.id]
+    );
+    const dbUser = rows && rows[0];
+    if (!dbUser) return res.status(401).json({ error: 'invalid refresh_token' });
+
+    const access_token = signAccess({ id: dbUser.id, role: dbUser.role });
     return res.json({ access_token });
   } catch {
     return res.status(401).json({ error: 'invalid refresh_token' });
@@ -112,7 +121,6 @@ router.post('/refresh', async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * Stateless
  */
 router.post('/logout', (_req, res) => res.json({ ok: true }));
 
