@@ -1,7 +1,7 @@
 // users.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
-const { authRequired } = require('../middlewares');
+const { authRequired } = require('../middlewares/auth');
 const bcrypt = require('bcryptjs');
 
 const router = Router();
