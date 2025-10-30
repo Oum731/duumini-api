@@ -1,6 +1,6 @@
 // src/middlewares/auth.js
 const { verifyAccess } = require("../../utils/jwt");
-const { getPool } = require("../../lib/db");
+const { getPool } = require("../lib/db"); // <-- ajoute ceci
 
 async function attachUserOrThrow(req) {
   const token = extractToken(req);
