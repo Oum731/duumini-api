@@ -62,6 +62,18 @@ function buildContactFromUser(u) {
   };
 }
 
+/** Construit un contact à partir du payload front */
+function buildContactFromPayload(c = {}) {
+  const first_name = c?.first_name ?? null;
+  const last_name = c?.last_name ?? null;
+  const phone = normPhone(c?.phone);
+  return {
+    first_name: first_name || null,
+    last_name: last_name || null,
+    phone: phone || null,
+  };
+}
+
 /**
  * Charge une commande + vérifie les permissions en fonction de req.user.
  * Règles:
@@ -133,8 +145,7 @@ router.get('/', authRequired, async (req, res) => {
 
       const items = rows.map(r => {
         const address = safeParseJSON(r.address);
-        // Si un jour tu ajoutes o.contact JSON, tu peux le parser ici:
-        const contactFromOrder = safeParseJSON(r.contact); // souvent null/absent
+        const contactFromOrder = safeParseJSON(r.contact);
         const contact =
           (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
             ? contactFromOrder
@@ -186,13 +197,13 @@ router.get('/', authRequired, async (req, res) => {
 });
 
 /* =========================
- * Create order
+ * Create order (UTILISATEUR CONNECTÉ)
  * Accepte le payload du Checkout (contact/address/delivery/items/totals/payment).
- * ⚠️ Aucun changement de schéma requis. On ne stocke pas contact (fallback users en lecture).
+ * On stocke un snapshot contact dans o.contact.
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
   const {
-    // contact ignoré au stockage (fallback users)
+    contact = null,
     address = {},
     delivery = {},
     items = [],
@@ -213,7 +224,13 @@ router.post('/', authRequired, async (req, res) => {
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    // 2) Recalcule total articles côté serveur (ignore price du front)
+    // 2) Contact snapshot: payload > user
+    let contactObj = contact ? buildContactFromPayload(contact) : null;
+    if (!contactObj || (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)) {
+      contactObj = buildContactFromUser(req.user);
+    }
+
+    // 3) Recalcule total articles côté serveur (ignore price du front)
     let itemsAmount = 0;
     const cleanItems = [];
 
@@ -237,15 +254,16 @@ router.post('/', authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 3) INSERT order — uniquement colonnes existantes
+    // 4) INSERT order — colonnes existantes + contact
     const [r] = await conn.query(
       `
-      INSERT INTO orders (user_id, status, address, geo_link, total, currency, created_at, updated_at)
-      VALUES (?, 'OPEN', ?, ?, ?, ?, NOW(), NOW())
+      INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
+      VALUES (?, 'OPEN', ?, ?, ?, ?, ?, NOW(), NOW())
       `,
       [
         req.user.id,
-        JSON.stringify(addressObj), // JSON/TEXT
+        JSON.stringify(addressObj),
+        JSON.stringify(contactObj),
         geoLink,
         orderTotal,
         currency,
@@ -253,7 +271,7 @@ router.post('/', authRequired, async (req, res) => {
     );
     const orderId = r.insertId;
 
-    // 4) INSERT order_items (snapshots des prix)
+    // 5) INSERT order_items (snapshots des prix)
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -264,12 +282,105 @@ router.post('/', authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // 5) Notification temps réel (best effort)
+    // 6) Notification temps réel (best effort)
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
     } catch {}
 
+    res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Create order invité (SANS AUTH)
+ * user_id = NULL, contact OBLIGATOIRE (au moins téléphone)
+ * =======================*/
+router.post('/guest', async (req, res) => {
+  const {
+    contact = {},
+    address = {},
+    delivery = {},
+    items = [],
+    totals = {},
+  } = req.body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items[] required' });
+  }
+
+  const contactObj = buildContactFromPayload(contact);
+  if (!contactObj.phone) {
+    return res.status(400).json({ error: 'phone required' });
+  }
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // 1) Normaliser adresse et geo_link
+    const addressObj = buildAddressObj(address);
+    const geoLink = buildGeoLink(addressObj.gps);
+
+    // 2) Recalcule total articles côté serveur
+    let itemsAmount = 0;
+    const cleanItems = [];
+
+    for (const it of items) {
+      const product_id = Number(it?.product_id);
+      const qty = Number(it?.qty);
+      if (!product_id || !qty) throw new Error('product_id & qty required');
+
+      const [[p]] = await conn.query(
+        `SELECT id, price FROM products WHERE id=?`,
+        [product_id]
+      );
+      if (!p) throw new Error('Product not found: ' + product_id);
+
+      const unit_price = Number(p.price);
+      cleanItems.push({ product_id: p.id, qty, unit_price });
+      itemsAmount += unit_price * qty;
+    }
+
+    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
+    const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
+    const orderTotal = itemsAmount + deliveryFee;
+
+    // 3) INSERT order invité (user_id = NULL + contact)
+    const [r] = await conn.query(
+      `
+      INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
+      VALUES (NULL, 'OPEN', ?, ?, ?, ?, ?, NOW(), NOW())
+      `,
+      [
+        JSON.stringify(addressObj),
+        JSON.stringify(contactObj),
+        geoLink,
+        orderTotal,
+        currency,
+      ]
+    );
+    const orderId = r.insertId;
+
+    // 4) INSERT order_items
+    for (const it of cleanItems) {
+      await conn.query(
+        `INSERT INTO order_items (order_id, product_id, qty, unit_price)
+         VALUES (?,?,?,?)`,
+        [orderId, it.product_id, it.qty, it.unit_price]
+      );
+    }
+
+    await conn.commit();
+
+    // Pas de notifyUser (pas de user_id)
     res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
   } catch (e) {
     try { await conn.rollback(); } catch {}
@@ -299,7 +410,7 @@ router.get('/:id', authRequired, async (req, res) => {
       'SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1',
       [o.user_id]
     );
-    const contactFromOrder = safeParseJSON(o.contact); // si jamais tu l’as un jour
+    const contactFromOrder = safeParseJSON(o.contact);
     const contact =
       (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
         ? contactFromOrder
@@ -307,7 +418,7 @@ router.get('/:id', authRequired, async (req, res) => {
 
     res.json({
       ...o,
-      contact,                // <<<<<< IMPORTANT
+      contact,
       address: addr,
       items: result.items,
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
@@ -353,9 +464,9 @@ router.put('/:id/status', authRequired, async (req, res) => {
 
     await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [status, id]);
 
-    // Push temps réel à l’acheteur
+    // Push temps réel à l’acheteur (si commande liée à un user)
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
-    if (order) {
+    if (order && order.user_id) {
       try {
         const { notifyUser } = require('../services/notify');
         await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status });
@@ -386,10 +497,12 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
 
     await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
 
-    // Notif acheteur
+    // Notif acheteur (si lié à un user)
     try {
       const { notifyUser } = require('../services/notify');
-      await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status: 'CANCELLED' });
+      if (order.user_id) {
+        await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status: 'CANCELLED' });
+      }
     } catch {}
 
     res.json({ ok: true, status: 'CANCELLED' });
