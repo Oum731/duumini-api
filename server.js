@@ -21,6 +21,7 @@ const orders = require("./src/routes/orders");
 const uploads = require("./src/routes/uploads");
 const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
+const events = require("./src/routes/events"); // ✅ SSE événements temps réel
 
 const app = express();
 app.set("trust proxy", 1);
@@ -39,8 +40,8 @@ const corsOrigins =
 app.use(
   cors({
     origin(origin, cb) {
-      if (corsOrigins === true) return cb(null, true);      // autorise tout
-      if (!origin) return cb(null, true);                    // Postman/SSR
+      if (corsOrigins === true) return cb(null, true); // autorise tout
+      if (!origin) return cb(null, true); // Postman/SSR
       if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) return cb(null, true);
       return cb(new Error("CORS not allowed for origin: " + origin));
     },
@@ -52,7 +53,7 @@ app.use(
       "Accept",
       "Origin",
       "X-Requested-With",
-      "x-access-token", // si jamais tu l'utilises encore côté front (sinon inutile)
+      "x-access-token",
     ],
     exposedHeaders: ["Content-Type", "Content-Length"],
     preflightContinue: false,
@@ -61,7 +62,7 @@ app.use(
   })
 );
 
-// ✅ Handler OPTIONS universel (pas de motif "*" qui casse en Express 5)
+// ✅ Handler OPTIONS universel
 app.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
 
@@ -100,7 +101,9 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
  * Healthcheck
  * ========================= */
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/api/health", (_req, res) => res.json({ ok: true, pid: process.pid, uptime: process.uptime() }));
+app.get("/api/health", (_req, res) =>
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime() })
+);
 
 /* =========================
  * Root
@@ -121,6 +124,7 @@ app.use("/api/products", products);
 app.use("/api/orders", orders);
 app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
+app.use("/api/events", events);        // ✅ flux SSE: /api/events/stream
 
 /* =========================
  * 404 + Error handler
@@ -129,7 +133,7 @@ app.use(notFound);
 app.use(errorHandler);
 
 /* =========================
- * Socket + Worker (optionnel)
+ * Socket + Worker
  * ========================= */
 const server = http.createServer(app);
 const { attachSocket } = require("./src/ws");
@@ -140,4 +144,6 @@ startNotificationWorker(io);
 /* =========================
  * Start
  * ========================= */
-server.listen(env.PORT, "0.0.0.0", () => console.log(`API listening on :${env.PORT}`));
+server.listen(env.PORT, "0.0.0.0", () =>
+  console.log(`API listening on :${env.PORT}`)
+);
