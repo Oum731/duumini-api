@@ -1,4 +1,3 @@
-// routes/orders.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
@@ -135,6 +134,7 @@ async function getOrderWithPerm(conn, id, user) {
 /* =========================
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
+ * → ajoute first_product_cover pour les miniatures
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -144,7 +144,19 @@ router.get('/', authRequired, async (req, res) => {
       const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders`);
       const [rows] = await pool.query(
         `
-        SELECT o.*, u.first_name AS u_first, u.last_name AS u_last, u.phone AS u_phone
+        SELECT 
+          o.*,
+          u.first_name AS u_first,
+          u.last_name AS u_last,
+          u.phone AS u_phone,
+          (
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = o.id
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS first_product_cover
         FROM orders o
         LEFT JOIN users u ON u.id = o.user_id
         ORDER BY o.created_at DESC
@@ -176,7 +188,19 @@ router.get('/', authRequired, async (req, res) => {
       );
       const [rows] = await pool.query(
         `
-        SELECT o.*, u.first_name AS u_first, u.last_name AS u_last, u.phone AS u_phone
+        SELECT 
+          o.*,
+          u.first_name AS u_first,
+          u.last_name AS u_last,
+          u.phone AS u_phone,
+          (
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = o.id
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS first_product_cover
         FROM orders o
         LEFT JOIN users u ON u.id = o.user_id
         WHERE o.user_id=?
@@ -421,7 +445,7 @@ router.get('/:id', authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // ✅ Totaux pour le front (utiles pour livraison / total)
+    // ✅ Totaux pour le front
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0
@@ -432,9 +456,9 @@ router.get('/:id', authRequired, async (req, res) => {
 
     res.json({
       ...o,
-      contact,               // même si tu ne l’utilises pas côté front, on le garde
+      contact,
       address: addr,
-      items: result.items,   // contient maintenant product_cover
+      items: result.items,   // contient product_cover
       totals: {
         items_amount: itemsAmount,
         delivery_fee: deliveryFee,
