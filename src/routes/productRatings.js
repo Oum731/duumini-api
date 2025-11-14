@@ -17,7 +17,6 @@ router.get("/:id/ratings", async (req, res) => {
 
   const pool = getPool();
   try {
-    // Vérifier que le produit existe
     const [existsRows] = await pool.query(
       "SELECT id FROM products WHERE id = ? LIMIT 1",
       [productId]
@@ -44,6 +43,55 @@ router.get("/:id/ratings", async (req, res) => {
 });
 
 /**
+ * GET /api/products/:id/ratings/list
+ * → liste détaillée des avis pour un produit
+ */
+router.get("/:id/ratings/list", async (req, res) => {
+  const productId = Number(req.params.id) || 0;
+  if (!productId) {
+    return res.status(400).json({ error: "product_id invalide" });
+  }
+
+  const pool = getPool();
+  try {
+    const [existsRows] = await pool.query(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [productId]
+    );
+    if (!existsRows.length) {
+      return res.status(404).json({ error: "Produit introuvable" });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         pr.id,
+         pr.rating,
+         pr.comment,
+         pr.created_at,
+         pr.user_id,
+         CASE
+           WHEN TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> '' THEN
+             TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, '')))
+           WHEN u.phone IS NOT NULL AND u.phone <> '' THEN
+             u.phone
+           ELSE
+             'Client Duumini'
+         END AS user_name
+       FROM product_ratings pr
+       JOIN users u ON u.id = pr.user_id
+       WHERE pr.product_id = ?
+       ORDER BY pr.created_at DESC`,
+      [productId]
+    );
+
+    res.json(rows || []);
+  } catch (e) {
+    console.error("GET /products/:id/ratings/list error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
  * POST /api/products/:id/rate
  * Body: { rating: 1-5, comment?: string }
  * → crée ou met à jour la note de l'utilisateur connecté
@@ -59,10 +107,11 @@ router.post("/:id/rate", authRequired, async (req, res) => {
     return res.status(400).json({ error: "product_id invalide" });
   }
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-    return res.status(400).json({ error: "rating doit être un entier entre 1 et 5" });
+    return res
+      .status(400)
+      .json({ error: "rating doit être un entier entre 1 et 5" });
   }
 
-  // Optionnel : limiter la taille du commentaire
   if (comment && comment.length > 2000) {
     comment = comment.slice(0, 2000);
   }
@@ -71,7 +120,6 @@ router.post("/:id/rate", authRequired, async (req, res) => {
   const pool = getPool();
 
   try {
-    // Vérifier que le produit existe
     const [existsRows] = await pool.query(
       "SELECT id FROM products WHERE id = ? LIMIT 1",
       [productId]
@@ -80,7 +128,6 @@ router.post("/:id/rate", authRequired, async (req, res) => {
       return res.status(404).json({ error: "Produit introuvable" });
     }
 
-    // Upsert (une note par (produit, user)) + commentaire
     await pool.query(
       `INSERT INTO product_ratings (product_id, user_id, rating, comment)
        VALUES (?, ?, ?, ?)
@@ -91,7 +138,6 @@ router.post("/:id/rate", authRequired, async (req, res) => {
       [productId, userId, rating, comment]
     );
 
-    // Recalcul moyenne + count
     const [rows] = await pool.query(
       `SELECT AVG(rating) AS average, COUNT(*) AS count
        FROM product_ratings
@@ -111,6 +157,58 @@ router.post("/:id/rate", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("POST /products/:id/rate error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
+ * DELETE /api/products/:id/rate
+ * → supprime la note de l'utilisateur connecté pour ce produit
+ */
+router.delete("/:id/rate", authRequired, async (req, res) => {
+  const productId = Number(req.params.id) || 0;
+  if (!productId) {
+    return res.status(400).json({ error: "product_id invalide" });
+  }
+
+  const userId = req.user.id;
+  const pool = getPool();
+
+  try {
+    const [existsRows] = await pool.query(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [productId]
+    );
+    if (!existsRows.length) {
+      return res.status(404).json({ error: "Produit introuvable" });
+    }
+
+    const [result] = await pool.query(
+      `DELETE FROM product_ratings
+       WHERE product_id = ? AND user_id = ?`,
+      [productId, userId]
+    );
+
+    const deleted = result.affectedRows > 0;
+
+    const [rows] = await pool.query(
+      `SELECT AVG(rating) AS average, COUNT(*) AS count
+       FROM product_ratings
+       WHERE product_id = ?`,
+      [productId]
+    );
+
+    const average = rows[0]?.average ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+
+    res.json({
+      ok: true,
+      deleted,
+      average,
+      count,
+    });
+  } catch (e) {
+    console.error("DELETE /products/:id/rate error:", e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
