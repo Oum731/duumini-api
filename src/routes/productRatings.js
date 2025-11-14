@@ -45,19 +45,26 @@ router.get("/:id/ratings", async (req, res) => {
 
 /**
  * POST /api/products/:id/rate
- * Body: { rating: 1-5 }
+ * Body: { rating: 1-5, comment?: string }
  * → crée ou met à jour la note de l'utilisateur connecté
  */
 router.post("/:id/rate", authRequired, async (req, res) => {
   const productId = Number(req.params.id) || 0;
-  let { rating } = req.body || {};
+  let { rating, comment } = req.body || {};
+
   rating = Number(rating);
+  comment = comment ? String(comment).trim() : null;
 
   if (!productId) {
     return res.status(400).json({ error: "product_id invalide" });
   }
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
     return res.status(400).json({ error: "rating doit être un entier entre 1 et 5" });
+  }
+
+  // Optionnel : limiter la taille du commentaire
+  if (comment && comment.length > 2000) {
+    comment = comment.slice(0, 2000);
   }
 
   const userId = req.user.id;
@@ -73,13 +80,15 @@ router.post("/:id/rate", authRequired, async (req, res) => {
       return res.status(404).json({ error: "Produit introuvable" });
     }
 
-    // Upsert (une note par (produit, user))
+    // Upsert (une note par (produit, user)) + commentaire
     await pool.query(
-      `INSERT INTO product_ratings (product_id, user_id, rating)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE rating = VALUES(rating),
-                               updated_at = CURRENT_TIMESTAMP`,
-      [productId, userId, rating]
+      `INSERT INTO product_ratings (product_id, user_id, rating, comment)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         rating = VALUES(rating),
+         comment = VALUES(comment),
+         updated_at = CURRENT_TIMESTAMP`,
+      [productId, userId, rating, comment]
     );
 
     // Recalcul moyenne + count
@@ -98,6 +107,7 @@ router.post("/:id/rate", authRequired, async (req, res) => {
       average,
       count,
       user_rating: rating,
+      comment,
     });
   } catch (e) {
     console.error("POST /products/:id/rate error:", e);
