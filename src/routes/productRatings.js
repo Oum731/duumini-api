@@ -1,0 +1,108 @@
+// src/routes/productRatings.js
+const { Router } = require("express");
+const { getPool } = require("../lib/db");
+const { authRequired } = require("../middlewares/auth");
+
+const router = Router();
+
+/**
+ * GET /api/products/:id/ratings
+ * → moyenne + nombre de notes pour un produit
+ */
+router.get("/:id/ratings", async (req, res) => {
+  const productId = Number(req.params.id) || 0;
+  if (!productId) {
+    return res.status(400).json({ error: "product_id invalide" });
+  }
+
+  const pool = getPool();
+  try {
+    // Vérifier que le produit existe
+    const [existsRows] = await pool.query(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [productId]
+    );
+    if (!existsRows.length) {
+      return res.status(404).json({ error: "Produit introuvable" });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT AVG(rating) AS average, COUNT(*) AS count
+       FROM product_ratings
+       WHERE product_id = ?`,
+      [productId]
+    );
+
+    const average = rows[0]?.average ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+
+    res.json({ average, count });
+  } catch (e) {
+    console.error("GET /products/:id/ratings error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
+ * POST /api/products/:id/rate
+ * Body: { rating: 1-5 }
+ * → crée ou met à jour la note de l'utilisateur connecté
+ */
+router.post("/:id/rate", authRequired, async (req, res) => {
+  const productId = Number(req.params.id) || 0;
+  let { rating } = req.body || {};
+  rating = Number(rating);
+
+  if (!productId) {
+    return res.status(400).json({ error: "product_id invalide" });
+  }
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: "rating doit être un entier entre 1 et 5" });
+  }
+
+  const userId = req.user.id;
+  const pool = getPool();
+
+  try {
+    // Vérifier que le produit existe
+    const [existsRows] = await pool.query(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [productId]
+    );
+    if (!existsRows.length) {
+      return res.status(404).json({ error: "Produit introuvable" });
+    }
+
+    // Upsert (une note par (produit, user))
+    await pool.query(
+      `INSERT INTO product_ratings (product_id, user_id, rating)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE rating = VALUES(rating),
+                               updated_at = CURRENT_TIMESTAMP`,
+      [productId, userId, rating]
+    );
+
+    // Recalcul moyenne + count
+    const [rows] = await pool.query(
+      `SELECT AVG(rating) AS average, COUNT(*) AS count
+       FROM product_ratings
+       WHERE product_id = ?`,
+      [productId]
+    );
+
+    const average = rows[0]?.average ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+
+    res.json({
+      ok: true,
+      average,
+      count,
+      user_rating: rating,
+    });
+  } catch (e) {
+    console.error("POST /products/:id/rate error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+module.exports = router;
