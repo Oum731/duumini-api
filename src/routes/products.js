@@ -175,15 +175,9 @@ router.get("/top-ordered", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Top produits : mieux notés ----------------------------- */
-/**
- * GET /api/products/top-rated?limit=8&minCount=2
- * → Retourne les produits les mieux notés (moyenne + nb avis)
- */
-router.get("/top-rated", async (req, res, next) => {
+router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
   const limit = Number(req.query.limit || 8);
-  const minCount = Number(req.query.minCount || 2);
 
   try {
     const [rows] = await pool.query(
@@ -195,16 +189,16 @@ router.get("/top-rated", async (req, res, next) => {
           WHERE pi.product_id = p.id
           ORDER BY sort_order ASC, id ASC
           LIMIT 1) AS cover,
-        AVG(r.rating)     AS avg_rating,
-        COUNT(r.id)       AS rating_count
-      FROM product_ratings r
-      JOIN products p ON p.id = r.product_id
+        COALESCE(SUM(oi.qty), 0) AS total_qty
+      FROM order_items oi
+      JOIN orders o   ON o.id = oi.order_id
+      JOIN products p ON p.id = oi.product_id
+      WHERE o.status = 'DONE'
       GROUP BY p.id
-      HAVING rating_count >= ?
-      ORDER BY avg_rating DESC, rating_count DESC
+      ORDER BY total_qty DESC
       LIMIT ?
       `,
-      [minCount, limit]
+      [limit]
     );
 
     res.json(rows);
@@ -212,7 +206,6 @@ router.get("/top-rated", async (req, res, next) => {
     next(e);
   }
 });
-
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = Number(req.params.id);
