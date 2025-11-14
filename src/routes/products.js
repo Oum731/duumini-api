@@ -133,10 +133,85 @@ async function listMarketHandler(req, res, next) {
   }
 }
 
-// Routes
+// Routes listing
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
+
+/* ----------------------------- Top produits : plus commandés ----------------------------- */
+/**
+ * GET /api/products/top-ordered?limit=8
+ * → Retourne les produits les plus commandés (commandes DONE)
+ */
+router.get("/top-ordered", async (req, res, next) => {
+  const pool = getPool();
+  const limit = Number(req.query.limit || 8);
+
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        p.*,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover,
+        COALESCE(SUM(oi.quantity), 0) AS total_qty
+      FROM order_items oi
+      JOIN orders o      ON o.id = oi.order_id
+      JOIN products p    ON p.id = oi.product_id
+      WHERE o.status = 'DONE'
+      GROUP BY p.id
+      ORDER BY total_qty DESC
+      LIMIT ?
+      `,
+      [limit]
+    );
+
+    res.json(rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* ----------------------------- Top produits : mieux notés ----------------------------- */
+/**
+ * GET /api/products/top-rated?limit=8&minCount=2
+ * → Retourne les produits les mieux notés (moyenne + nb avis)
+ */
+router.get("/top-rated", async (req, res, next) => {
+  const pool = getPool();
+  const limit = Number(req.query.limit || 8);
+  const minCount = Number(req.query.minCount || 2);
+
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        p.*,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover,
+        AVG(r.rating)     AS avg_rating,
+        COUNT(r.id)       AS rating_count
+      FROM product_ratings r
+      JOIN products p ON p.id = r.product_id
+      GROUP BY p.id
+      HAVING rating_count >= ?
+      ORDER BY avg_rating DESC, rating_count DESC
+      LIMIT ?
+      `,
+      [minCount, limit]
+    );
+
+    res.json(rows);
+  } catch (e) {
+    next(e);
+  }
+});
 
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
@@ -513,7 +588,8 @@ router.delete(
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
-        const abs = path.join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
+        const abs = path
+          .join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
         fs.promises.unlink(abs).catch(() => {});
       }
 
