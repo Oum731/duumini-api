@@ -92,6 +92,56 @@ router.get("/:id/ratings/list", async (req, res) => {
 });
 
 /**
+ * GET /api/products/pending-rating
+ * → retourne UN produit que l'utilisateur doit noter
+ *   (commande livrée depuis ≥ 24h, pas encore notée par cet utilisateur).
+ */
+router.get("/pending-rating", authRequired, async (req, res) => {
+  const userId = req.user.id;
+  const pool = getPool();
+
+  try {
+    /**
+     * Hypothèses de schéma (à ajuster si besoin) :
+     * - orders(id, user_id, status, created_at, updated_at, delivered_at|null)
+     * - order_items(id, order_id, product_id, quantity, unit_price, ...)
+     * - products(id, name, image_url, ...)
+     * - product_ratings(id, product_id, user_id, rating, comment, created_at, ...)
+     *
+     * On prend la date de "livraison" comme :
+     *   COALESCE(o.delivered_at, o.updated_at, o.created_at)
+     */
+    const [rows] = await pool.query(
+      `SELECT
+         p.id AS product_id,
+         p.name AS product_name,
+         p.image_url AS product_image,
+         o.id AS order_id,
+         COALESCE(o.delivered_at, o.updated_at, o.created_at) AS delivered_at
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       JOIN products p ON p.id = oi.product_id
+       LEFT JOIN product_ratings pr
+         ON pr.product_id = p.id
+        AND pr.user_id   = o.user_id
+       WHERE o.user_id = ?
+         AND o.status = 'DONE'
+         AND pr.id IS NULL
+         AND COALESCE(o.delivered_at, o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
+       ORDER BY delivered_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    const pending = rows[0] || null;
+    res.json(pending);
+  } catch (e) {
+    console.error("GET /products/pending-rating error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
  * POST /api/products/:id/rate
  * Body: { rating: 1-5, comment?: string }
  * → crée ou met à jour la note de l'utilisateur connecté
