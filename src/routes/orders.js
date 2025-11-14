@@ -134,7 +134,7 @@ async function getOrderWithPerm(conn, id, user) {
 /* =========================
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
- * → ajoute first_product_cover pour les miniatures
+ * → ajoute first_product_cover pour la miniature
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -445,7 +445,7 @@ router.get('/:id', authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // ✅ Totaux pour le front
+    // ✅ Totaux pour le front (utiles pour livraison / total)
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0
@@ -456,7 +456,7 @@ router.get('/:id', authRequired, async (req, res) => {
 
     res.json({
       ...o,
-      contact,
+      contact,               
       address: addr,
       items: result.items,   // contient product_cover
       totals: {
