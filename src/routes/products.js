@@ -22,7 +22,9 @@ cloudinary.config({
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
-    const folder = `products/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const folder = `products/${now.getFullYear()}/${String(
+      now.getMonth() + 1
+    ).padStart(2, "0")}`;
 
     const upload = cloudinary.uploader.upload_stream(
       {
@@ -59,6 +61,13 @@ ensureDirSync(UPLOAD_DIR);
 const upload = multer({ storage: multer.memoryStorage() });
 
 /* ----------------------------- Helpers ----------------------------- */
+
+// Sécurise un param numérique (évite NaN, négatifs, etc.)
+function toPositiveInt(value, defaultValue) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return defaultValue;
+  return Math.floor(n);
+}
 
 async function listProducts(pool, { limit, offset, channel }) {
   // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
@@ -145,39 +154,7 @@ router.get("/african-market", listMarketHandler);
  */
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
-  const limit = Number(req.query.limit || 8);
-
-  try {
-    const [rows] = await pool.query(
-      `
-      SELECT 
-        p.*,
-        (SELECT url
-           FROM product_images pi
-          WHERE pi.product_id = p.id
-          ORDER BY sort_order ASC, id ASC
-          LIMIT 1) AS cover,
-        COALESCE(SUM(oi.quantity), 0) AS total_qty
-      FROM order_items oi
-      JOIN orders o      ON o.id = oi.order_id
-      JOIN products p    ON p.id = oi.product_id
-      WHERE o.status = 'DONE'
-      GROUP BY p.id
-      ORDER BY total_qty DESC
-      LIMIT ?
-      `,
-      [limit]
-    );
-
-    res.json(rows);
-  } catch (e) {
-    next(e);
-  }
-});
-
-router.get("/top-ordered", async (req, res, next) => {
-  const pool = getPool();
-  const limit = Number(req.query.limit || 8);
+  const limit = toPositiveInt(req.query.limit, 8); // ✅ pas de NaN
 
   try {
     const [rows] = await pool.query(
@@ -206,6 +183,45 @@ router.get("/top-ordered", async (req, res, next) => {
     next(e);
   }
 });
+
+/* ----------------------------- Top produits : mieux notés ----------------------------- */
+/**
+ * GET /api/products/top-rated?limit=8&minCount=2
+ * → Retourne les produits les mieux notés (moyenne + nb avis)
+ */
+router.get("/top-rated", async (req, res, next) => {
+  const pool = getPool();
+  const limit = toPositiveInt(req.query.limit, 8);
+  const minCount = toPositiveInt(req.query.minCount, 2);
+
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        p.*,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover,
+        AVG(r.rating)     AS avg_rating,
+        COUNT(r.id)       AS rating_count
+      FROM product_ratings r
+      JOIN products p ON p.id = r.product_id
+      GROUP BY p.id
+      HAVING rating_count >= ?
+      ORDER BY avg_rating DESC, rating_count DESC
+      LIMIT ?
+      `,
+      [minCount, limit]
+    );
+
+    res.json(rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = Number(req.params.id);
