@@ -139,7 +139,9 @@ async function getOrderWithPerm(conn, id, user) {
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
+
   try {
+    // ===== ADMIN =====
     if (isAdmin(req.user)) {
       const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders`);
       const [rows] = await pool.query(
@@ -147,8 +149,8 @@ router.get('/', authRequired, async (req, res) => {
         SELECT 
           o.*,
           u.first_name AS u_first,
-          u.last_name AS u_last,
-          u.phone AS u_phone,
+          u.last_name  AS u_last,
+          u.phone      AS u_phone,
           (
             SELECT pi.url
             FROM order_items oi
@@ -181,33 +183,52 @@ router.get('/', authRequired, async (req, res) => {
       });
 
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
-    } else {
+    }
+
+    // ===== VENDEUR =====
+    if (isVendor(req.user)) {
+      // Nombre de commandes qui contiennent au moins 1 produit de ce vendeur
       const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders WHERE user_id=?`,
+        `
+        SELECT COUNT(DISTINCT o.id) AS total
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p     ON p.id = oi.product_id
+        JOIN shops s        ON s.id = p.shop_id
+        WHERE s.owner_id = ?
+        `,
         [req.user.id]
       );
+
       const [rows] = await pool.query(
         `
         SELECT 
           o.*,
           u.first_name AS u_first,
-          u.last_name AS u_last,
-          u.phone AS u_phone,
+          u.last_name  AS u_last,
+          u.phone      AS u_phone,
           (
             SELECT pi.url
-            FROM order_items oi
-            JOIN product_images pi ON pi.product_id = oi.product_id
-            WHERE oi.order_id = o.id
-            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            FROM order_items oi2
+            JOIN products p2     ON p2.id = oi2.product_id
+            JOIN shops s2        ON s2.id = p2.shop_id
+            JOIN product_images pi ON pi.product_id = p2.id
+            WHERE oi2.order_id = o.id
+              AND s2.owner_id = ?
+            ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
             LIMIT 1
           ) AS first_product_cover
         FROM orders o
-        LEFT JOIN users u ON u.id = o.user_id
-        WHERE o.user_id=?
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p     ON p.id = oi.product_id
+        JOIN shops s        ON s.id = p.shop_id
+        LEFT JOIN users u   ON u.id = o.user_id
+        WHERE s.owner_id = ?
+        GROUP BY o.id
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [req.user.id, limit, offset]
+        [req.user.id, req.user.id, limit, offset]
       );
 
       const items = rows.map(r => {
@@ -227,7 +248,55 @@ router.get('/', authRequired, async (req, res) => {
 
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
-  } catch (e) { res.status(500).json({ error: e.message }); }
+
+    // ===== CLIENT SIMPLE (historique de ses commandes) =====
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) total FROM orders WHERE user_id=?`,
+      [req.user.id]
+    );
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        o.*,
+        u.first_name AS u_first,
+        u.last_name  AS u_last,
+        u.phone      AS u_phone,
+        (
+          SELECT pi.url
+          FROM order_items oi
+          JOIN product_images pi ON pi.product_id = oi.product_id
+          WHERE oi.order_id = o.id
+          ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+          LIMIT 1
+        ) AS first_product_cover
+      FROM orders o
+      LEFT JOIN users u ON u.id = o.user_id
+      WHERE o.user_id = ?
+      ORDER BY o.created_at DESC
+      LIMIT ? OFFSET ?
+      `,
+      [req.user.id, limit, offset]
+    );
+
+    const items = rows.map(r => {
+      const address = safeParseJSON(r.address);
+      const contactFromOrder = safeParseJSON(r.contact);
+      const contact =
+        (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+          ? contactFromOrder
+          : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+
+      return {
+        ...r,
+        address,
+        contact,
+      };
+    });
+
+    return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* =========================
