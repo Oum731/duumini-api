@@ -108,12 +108,22 @@ async function getOrderWithPerm(conn, id, user) {
     }
   }
 
+  // ✅ Items + nom produit + image (product_cover)
   const [items] = await conn.query(
     `
-    SELECT oi.*, p.name AS product_name
+    SELECT 
+      oi.*,
+      p.name AS product_name,
+      (
+        SELECT pi.url
+        FROM product_images pi
+        WHERE pi.product_id = oi.product_id
+        ORDER BY pi.sort_order ASC, pi.id ASC
+        LIMIT 1
+      ) AS product_cover
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
-    WHERE oi.order_id=?
+    WHERE oi.order_id = ?
     ORDER BY oi.id ASC
     `,
     [id]
@@ -198,8 +208,6 @@ router.get('/', authRequired, async (req, res) => {
 
 /* =========================
  * Create order (UTILISATEUR CONNECTÉ)
- * Accepte le payload du Checkout (contact/address/delivery/items/totals/payment).
- * On stocke un snapshot contact dans o.contact.
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
   const {
@@ -254,7 +262,7 @@ router.post('/', authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 4) INSERT order — colonnes existantes + contact
+    // 4) INSERT order
     const [r] = await conn.query(
       `
       INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
@@ -299,7 +307,6 @@ router.post('/', authRequired, async (req, res) => {
 
 /* =========================
  * Create order invité (SANS AUTH)
- * user_id = NULL, contact OBLIGATOIRE (au moins téléphone)
  * =======================*/
 router.post('/guest', async (req, res) => {
   const {
@@ -353,7 +360,7 @@ router.post('/guest', async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 3) INSERT order invité (user_id = NULL + contact)
+    // 3) INSERT order invité
     const [r] = await conn.query(
       `
       INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
@@ -380,11 +387,10 @@ router.post('/guest', async (req, res) => {
 
     await conn.commit();
 
-    // Pas de notifyUser (pas de user_id)
     res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
   } catch (e) {
     try { await conn.rollback(); } catch {}
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message });  
   } finally {
     conn.release();
   }
@@ -392,7 +398,6 @@ router.post('/guest', async (req, res) => {
 
 /* =========================
  * Get one order (detail + items) avec permissions
- * → ajoute toujours un champ contact (fallback users)
  * =======================*/
 router.get('/:id', authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -416,11 +421,26 @@ router.get('/:id', authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
+    // ✅ Totaux pour le front (utiles pour livraison / total)
+    const itemsAmount = result.items.reduce(
+      (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
+      0
+    );
+    const totalAmount = Number(o.total || itemsAmount);
+    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+    const currency = (o.currency || 'MAD').toUpperCase();
+
     res.json({
       ...o,
-      contact,
+      contact,               // même si tu ne l’utilises pas côté front, on le garde
       address: addr,
-      items: result.items,
+      items: result.items,   // contient maintenant product_cover
+      totals: {
+        items_amount: itemsAmount,
+        delivery_fee: deliveryFee,
+        amount: totalAmount,
+        currency,
+      },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -428,8 +448,7 @@ router.get('/:id', authRequired, async (req, res) => {
 });
 
 /* =========================
- * Update status (admin ou vendeur propriétaire)
- * Body: { status: 'OPEN'|'PREPARATION'|'DELIVERY'|'DONE'|'CANCELLED' }
+ * Update status
  * =======================*/
 router.put('/:id/status', authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -442,7 +461,6 @@ router.put('/:id/status', authRequired, async (req, res) => {
   const pool = getPool();
   try {
     if (!isAdmin(req.user)) {
-      // Vérifie ownership vendeur sur au moins un item
       const [[row]] = await pool.query(
         `
         SELECT s.owner_id
@@ -464,7 +482,6 @@ router.put('/:id/status', authRequired, async (req, res) => {
 
     await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [status, id]);
 
-    // Push temps réel à l’acheteur (si commande liée à un user)
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
     if (order && order.user_id) {
       try {
@@ -497,7 +514,6 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
 
     await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
 
-    // Notif acheteur (si lié à un user)
     try {
       const { notifyUser } = require('../services/notify');
       if (order.user_id) {
