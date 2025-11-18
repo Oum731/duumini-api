@@ -33,7 +33,7 @@ function shortText(s, max = 200) {
  */
 router.get("/product/:idOrSlug", async (req, res) => {
   const { idOrSlug } = req.params;
-  const pool = await getPool();
+  const pool = getPool(); // ✅ SANS await
 
   try {
     // On essaye de matcher soit par slug, soit par id
@@ -104,7 +104,7 @@ router.get("/product/:idOrSlug", async (req, res) => {
 
     const idOrSlugFinal = product.slug || product.id;
 
-    // Redirection finale vers ta SPA : comme tu le voulais -> rubrique (food/market)
+    // Redirection finale vers ta SPA : rubrique (food/market)
     const sub = (product.sub_category || "").toString().toLowerCase();
     const categoryPath = sub === "food" ? "/african-food" : "/african-market";
     const redirectUrl = `${WEB_BASE_URL}${categoryPath}`;
