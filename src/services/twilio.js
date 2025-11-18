@@ -6,11 +6,16 @@ const DEV_MODE = (env.NODE_ENV || "development") !== "production";
 const DEV_TEST_CODE = env.OTP_TEST_CODE || process.env.OTP_TEST_CODE || "000000";
 
 // Numéro WhatsApp Twilio (ex: 'whatsapp:+14155238886' ou juste '+14155238886')
-const WHATSAPP_FROM = env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM || null;
+const WHATSAPP_FROM =
+  env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM || null;
 
 let client = null;
 if (!DEV_MODE) {
-  if (env.TWILIO_API_KEY_SID && env.TWILIO_API_KEY_SECRET && env.TWILIO_ACCOUNT_SID) {
+  if (
+    env.TWILIO_API_KEY_SID &&
+    env.TWILIO_API_KEY_SECRET &&
+    env.TWILIO_ACCOUNT_SID
+  ) {
     client = twilio(env.TWILIO_API_KEY_SID, env.TWILIO_API_KEY_SECRET, {
       accountSid: env.TWILIO_ACCOUNT_SID,
     });
@@ -64,10 +69,13 @@ function getWhatsAppFrom() {
 
 async function sendOtpStart(phone, purpose = "signup") {
   if (DEV_MODE && DEV_TEST_CODE) {
-    console.log(`[Twilio DEV] OTP simulé pour ${phone}: ${DEV_TEST_CODE} (purpose=${purpose})`);
+    console.log(
+      `[Twilio DEV] OTP simulé pour ${phone}: ${DEV_TEST_CODE} (purpose=${purpose})`
+    );
     return { sid: "dev", status: "approved", to: phone, purpose };
   }
-  if (!client || !env.TWILIO_VERIFY_SID) throw new Error("Twilio Verify non configuré");
+  if (!client || !env.TWILIO_VERIFY_SID)
+    throw new Error("Twilio Verify non configuré");
   const res = await client.verify.v2
     .services(env.TWILIO_VERIFY_SID)
     .verifications.create({ to: phone, channel: "sms", locale: "fr" });
@@ -78,7 +86,8 @@ async function checkOtpCode(phone, code) {
   if (DEV_MODE && DEV_TEST_CODE && code === DEV_TEST_CODE)
     return { status: "approved", valid: true };
 
-  if (!client || !env.TWILIO_VERIFY_SID) throw new Error("Twilio Verify non configuré");
+  if (!client || !env.TWILIO_VERIFY_SID)
+    throw new Error("Twilio Verify non configuré");
   const res = await client.verify.v2
     .services(env.TWILIO_VERIFY_SID)
     .verificationChecks.create({ to: phone, code });
@@ -92,7 +101,7 @@ async function checkOtpCode(phone, code) {
 /**
  * Envoie un message WhatsApp "brut" via Twilio.
  *
- * @param {string} to - numéro du client (ex: '+2126...', 'whatsapp:+2126...')
+ * @param {string} to - numéro de destination (ex: '+2126...', 'whatsapp:+2126...')
  * @param {string} body - contenu du message
  * @returns {Promise<{ sid: string, status: string }>}
  */
@@ -121,8 +130,12 @@ async function sendWhatsAppMessage(to, body) {
 }
 
 /**
- * (OPTIONNEL) Helper prêt pour confirmation de commande Duumini.
- * Tu peux l'appeler depuis tes routes de commandes.
+ * Helper pour notifier le BACKOFFICE d'une commande Duumini.
+ * Ce n'est PAS un message client, mais un message interne :
+ *   - résumé de la commande
+ *   - infos client
+ *   - adresse
+ *   - liste des articles
  */
 async function sendWhatsAppOrderConfirmation({
   to,
@@ -137,33 +150,39 @@ async function sendWhatsAppOrderConfirmation({
 }) {
   const lines = [];
 
-  if (name) {
-    lines.push(`Bonjour ${name},`);
-  } else {
-    lines.push("Bonjour,");
-  }
+  // En-tête interne
+  lines.push("🧾 *Nouvelle commande Duumini*");
 
-  lines.push("Merci pour votre commande chez *Duumini* 🛒");
-  lines.push("Nous avons bien reçu votre commande et elle vient d’être prise en charge par notre équipe.");
-  lines.push("");
-  if (orderId) lines.push(`*Détails de la commande #${orderId}*`);
-  if (details) {
-    lines.push("");
-    lines.push(details);
+  if (orderId) {
+    lines.push(`• ID commande : #${orderId}`);
+  }
+  if (name) {
+    lines.push(`• Client : ${name}`);
+  }
+  if (phone) {
+    lines.push(`• Téléphone : ${phone}`);
   }
   if (typeof total !== "undefined") {
-    lines.push("");
-    lines.push(`*Total :* ${total} MAD`);
+    lines.push(`• Total : ${total} MAD`);
   }
-  lines.push("");
-  lines.push("*Adresse de livraison*:");
+
+  lines.push(""); // ligne vide
+
+  // Adresse
+  lines.push("📍 *Adresse de livraison*");
   if (ville) lines.push(`• Ville : ${ville}`);
   if (commune) lines.push(`• Commune : ${commune}`);
   if (quartier) lines.push(`• Quartier : ${quartier}`);
-  if (phone) lines.push(`• Téléphone : ${phone}`);
+
+  // Détails des articles
+  if (details) {
+    lines.push("");
+    lines.push("🛒 *Articles*");
+    lines.push(details);
+  }
+
   lines.push("");
-  lines.push("Nous restons disponibles pour toute question.");
-  lines.push("Merci pour votre confiance 🤎");
+  lines.push("Merci de traiter cette commande dans les plus brefs délais.");
 
   const body = lines.join("\n");
   return sendWhatsAppMessage(to, body);

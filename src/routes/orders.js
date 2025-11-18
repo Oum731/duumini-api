@@ -2,8 +2,18 @@ const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
 const { getPagination, buildPageInfo } = require('../utils/pagination');
+const { sendWhatsAppOrderConfirmation } = require('../services/twilio');
+const { env } = require('../lib/env');
 
 const router = Router();
+
+/* =========================
+ * CONFIG WHATSAPP BACKOFFICE
+ * =======================*/
+
+// 👉 Seul ce numéro reçoit la commande par WhatsApp
+const BACKOFFICE_WHATSAPP =
+  env.DUUMINI_BACKOFFICE_WHATSAPP || '+212623677884';
 
 /* =========================
  * Helpers
@@ -389,6 +399,45 @@ router.post('/', authRequired, async (req, res) => {
       await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
     } catch {}
 
+    // 7) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    (async () => {
+      try {
+        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client Duumini';
+
+        const details = Array.isArray(items) && items.length
+          ? items
+              .map((it) => {
+                const label = it.name || `Produit #${it.product_id || ''}`.trim();
+                const qty = it.qty || 1;
+                const price = it.price != null ? `${it.price} MAD` : '';
+                return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
+              })
+              .join('\n')
+          : '';
+
+        await sendWhatsAppOrderConfirmation({
+          to: BACKOFFICE_WHATSAPP,         // 👉 numéro interne
+          name: fullName,
+          orderId,
+          total: orderTotal,
+          ville: addressObj.city || null,
+          commune: addressObj.commune || null,
+          quartier: addressObj.district || null,
+          phone: contactObj.phone,
+          details,
+        });
+
+        console.log(
+          `[WhatsApp] Commande #${orderId} (user connecté) envoyée au backoffice ${BACKOFFICE_WHATSAPP}`
+        );
+      } catch (errWa) {
+        console.error(
+          `[WhatsApp] Erreur envoi commande #${orderId} au backoffice`,
+          errWa
+        );
+      }
+    })();
+
     res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
   } catch (e) {
     try { await conn.rollback(); } catch {}
@@ -479,6 +528,45 @@ router.post('/guest', async (req, res) => {
     }
 
     await conn.commit();
+
+    // 5) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    (async () => {
+      try {
+        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client invité Duumini';
+
+        const details = Array.isArray(items) && items.length
+          ? items
+              .map((it) => {
+                const label = it.name || `Produit #${it.product_id || ''}`.trim();
+                const qty = it.qty || 1;
+                const price = it.price != null ? `${it.price} MAD` : '';
+                return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
+              })
+              .join('\n')
+          : '';
+
+        await sendWhatsAppOrderConfirmation({
+          to: BACKOFFICE_WHATSAPP,        // 👉 numéro interne
+          name: fullName,
+          orderId,
+          total: orderTotal,
+          ville: addressObj.city || null,
+          commune: addressObj.commune || null,
+          quartier: addressObj.district || null,
+          phone: contactObj.phone,
+          details,
+        });
+
+        console.log(
+          `[WhatsApp] Commande invité #${orderId} envoyée au backoffice ${BACKOFFICE_WHATSAPP}`
+        );
+      } catch (errWa) {
+        console.error(
+          `[WhatsApp] Erreur envoi commande invité #${orderId} au backoffice`,
+          errWa
+        );
+      }
+    })();
 
     res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
   } catch (e) {
