@@ -23,6 +23,7 @@ const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
 const events = require("./src/routes/events"); // ✅ SSE événements temps réel
 const productRatingsRouter = require("./src/routes/productRatings");
+const shareRoutes = require("./src/routes/share");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -127,6 +128,8 @@ app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
 app.use("/api/events", events);        // ✅ flux SSE: /api/events/stream
 app.use("/api/products", productRatingsRouter);
+app.use("/share", shareRoutes);
+
 /* =========================
  * 404 + Error handler
  * ========================= */
