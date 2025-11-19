@@ -1,3 +1,4 @@
+// src/routes/orders.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
 const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
@@ -415,6 +416,27 @@ router.post('/', authRequired, async (req, res) => {
               .join('\n')
           : '';
 
+        // 🔎 Récupérer la première image produit de cette commande
+        let firstProductImage = null;
+        try {
+          const [[rowImg]] = await pool.query(
+            `
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = ?
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+            `,
+            [orderId]
+          );
+          if (rowImg && rowImg.url) {
+            firstProductImage = rowImg.url;
+          }
+        } catch (imgErr) {
+          console.error(`[WhatsApp] Erreur chargement image produit commande #${orderId}`, imgErr);
+        }
+
         await sendWhatsAppOrderConfirmation({
           to: BACKOFFICE_WHATSAPP,         // 👉 numéro interne
           name: fullName,
@@ -425,6 +447,7 @@ router.post('/', authRequired, async (req, res) => {
           quartier: addressObj.district || null,
           phone: contactObj.phone,
           details,
+          imageUrl: firstProductImage || null,
         });
 
         console.log(
@@ -545,6 +568,27 @@ router.post('/guest', async (req, res) => {
               .join('\n')
           : '';
 
+        // 🔎 Récupérer la première image produit de cette commande
+        let firstProductImage = null;
+        try {
+          const [[rowImg]] = await pool.query(
+            `
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = ?
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+            `,
+            [orderId]
+          );
+          if (rowImg && rowImg.url) {
+            firstProductImage = rowImg.url;
+          }
+        } catch (imgErr) {
+          console.error(`[WhatsApp] Erreur chargement image produit commande invité #${orderId}`, imgErr);
+        }
+
         await sendWhatsAppOrderConfirmation({
           to: BACKOFFICE_WHATSAPP,        // 👉 numéro interne
           name: fullName,
@@ -555,6 +599,7 @@ router.post('/guest', async (req, res) => {
           quartier: addressObj.district || null,
           phone: contactObj.phone,
           details,
+          imageUrl: firstProductImage || null,
         });
 
         console.log(

@@ -102,15 +102,19 @@ async function checkOtpCode(phone, code) {
  * Envoie un message WhatsApp "brut" via Twilio.
  *
  * @param {string} to - numéro de destination (ex: '+2126...', 'whatsapp:+2126...')
- * @param {string} body - contenu du message
+ * @param {string} body - contenu du message (peut être vide si media-only)
+ * @param {string|string[]} [mediaUrl] - URL(s) d'image(s) publique(s) (Cloudinary, etc.)
  * @returns {Promise<{ sid: string, status: string }>}
  */
-async function sendWhatsAppMessage(to, body) {
+async function sendWhatsAppMessage(to, body, mediaUrl) {
   // Mode DEV : on log seulement, aucun envoi réel
   if (DEV_MODE) {
     console.log("[Twilio DEV][WHATSAPP] Message simulé:");
     console.log("  to   =", to);
     console.log("  body =", body);
+    if (mediaUrl) {
+      console.log("  mediaUrl =", mediaUrl);
+    }
     return { sid: "dev-whatsapp", status: "queued-dev" };
   }
 
@@ -120,11 +124,20 @@ async function sendWhatsAppMessage(to, body) {
 
   const toWhatsApp = normalizeWhatsAppNumber(to);
 
-  const res = await client.messages.create({
+  const payload = {
     from,
     to: toWhatsApp,
-    body,
-  });
+  };
+
+  if (body && String(body).trim().length > 0) {
+    payload.body = body;
+  }
+
+  if (mediaUrl) {
+    payload.mediaUrl = Array.isArray(mediaUrl) ? mediaUrl : [mediaUrl];
+  }
+
+  const res = await client.messages.create(payload);
 
   return { sid: res.sid, status: res.status };
 }
@@ -136,6 +149,7 @@ async function sendWhatsAppMessage(to, body) {
  *   - infos client
  *   - adresse
  *   - liste des articles
+ *   - + option image du produit (ex: première image de la commande)
  */
 async function sendWhatsAppOrderConfirmation({
   to,
@@ -147,6 +161,7 @@ async function sendWhatsAppOrderConfirmation({
   quartier,
   phone,
   details = "",
+  imageUrl = null,
 }) {
   const lines = [];
 
@@ -185,7 +200,7 @@ async function sendWhatsAppOrderConfirmation({
   lines.push("Merci de traiter cette commande dans les plus brefs délais.");
 
   const body = lines.join("\n");
-  return sendWhatsAppMessage(to, body);
+  return sendWhatsAppMessage(to, body, imageUrl || undefined);
 }
 
 module.exports = {
