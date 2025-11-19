@@ -69,6 +69,13 @@ function toPositiveInt(value, defaultValue) {
   return Math.floor(n);
 }
 
+// parse un param ID; renvoie null si non numérique
+function parseIdParam(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
 async function listProducts(pool, { limit, offset, channel }) {
   // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
   const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
@@ -111,7 +118,11 @@ async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
   try {
-    const { rows, total } = await listProducts(pool, { limit, offset, channel: null });
+    const { rows, total } = await listProducts(pool, {
+      limit,
+      offset,
+      channel: null,
+    });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
@@ -123,7 +134,11 @@ async function listFoodHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
   try {
-    const { rows, total } = await listProducts(pool, { limit, offset, channel: "african-food" });
+    const { rows, total } = await listProducts(pool, {
+      limit,
+      offset,
+      channel: "african-food",
+    });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
@@ -135,7 +150,11 @@ async function listMarketHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
   try {
-    const { rows, total } = await listProducts(pool, { limit, offset, channel: "african-market" });
+    const { rows, total } = await listProducts(pool, {
+      limit,
+      offset,
+      channel: "african-market",
+    });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
@@ -224,7 +243,12 @@ router.get("/top-rated", async (req, res, next) => {
 
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
-  const id = Number(req.params.id);
+  const id = parseIdParam(req.params.id);
+  if (!id) {
+    // ID non numérique (ex: "pending-rating") → laisse passer au prochain router
+    return next();
+  }
+
   const pool = getPool();
   try {
     const [rows] = await pool.query(`SELECT * FROM products WHERE id=?`, [id]);
@@ -288,7 +312,9 @@ router.post(
         );
         if (!shop) {
           conn.release();
-          return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
+          return res
+            .status(400)
+            .json({ error: "Aucune boutique associée à ce vendeur" });
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
@@ -309,7 +335,9 @@ router.post(
 
       const makeSlug = () =>
         (slug && String(slug).trim()) ||
-        `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
+        `${Date.now().toString(36)}${Math.random()
+          .toString(36)
+          .slice(2, 7)}`.toLowerCase();
 
       await conn.beginTransaction();
       const [r] = await conn.query(
@@ -337,7 +365,10 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -380,7 +411,11 @@ router.put(
   requireRole("VENDEUR", "ADMIN"),
   upload.array("images[]", 8),
   async (req, res, next) => {
-    const id = Number(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (!id) {
+      return next();
+    }
+
     const {
       name,
       price,
@@ -416,7 +451,8 @@ router.put(
       }
 
       // Normaliser sub_category: appliquer uniquement si valeur valide
-      const rawSub = sub_category != null ? String(sub_category).trim().toLowerCase() : null;
+      const rawSub =
+        sub_category != null ? String(sub_category).trim().toLowerCase() : null;
       const sub = rawSub === "food" || rawSub === "product" ? rawSub : null;
 
       await conn.query(
@@ -460,7 +496,10 @@ router.put(
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+          const up = await uploadBufferToCloudinary(
+            f.buffer,
+            f.originalname || undefined
+          );
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -495,7 +534,11 @@ router.put(
   requireRole("VENDEUR", "ADMIN"),
   upload.array("images[]", 8),
   async (req, res, next) => {
-    const id = Number(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (!id) {
+      return next();
+    }
+
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
@@ -535,7 +578,10 @@ router.put(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -563,7 +609,11 @@ router.delete(
   authRequired,
   requireRole("VENDEUR", "ADMIN"),
   async (req, res, next) => {
-    const id = Number(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (!id) {
+      return next();
+    }
+
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
@@ -598,7 +648,10 @@ router.delete(
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
         const abs = path
-          .join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
+          .join(
+            process.cwd(),
+            u.replace(/^\//, "").replace(/\//g, path.sep)
+          );
         fs.promises.unlink(abs).catch(() => {});
       }
 

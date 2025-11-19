@@ -5,12 +5,18 @@ const { authRequired } = require("../middlewares/auth");
 
 const router = Router();
 
+function parseProductId(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
 /**
  * GET /api/products/:id/ratings
  * → moyenne + nombre de notes pour un produit
  */
 router.get("/:id/ratings", async (req, res) => {
-  const productId = Number(req.params.id) || 0;
+  const productId = parseProductId(req.params.id);
   if (!productId) {
     return res.status(400).json({ error: "product_id invalide" });
   }
@@ -47,7 +53,7 @@ router.get("/:id/ratings", async (req, res) => {
  * → liste détaillée des avis pour un produit
  */
 router.get("/:id/ratings/list", async (req, res) => {
-  const productId = Number(req.params.id) || 0;
+  const productId = parseProductId(req.params.id);
   if (!productId) {
     return res.status(400).json({ error: "product_id invalide" });
   }
@@ -147,15 +153,16 @@ router.get("/pending-rating", authRequired, async (req, res) => {
  * → crée ou met à jour la note de l'utilisateur connecté
  */
 router.post("/:id/rate", authRequired, async (req, res) => {
-  const productId = Number(req.params.id) || 0;
+  const productId = parseProductId(req.params.id);
   let { rating, comment } = req.body || {};
-
-  rating = Number(rating);
-  comment = comment ? String(comment).trim() : null;
 
   if (!productId) {
     return res.status(400).json({ error: "product_id invalide" });
   }
+
+  rating = Number(rating);
+  comment = comment ? String(comment).trim() : null;
+
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
     return res
       .status(400)
@@ -216,7 +223,7 @@ router.post("/:id/rate", authRequired, async (req, res) => {
  * → supprime la note de l'utilisateur connecté pour ce produit
  */
 router.delete("/:id/rate", authRequired, async (req, res) => {
-  const productId = Number(req.params.id) || 0;
+  const productId = parseProductId(req.params.id);
   if (!productId) {
     return res.status(400).json({ error: "product_id invalide" });
   }
