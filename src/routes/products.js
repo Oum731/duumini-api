@@ -76,7 +76,16 @@ function parseIdParam(raw) {
   return Math.floor(n);
 }
 
-async function listProducts(pool, { limit, offset, channel }) {
+// Helper pour parser un booléen / flag (0/1, true/false, yes/no, on/off)
+function parseBoolFlag(value, defaultValue = null) {
+  if (value === undefined || value === null) return defaultValue;
+  const v = String(value).trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return 1;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
+  return defaultValue;
+}
+
+async function listProducts(pool, { limit, offset, channel, onlyActive }) {
   // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
   const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
 
@@ -87,6 +96,11 @@ async function listProducts(pool, { limit, offset, channel }) {
   } else if (channel === "african-market") {
     // Tout ce qui n'est PAS 'food' : 'product', NULL, vide, legacy…
     where = `${norm} <> 'food'`;
+  }
+
+  // Filtre produits actifs si demandé
+  if (onlyActive) {
+    where = `(${where}) AND p.is_active = 1`;
   }
 
   const [[{ total }]] = await pool.query(
@@ -116,12 +130,20 @@ async function listProducts(pool, { limit, offset, channel }) {
 // Handler générique (sans canal)
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
+  const onlyActive =
+    onlyActiveRaw === "1" ||
+    onlyActiveRaw === "true" ||
+    onlyActiveRaw === "yes" ||
+    onlyActiveRaw === "on";
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
       channel: null,
+      onlyActive,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -132,12 +154,20 @@ async function listHandler(req, res, next) {
 // Handler spécifique FOOD
 async function listFoodHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
+  const onlyActive =
+    onlyActiveRaw === "1" ||
+    onlyActiveRaw === "true" ||
+    onlyActiveRaw === "yes" ||
+    onlyActiveRaw === "on";
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
       channel: "african-food",
+      onlyActive,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -148,12 +178,20 @@ async function listFoodHandler(req, res, next) {
 // Handler spécifique MARKET (non-food)
 async function listMarketHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
+  const onlyActive =
+    onlyActiveRaw === "1" ||
+    onlyActiveRaw === "true" ||
+    onlyActiveRaw === "yes" ||
+    onlyActiveRaw === "on";
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
       channel: "african-market",
+      onlyActive,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -190,6 +228,7 @@ router.get("/top-ordered", async (req, res, next) => {
       JOIN orders o   ON o.id = oi.order_id
       JOIN products p ON p.id = oi.product_id
       WHERE o.status = 'DONE'
+        AND p.is_active = 1
       GROUP BY p.id
       ORDER BY total_qty DESC
       LIMIT ?
@@ -227,6 +266,7 @@ router.get("/top-rated", async (req, res, next) => {
         COUNT(r.id)       AS rating_count
       FROM product_ratings r
       JOIN products p ON p.id = r.product_id
+                     AND p.is_active = 1
       GROUP BY p.id
       HAVING rating_count >= ?
       ORDER BY avg_rating DESC, rating_count DESC
@@ -272,7 +312,7 @@ router.get("/:id", async (req, res, next) => {
 /**
  * FormData attendu:
  *  - name, price
- *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food')
+ *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'), is_active?
  *  - images[] (max 8)
  *
  * Règles:
@@ -296,6 +336,7 @@ router.post(
       is_featured,
       promo_eligible,
       sub_category,
+      is_active,
     } = req.body || {};
 
     const pool = getPool();
@@ -333,6 +374,9 @@ router.post(
       const rawSub = String(sub_category || "").trim().toLowerCase();
       const sub = rawSub === "food" || rawSub === "product" ? rawSub : "product";
 
+      // Normaliser is_active (par défaut 1 = actif)
+      const active = parseBoolFlag(is_active, 1);
+
       const makeSlug = () =>
         (slug && String(slug).trim()) ||
         `${Date.now().toString(36)}${Math.random()
@@ -342,8 +386,8 @@ router.post(
       await conn.beginTransaction();
       const [r] = await conn.query(
         `INSERT INTO products
-           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, is_active)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           finalShopId, // ← NULL pour ADMIN
           category_id ? Number(category_id) : null,
@@ -356,6 +400,7 @@ router.post(
           is_featured ? 1 : 0,
           promo_eligible ? 1 : 0,
           sub,
+          active,
         ]
       );
       const productId = r.insertId;
@@ -379,6 +424,37 @@ router.post(
 
       await conn.commit();
 
+      const channel = sub === "food" ? "african-food" : "african-market";
+
+      // 🟢 Enquêter une notification pour TOUS les users ayant un device
+      try {
+        const [userRows] = await pool.query(
+          `SELECT DISTINCT user_id
+             FROM user_devices
+            WHERE provider = 'pushy'`
+        );
+
+        if (userRows.length) {
+          const payload = {
+            title: "Nouveau produit disponible",
+            body: `${name} est maintenant disponible sur Duumini`,
+            product_id: productId,
+            channel,
+          };
+          const payloadJson = JSON.stringify(payload);
+
+          for (const row of userRows) {
+            await pool.query(
+              `INSERT INTO notification_queue (user_id, type, payload, status)
+               VALUES (?,?,?, 'queued')`,
+              [row.user_id, "PRODUCT_CREATED", payloadJson]
+            );
+          }
+        }
+      } catch (e) {
+        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
+      }
+
       // Notif temps réel (optionnel) — seulement si un shop existe
       try {
         const { getIO, emitToShops } = require("../ws");
@@ -388,7 +464,6 @@ router.post(
         }
       } catch {}
 
-      const channel = sub === "food" ? "african-food" : "african-market";
       res.status(201).json({ id: productId, channel });
     } catch (e) {
       try {
@@ -427,6 +502,7 @@ router.put(
       sub_category,
       category_id,
       replace_images,
+      is_active,
     } = req.body || {};
 
     const pool = getPool();
@@ -455,6 +531,9 @@ router.put(
         sub_category != null ? String(sub_category).trim().toLowerCase() : null;
       const sub = rawSub === "food" || rawSub === "product" ? rawSub : null;
 
+      // Normaliser is_active si fourni
+      const active = parseBoolFlag(is_active, null);
+
       await conn.query(
         `UPDATE products SET
            name          = COALESCE(?, name),
@@ -465,6 +544,7 @@ router.put(
            is_featured   = COALESCE(?, is_featured),
            promo_eligible= COALESCE(?, promo_eligible),
            sub_category  = COALESCE(?, sub_category),
+           is_active     = COALESCE(?, is_active),
            category_id   = COALESCE(?, category_id)
          WHERE id=?`,
         [
@@ -476,6 +556,7 @@ router.put(
           is_featured === undefined ? null : is_featured ? 1 : 0,
           promo_eligible === undefined ? null : promo_eligible ? 1 : 0,
           sub,
+          active,
           category_id != null ? Number(category_id) : null,
           id,
         ]

@@ -29,6 +29,7 @@ function safeParseJSON(maybe) {
 
 /** Normalise l'objet adresse reçu du front en un objet stockable (JSON).
  * input: { ville, commune, quartier|null, gps:{lat,lng}|null }
+ * ou éventuellement juste { gps:{lat,lng} }
  */
 function buildAddressObj(input = {}) {
   const ville = input?.ville ?? null;
@@ -72,10 +73,30 @@ function buildContactFromUser(u) {
   };
 }
 
-/** Construit un contact à partir du payload front */
+/** Construit un contact à partir du payload front
+ *  - accepte { first_name, last_name, phone }
+ *  - accepte aussi { name, phone } pour les invités (nom complet)
+ */
 function buildContactFromPayload(c = {}) {
-  const first_name = c?.first_name ?? null;
-  const last_name = c?.last_name ?? null;
+  const rawFirst = c?.first_name ?? null;
+  const rawLast = c?.last_name ?? null;
+  const rawName = c?.name ?? null;
+
+  let first_name = rawFirst;
+  let last_name = rawLast;
+
+  // si on a "name" (invité) mais pas de first/last, on découpe grossièrement
+  if (!first_name && !last_name && rawName) {
+    const parts = String(rawName).trim().split(/\s+/);
+    if (parts.length === 1) {
+      first_name = parts[0];
+      last_name = null;
+    } else {
+      first_name = parts[0];
+      last_name = parts.slice(1).join(' ');
+    }
+  }
+
   const phone = normPhone(c?.phone);
   return {
     first_name: first_name || null,
@@ -142,10 +163,123 @@ async function getOrderWithPerm(conn, id, user) {
   return { status: 200, order, items };
 }
 
+/* ========= Helpers notifications commande ========= */
+
+/**
+ * Récupère la liste des user_id admins actifs
+ */
+async function getAdminUserIds() {
+  const [rows] = await getPool().query(
+    `SELECT id 
+       FROM users 
+      WHERE role = 'ADMIN'
+        AND (is_active = 1 OR is_active IS NULL)`
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Récupère la liste des vendeurs concernés par une commande donnée.
+ * On remonte depuis order_items -> products -> shops (owner_id).
+ */
+async function getVendorsForOrder(orderId) {
+  const [rows] = await getPool().query(
+    `
+    SELECT DISTINCT u.id AS user_id
+      FROM order_items oi
+      JOIN products p ON p.id = oi.product_id
+      JOIN shops   s ON s.id = p.shop_id
+      JOIN users   u ON u.id = s.owner_id
+     WHERE oi.order_id = ?
+       AND (u.is_active = 1 OR u.is_active IS NULL)
+    `,
+    [orderId]
+  );
+  return rows.map((r) => r.user_id);
+}
+
+/**
+ * Enfile des notifications ORDER_CREATED pour vendeurs + admins
+ * dans notification_queue.
+ */
+async function enqueueOrderCreatedNotifications(orderId, total, currency) {
+  const [adminIds, vendorIds] = await Promise.all([
+    getAdminUserIds(),
+    getVendorsForOrder(orderId),
+  ]);
+
+  const allUserIds = Array.from(new Set([...adminIds, ...vendorIds]));
+  if (!allUserIds.length) return;
+
+  const cur = (currency || 'MAD').toUpperCase();
+
+  const payloadObj = {
+    title: `Nouvelle commande #${orderId}`,
+    body: `Un client vient de passer une commande de ${total} ${cur}.`,
+    order_id: orderId,
+    total,
+    currency: cur,
+    status: 'OPEN',
+  };
+
+  const payload = JSON.stringify(payloadObj);
+
+  const values = allUserIds.map((uid) => [
+    uid,
+    'ORDER_CREATED',
+    payload,
+    'queued',
+  ]);
+
+  await getPool().query(
+    `
+    INSERT INTO notification_queue (user_id, type, payload, status)
+    VALUES ?
+    `,
+    [values]
+  );
+}
+
+/**
+ * Enfile une notification ORDER_STATUS pour le client (si user_id non NULL)
+ */
+async function enqueueOrderStatusForClient(orderId, status) {
+  const [[row]] = await getPool().query(
+    `SELECT user_id, total, currency
+       FROM orders
+      WHERE id = ?
+      LIMIT 1`,
+    [orderId]
+  );
+
+  if (!row || !row.user_id) return; // commande invité sans compte → pas de notif user_id
+
+  const cur = (row.currency || 'MAD').toUpperCase();
+  const total = Number(row.total || 0);
+
+  const payloadObj = {
+    title: `Mise à jour commande #${orderId}`,
+    body: `Le statut de votre commande est passé à ${status}.`,
+    order_id: orderId,
+    status,
+    total,
+    currency: cur,
+  };
+
+  await getPool().query(
+    `
+    INSERT INTO notification_queue (user_id, type, payload, status)
+    VALUES (?, 'ORDER_STATUS', ?, 'queued')
+    `,
+    [row.user_id, JSON.stringify(payloadObj)]
+  );
+}
+
 /* =========================
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
  * → ajoute first_product_cover pour la miniature
+ * → ajoute geo_link pour ouvrir la localisation (connecté + invité)
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -186,10 +320,13 @@ router.get('/', authRequired, async (req, res) => {
             ? contactFromOrder
             : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
 
+        const geo_link = r.geo_link || buildGeoLink(address?.gps);
+
         return {
           ...r,
           address,
           contact,
+          geo_link,
         };
       });
 
@@ -250,10 +387,13 @@ router.get('/', authRequired, async (req, res) => {
             ? contactFromOrder
             : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
 
+        const geo_link = r.geo_link || buildGeoLink(address?.gps);
+
         return {
           ...r,
           address,
           contact,
+          geo_link,
         };
       });
 
@@ -297,10 +437,13 @@ router.get('/', authRequired, async (req, res) => {
           ? contactFromOrder
           : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
 
+      const geo_link = r.geo_link || buildGeoLink(address?.gps);
+
       return {
         ...r,
         address,
         contact,
+        geo_link,
       };
     });
 
@@ -394,13 +537,20 @@ router.post('/', authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // 6) Notification temps réel (best effort)
+    // 🔔 6) Enfiler des notifications pour vendeurs + admins
+    try {
+      await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
+    } catch (eNot) {
+      console.error('[Notify] enqueueOrderCreatedNotifications failed', eNot);
+    }
+
+    // 7) Notification temps réel pour le client (best effort, direct)
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
     } catch {}
 
-    // 7) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    // 8) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
     (async () => {
       try {
         const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client Duumini';
@@ -425,6 +575,9 @@ router.post('/', authRequired, async (req, res) => {
             FROM order_items oi
             JOIN product_images pi ON pi.product_id = oi.product_id
             WHERE oi.order_id = ?
+
+
+
             ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
             LIMIT 1
             `,
@@ -461,7 +614,13 @@ router.post('/', authRequired, async (req, res) => {
       }
     })();
 
-    res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
+    res.status(201).json({
+      id: orderId,
+      status: 'OPEN',
+      total: orderTotal,
+      currency,
+      geo_link: geoLink || null,
+    });
   } catch (e) {
     try { await conn.rollback(); } catch {}
     res.status(500).json({ error: e.message });
@@ -486,6 +645,7 @@ router.post('/guest', async (req, res) => {
     return res.status(400).json({ error: 'items[] required' });
   }
 
+  // 👇 Invité : on veut au minimum un téléphone + un nom si possible
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
     return res.status(400).json({ error: 'phone required' });
@@ -552,10 +712,18 @@ router.post('/guest', async (req, res) => {
 
     await conn.commit();
 
-    // 5) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    // 🔔 5) Enfiler des notifications pour vendeurs + admins
+    try {
+      await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
+    } catch (eNot) {
+      console.error('[Notify] enqueueOrderCreatedNotifications failed (guest)', eNot);
+    }
+
+    // 6) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
     (async () => {
       try {
-        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client invité Duumini';
+        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim()
+          || 'Client invité Duumini';
 
         const details = Array.isArray(items) && items.length
           ? items
@@ -613,7 +781,13 @@ router.post('/guest', async (req, res) => {
       }
     })();
 
-    res.status(201).json({ id: orderId, status: 'OPEN', total: orderTotal, currency });
+    res.status(201).json({
+      id: orderId,
+      status: 'OPEN',
+      total: orderTotal,
+      currency,
+      geo_link: geoLink || null,
+    });
   } catch (e) {
     try { await conn.rollback(); } catch {}
     res.status(500).json({ error: e.message });  
@@ -710,6 +884,13 @@ router.put('/:id/status', authRequired, async (req, res) => {
 
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
     if (order && order.user_id) {
+      // 🔔 file d'attente pour push + WS temps réel
+      try {
+        await enqueueOrderStatusForClient(id, status);
+      } catch (eQueue) {
+        console.error('[Notify] enqueueOrderStatusForClient failed', eQueue);
+      }
+
       try {
         const { notifyUser } = require('../services/notify');
         await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status });
@@ -741,11 +922,15 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
     await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
 
     try {
-      const { notifyUser } = require('../services/notify');
       if (order.user_id) {
+        await enqueueOrderStatusForClient(id, 'CANCELLED');
+
+        const { notifyUser } = require('../services/notify');
         await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status: 'CANCELLED' });
       }
-    } catch {}
+    } catch (eNot) {
+      console.error('[Notify] ORDER_STATUS cancel failed', eNot);
+    }
 
     res.json({ ok: true, status: 'CANCELLED' });
   } catch (e) { res.status(500).json({ error: e.message }); }
