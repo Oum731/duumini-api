@@ -146,15 +146,19 @@ async function sendWhatsAppMessage(to, body, mediaUrl) {
  * Helper pour notifier le BACKOFFICE d'une commande Duumini.
  * Ce n'est PAS un message client, mais un message interne :
  *   - résumé de la commande
- *   - infos client
+ *   - infos client (connecté OU invité)
  *   - adresse
  *   - liste des articles
  *   - + option image du produit (ex: première image de la commande)
+ *
+ * Pour le client invité, le backend envoie par ex. name = "Client invité Duumini".
+ * On peut aussi recevoir un displayCode alphanumérique (base36) à afficher.
  */
 async function sendWhatsAppOrderConfirmation({
   to,
   name,
   orderId,
+  displayCode,       // ✅ optionnel, ex: "3FZ9"
   total,
   ville,
   commune,
@@ -168,9 +172,16 @@ async function sendWhatsAppOrderConfirmation({
   // En-tête interne
   lines.push("🧾 *Nouvelle commande Duumini*");
 
-  if (orderId) {
+  // ID visible dans le message
+  if (displayCode && orderId) {
+    // Exemple : 3FZ9 (#24) → humain + traçabilité DB
+    lines.push(`• ID commande : ${displayCode} (#${orderId})`);
+  } else if (displayCode) {
+    lines.push(`• ID commande : ${displayCode}`);
+  } else if (orderId) {
     lines.push(`• ID commande : #${orderId}`);
   }
+
   if (name) {
     lines.push(`• Client : ${name}`);
   }

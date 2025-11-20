@@ -105,6 +105,15 @@ function buildContactFromPayload(c = {}) {
   };
 }
 
+/** Construit un code d'affichage alphanumérique à partir de l'id */
+function buildDisplayCode(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) {
+    return String(id ?? '').toUpperCase();
+  }
+  return n.toString(36).toUpperCase(); // ex: 123 => "3F"
+}
+
 /**
  * Charge une commande + vérifie les permissions en fonction de req.user.
  * Règles:
@@ -212,11 +221,13 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   if (!allUserIds.length) return;
 
   const cur = (currency || 'MAD').toUpperCase();
+  const displayCode = buildDisplayCode(orderId);
 
   const payloadObj = {
-    title: `Nouvelle commande #${orderId}`,
-    body: `Un client vient de passer une commande de ${total} ${cur}.`,
+    title: `Nouvelle commande ${displayCode}`,
+    body: `Un client vient de passer une commande ${displayCode} de ${total} ${cur}.`,
     order_id: orderId,
+    display_code: displayCode,
     total,
     currency: cur,
     status: 'OPEN',
@@ -256,11 +267,13 @@ async function enqueueOrderStatusForClient(orderId, status) {
 
   const cur = (row.currency || 'MAD').toUpperCase();
   const total = Number(row.total || 0);
+  const displayCode = buildDisplayCode(orderId);
 
   const payloadObj = {
-    title: `Mise à jour commande #${orderId}`,
-    body: `Le statut de votre commande est passé à ${status}.`,
+    title: `Mise à jour commande ${displayCode}`,
+    body: `Le statut de votre commande ${displayCode} est passé à ${status}.`,
     order_id: orderId,
+    display_code: displayCode,
     status,
     total,
     currency: cur,
@@ -280,6 +293,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
  * → ajoute toujours un champ contact (fallback users)
  * → ajoute first_product_cover pour la miniature
  * → ajoute geo_link pour ouvrir la localisation (connecté + invité)
+ * → ajoute display_code (ID alphanumérique)
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -324,6 +338,7 @@ router.get('/', authRequired, async (req, res) => {
 
         return {
           ...r,
+          display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
@@ -391,6 +406,7 @@ router.get('/', authRequired, async (req, res) => {
 
         return {
           ...r,
+          display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
@@ -441,6 +457,7 @@ router.get('/', authRequired, async (req, res) => {
 
       return {
         ...r,
+        display_code: buildDisplayCode(r.id),
         address,
         contact,
         geo_link,
@@ -525,6 +542,7 @@ router.post('/', authRequired, async (req, res) => {
       ]
     );
     const orderId = r.insertId;
+    const displayCode = buildDisplayCode(orderId);
 
     // 5) INSERT order_items (snapshots des prix)
     for (const it of cleanItems) {
@@ -547,7 +565,11 @@ router.post('/', authRequired, async (req, res) => {
     // 7) Notification temps réel pour le client (best effort, direct)
     try {
       const { notifyUser } = require('../services/notify');
-      await notifyUser(req.user.id, 'ORDER_CREATED', { order_id: orderId, total: orderTotal });
+      await notifyUser(req.user.id, 'ORDER_CREATED', {
+        order_id: orderId,
+        display_code: displayCode,
+        total: orderTotal,
+      });
     } catch {}
 
     // 8) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
@@ -575,9 +597,6 @@ router.post('/', authRequired, async (req, res) => {
             FROM order_items oi
             JOIN product_images pi ON pi.product_id = oi.product_id
             WHERE oi.order_id = ?
-
-
-
             ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
             LIMIT 1
             `,
@@ -594,6 +613,7 @@ router.post('/', authRequired, async (req, res) => {
           to: BACKOFFICE_WHATSAPP,         // 👉 numéro interne
           name: fullName,
           orderId,
+          displayCode,                     // ✅ code alphanumérique pour le message
           total: orderTotal,
           ville: addressObj.city || null,
           commune: addressObj.commune || null,
@@ -616,6 +636,7 @@ router.post('/', authRequired, async (req, res) => {
 
     res.status(201).json({
       id: orderId,
+      display_code: displayCode,
       status: 'OPEN',
       total: orderTotal,
       currency,
@@ -700,6 +721,7 @@ router.post('/guest', async (req, res) => {
       ]
     );
     const orderId = r.insertId;
+    const displayCode = buildDisplayCode(orderId);
 
     // 4) INSERT order_items
     for (const it of cleanItems) {
@@ -761,6 +783,7 @@ router.post('/guest', async (req, res) => {
           to: BACKOFFICE_WHATSAPP,        // 👉 numéro interne
           name: fullName,
           orderId,
+          displayCode,                    // ✅ code alphanumérique
           total: orderTotal,
           ville: addressObj.city || null,
           commune: addressObj.commune || null,
@@ -783,6 +806,7 @@ router.post('/guest', async (req, res) => {
 
     res.status(201).json({
       id: orderId,
+      display_code: displayCode,
       status: 'OPEN',
       total: orderTotal,
       currency,
@@ -832,6 +856,7 @@ router.get('/:id', authRequired, async (req, res) => {
 
     res.json({
       ...o,
+      display_code: buildDisplayCode(o.id),
       contact,               
       address: addr,
       items: result.items,   // contient product_cover
@@ -893,7 +918,11 @@ router.put('/:id/status', authRequired, async (req, res) => {
 
       try {
         const { notifyUser } = require('../services/notify');
-        await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status });
+        await notifyUser(order.user_id, 'ORDER_STATUS', {
+          order_id: id,
+          display_code: buildDisplayCode(id),
+          status,
+        });
       } catch {}
     }
 
@@ -926,7 +955,11 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
         await enqueueOrderStatusForClient(id, 'CANCELLED');
 
         const { notifyUser } = require('../services/notify');
-        await notifyUser(order.user_id, 'ORDER_STATUS', { order_id: id, status: 'CANCELLED' });
+        await notifyUser(order.user_id, 'ORDER_STATUS', {
+          order_id: id,
+          display_code: buildDisplayCode(id),
+          status: 'CANCELLED',
+        });
       }
     } catch (eNot) {
       console.error('[Notify] ORDER_STATUS cancel failed', eNot);
