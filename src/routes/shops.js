@@ -46,7 +46,6 @@ async function generateUniqueSlug(pool, base) {
   let slug = base || "shop";
   let suffix = 0;
 
-  // on boucle tant qu’un shop existe déjà avec ce slug
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const [rows] = await pool.query(
@@ -183,7 +182,7 @@ router.get("/:id", async (req, res) => {
  * Création d’une boutique (VENDEUR ou ADMIN).
  * Body: multipart/form-data
  *  - name (obligatoire côté UI, fallback API si vide)
- *  - category_id?, address?, city?, country?, lat?, lng?
+ *  - description?, category_id?, address?, city?, country?, lat?, lng?
  *  - logo_file? (fichier), cover_file? (fichier)
  *  - logo? / cover? (URL texte, en fallback si pas de fichier)
  * ==========================================================================*/
@@ -202,6 +201,7 @@ router.post(
     try {
       const {
         name,
+        description,
         category_id,
         address,
         city,
@@ -212,7 +212,7 @@ router.post(
         cover: coverText,
       } = req.body || {};
 
-      // On nettoie le nom. Si vraiment rien n'arrive, on met un fallback.
+      // Nettoyage nom + fallback
       const rawName = (name ?? "").toString();
       const cleanName = rawName.trim();
       const finalName = cleanName || "Boutique";
@@ -235,16 +235,21 @@ router.post(
         coverUrl = await uploadBufferToCloudinary(coverFile, "shops/cover");
       }
 
-      // ⚠️ On colle EXACTEMENT aux colonnes de la table MySQL
+      const finalDescription =
+        typeof description === "string" && description.trim()
+          ? description.trim()
+          : null;
+
       const [r] = await pool.query(
         `INSERT INTO shops (
-           owner_id, name, slug, category_id, address, city, country,
+           owner_id, name, slug, description, category_id, address, city, country,
            lat, lng, logo, cover
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           owner_id,
           finalName,
           slug,
+          finalDescription,
           category_id || null,
           address || null,
           city || null,
@@ -309,6 +314,7 @@ router.put(
 
       const {
         name,
+        description,
         category_id,
         address,
         city,
@@ -319,15 +325,19 @@ router.put(
         cover: coverText,
       } = req.body || {};
 
-      // On garde les valeurs existantes si rien n'est envoyé
-      const newName = (name ?? existing.name).toString().trim() || existing.name;
+      const newName =
+        (name ?? existing.name).toString().trim() || existing.name;
       let newSlug = existing.slug;
 
-      // Si le nom change, on régénère un slug unique
       if (name && newName !== existing.name) {
         const baseSlug = slugify(newName);
         newSlug = await generateUniqueSlug(pool, baseSlug);
       }
+
+      const finalDescription =
+        description != null
+          ? (description || "").toString().trim() || null
+          : existing.description;
 
       const logoFile =
         (req.files && req.files.logo_file && req.files.logo_file[0]) || null;
@@ -351,14 +361,14 @@ router.put(
         coverUrl = await uploadBufferToCloudinary(coverFile, "shops/cover");
       }
 
-      // ⚠️ On colle EXACTEMENT aux colonnes de la table MySQL
       await pool.query(
         `UPDATE shops
-         SET name=?, slug=?, category_id=?, address=?, city=?, country=?, lat=?, lng=?, logo=?, cover=?
+         SET name=?, slug=?, description=?, category_id=?, address=?, city=?, country=?, lat=?, lng=?, logo=?, cover=?
          WHERE id=?`,
         [
           newName,
           newSlug,
+          finalDescription,
           category_id != null ? category_id : existing.category_id,
           address != null ? address : existing.address,
           city != null ? city : existing.city,
