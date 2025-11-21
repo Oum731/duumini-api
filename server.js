@@ -43,7 +43,9 @@ app.use(
     origin(origin, cb) {
       if (corsOrigins === true) return cb(null, true); // autorise tout
       if (!origin) return cb(null, true); // Postman/SSR
-      if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) return cb(null, true);
+      if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) {
+        return cb(null, true);
+      }
       return cb(new Error("CORS not allowed for origin: " + origin));
     },
     credentials: true,
@@ -55,6 +57,9 @@ app.use(
       "Origin",
       "X-Requested-With",
       "x-access-token",
+      // ✅ ajoute les headers que le navigateur envoie automatiquement
+      "Cache-Control",
+      "Pragma",
     ],
     exposedHeaders: ["Content-Type", "Content-Length"],
     preflightContinue: false,
@@ -63,7 +68,7 @@ app.use(
   })
 );
 
-// ✅ Handler OPTIONS universel
+// ✅ Handler OPTIONS universel (préflight)
 app.use((req, res, next) => {
   if (req.method !== "OPTIONS") return next();
 
@@ -78,7 +83,16 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, Accept, Origin, X-Requested-With, x-access-token"
+    [
+      "Content-Type",
+      "Authorization",
+      "Accept",
+      "Origin",
+      "X-Requested-With",
+      "x-access-token",
+      "Cache-Control",
+      "Pragma",
+    ].join(", ")
   );
   return res.sendStatus(204);
 });
