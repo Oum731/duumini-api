@@ -47,8 +47,6 @@ async function generateUniqueSlug(pool, base) {
   let suffix = 0;
 
   // on boucle tant qu’un shop existe déjà avec ce slug
-  // NOTE: on pourrait optimiser avec une seule requête, mais ici c’est simple
-  // et suffisant pour peu de collisions.
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const [rows] = await pool.query(
@@ -74,7 +72,6 @@ function uploadBufferToCloudinary(file, folder = "shops") {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: folderPath,
-        // on peut dériver public_id du nom, mais ici on laisse Cloudinary décider
       },
       (err, result) => {
         if (err) return reject(err);
@@ -185,8 +182,8 @@ router.get("/:id", async (req, res) => {
  * POST /api/shops
  * Création d’une boutique (VENDEUR ou ADMIN).
  * Body: multipart/form-data
- *  - name (obligatoire)
- *  - category_id?, address?, city?, country?, lat?, lng?, phone?
+ *  - name (obligatoire côté UI, fallback API si vide)
+ *  - category_id?, address?, city?, country?, lat?, lng?
  *  - logo_file? (fichier), cover_file? (fichier)
  *  - logo? / cover? (URL texte, en fallback si pas de fichier)
  * ==========================================================================*/
@@ -211,20 +208,16 @@ router.post(
         country,
         lat,
         lng,
-        phone,
         logo: logoText,
         cover: coverText,
       } = req.body || {};
 
-      // 🔹 Nettoyage + validation du nom
-      const cleanName = (name ?? "").toString().trim();
-      if (!cleanName) {
-        return res
-          .status(400)
-          .json({ error: "Le nom de la boutique est obligatoire." });
-      }
+      // On nettoie le nom. Si vraiment rien n'arrive, on met un fallback.
+      const rawName = (name ?? "").toString();
+      const cleanName = rawName.trim();
+      const finalName = cleanName || "Boutique";
 
-      const baseSlug = slugify(cleanName);
+      const baseSlug = slugify(finalName);
       const slug = await generateUniqueSlug(pool, baseSlug);
 
       const logoFile =
@@ -242,14 +235,15 @@ router.post(
         coverUrl = await uploadBufferToCloudinary(coverFile, "shops/cover");
       }
 
+      // ⚠️ On colle EXACTEMENT aux colonnes de la table MySQL
       const [r] = await pool.query(
         `INSERT INTO shops (
            owner_id, name, slug, category_id, address, city, country,
-           lat, lng, phone, logo, cover
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           lat, lng, logo, cover
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
           owner_id,
-          cleanName,
+          finalName,
           slug,
           category_id || null,
           address || null,
@@ -257,7 +251,6 @@ router.post(
           country || "Maroc",
           lat || null,
           lng || null,
-          phone || null,
           logoUrl,
           coverUrl,
         ]
@@ -322,18 +315,17 @@ router.put(
         country,
         lat,
         lng,
-        phone,
         logo: logoText,
         cover: coverText,
       } = req.body || {};
 
       // On garde les valeurs existantes si rien n'est envoyé
-      const newName = name || existing.name;
+      const newName = (name ?? existing.name).toString().trim() || existing.name;
       let newSlug = existing.slug;
 
       // Si le nom change, on régénère un slug unique
-      if (name && name !== existing.name) {
-        const baseSlug = slugify(name);
+      if (name && newName !== existing.name) {
+        const baseSlug = slugify(newName);
         newSlug = await generateUniqueSlug(pool, baseSlug);
       }
 
@@ -346,7 +338,6 @@ router.put(
       let coverUrl = existing.cover;
 
       if (logoText != null) {
-        // si on envoie une URL texte, on la remplace
         logoUrl = logoText || null;
       }
       if (coverText != null) {
@@ -360,9 +351,10 @@ router.put(
         coverUrl = await uploadBufferToCloudinary(coverFile, "shops/cover");
       }
 
+      // ⚠️ On colle EXACTEMENT aux colonnes de la table MySQL
       await pool.query(
         `UPDATE shops
-         SET name=?, slug=?, category_id=?, address=?, city=?, country=?, lat=?, lng=?, phone=?, logo=?, cover=?
+         SET name=?, slug=?, category_id=?, address=?, city=?, country=?, lat=?, lng=?, logo=?, cover=?
          WHERE id=?`,
         [
           newName,
@@ -373,7 +365,6 @@ router.put(
           country || existing.country || "Maroc",
           lat != null ? lat : existing.lat,
           lng != null ? lng : existing.lng,
-          phone != null ? phone : existing.phone,
           logoUrl,
           coverUrl,
           id,
