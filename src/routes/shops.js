@@ -208,11 +208,15 @@ router.post(
         cover: coverText,
       } = req.body || {};
 
-      if (!name) {
-        return res.status(400).json({ error: "name required" });
+      // 🔹 Nettoyage + validation du nom
+      const cleanName = (name ?? "").toString().trim();
+      if (!cleanName) {
+        return res
+          .status(400)
+          .json({ error: "Le nom de la boutique est obligatoire." });
       }
 
-      const baseSlug = slugify(name);
+      const baseSlug = slugify(cleanName);
       const slug = await generateUniqueSlug(pool, baseSlug);
 
       const logoFile =
@@ -231,11 +235,13 @@ router.post(
       }
 
       const [r] = await pool.query(
-        `INSERT INTO shops (owner_id, name, slug, category_id, address, city, country, lat, lng, phone, logo, cover)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO shops (
+           owner_id, name, slug, category_id, address, city, country,
+           lat, lng, phone, logo, cover
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           owner_id,
-          name,
+          cleanName,                        // ✅ nom nettoyé
           slug,
           category_id || null,
           address || null,
@@ -265,6 +271,7 @@ router.post(
     }
   }
 );
+
 
 /* ============================================================================
  * PUT /api/shops/:id
