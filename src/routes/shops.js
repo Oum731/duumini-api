@@ -4,7 +4,12 @@ const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole, isAdmin, isVendor } = require("../middlewares/auth");
+const {
+  authRequired,
+  requireRole,
+  isAdmin,
+  isVendor,
+} = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { env } = require("../lib/env");
 
@@ -46,7 +51,10 @@ async function generateUniqueSlug(pool, base) {
   // et suffisant pour peu de collisions.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const [rows] = await pool.query("SELECT id FROM shops WHERE slug = ? LIMIT 1", [slug]);
+    const [rows] = await pool.query(
+      "SELECT id FROM shops WHERE slug = ? LIMIT 1",
+      [slug]
+    );
     if (!rows.length) return slug;
     suffix += 1;
     slug = `${base}-${suffix}`;
@@ -241,7 +249,7 @@ router.post(
          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           owner_id,
-          cleanName,                        // ✅ nom nettoyé
+          cleanName,
           slug,
           category_id || null,
           address || null,
@@ -271,7 +279,6 @@ router.post(
     }
   }
 );
-
 
 /* ============================================================================
  * PUT /api/shops/:id
