@@ -1,4 +1,4 @@
-// src/routes/products.js
+// api/routes/products.js
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
@@ -6,7 +6,7 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { authRequired, requireRole, isVendor } = require("../middlewares/auth");
+const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
 
 // --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
@@ -110,13 +110,18 @@ async function listProducts(pool, { limit, offset, channel, onlyActive }) {
   );
 
   const [rows] = await pool.query(
-    `SELECT p.*,
-            (SELECT url
-               FROM product_images pi
-              WHERE pi.product_id = p.id
-              ORDER BY sort_order ASC, id ASC
-              LIMIT 1) AS cover
+    `SELECT 
+        p.*,
+        s.name AS shop_name,
+        s.logo AS shop_logo,
+        s.cover AS shop_cover,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover
        FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
       WHERE ${where}
       ORDER BY p.created_at DESC
       LIMIT ? OFFSET ?`,
@@ -218,6 +223,9 @@ router.get("/top-ordered", async (req, res, next) => {
       `
       SELECT 
         p.*,
+        s.name AS shop_name,
+        s.logo AS shop_logo,
+        s.cover AS shop_cover,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -227,6 +235,7 @@ router.get("/top-ordered", async (req, res, next) => {
       FROM order_items oi
       JOIN orders o   ON o.id = oi.order_id
       JOIN products p ON p.id = oi.product_id
+      LEFT JOIN shops s ON s.id = p.shop_id
       WHERE o.status = 'DONE'
         AND p.is_active = 1
       GROUP BY p.id
@@ -257,6 +266,9 @@ router.get("/top-rated", async (req, res, next) => {
       `
       SELECT 
         p.*,
+        s.name AS shop_name,
+        s.logo AS shop_logo,
+        s.cover AS shop_cover,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -267,6 +279,7 @@ router.get("/top-rated", async (req, res, next) => {
       FROM product_ratings r
       JOIN products p ON p.id = r.product_id
                      AND p.is_active = 1
+      LEFT JOIN shops s ON s.id = p.shop_id
       GROUP BY p.id
       HAVING rating_count >= ?
       ORDER BY avg_rating DESC, rating_count DESC
@@ -291,7 +304,17 @@ router.get("/:id", async (req, res, next) => {
 
   const pool = getPool();
   try {
-    const [rows] = await pool.query(`SELECT * FROM products WHERE id=?`, [id]);
+    const [rows] = await pool.query(
+      `SELECT 
+         p.*,
+         s.name AS shop_name,
+         s.logo AS shop_logo,
+         s.cover AS shop_cover
+       FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
+       WHERE p.id=?`,
+      [id]
+    );
     const product = rows[0];
     if (!product) return res.status(404).json({ error: "Not found" });
 
@@ -312,12 +335,13 @@ router.get("/:id", async (req, res, next) => {
 /**
  * FormData attendu:
  *  - name, price
+ *  - shop_id (OBLIGATOIRE pour ADMIN, ignoré pour VENDEUR)
  *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'), is_active?
  *  - images[] (max 8)
  *
  * Règles:
  *  - VENDEUR: shop_id déduit de la boutique du vendeur (obligatoire pour lui)
- *  - ADMIN:  AUCUN système boutique → shop_id = NULL
+ *  - ADMIN:  shop_id doit être fourni, on vérifie que la boutique existe
  */
 router.post(
   "/",
@@ -337,6 +361,7 @@ router.post(
       promo_eligible,
       sub_category,
       is_active,
+      shop_id,
     } = req.body || {};
 
     const pool = getPool();
@@ -359,7 +384,23 @@ router.post(
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
-        finalShopId = null; // ADMIN: pas de système boutique
+        // ADMIN: shop_id DOIT être fourni et valide
+        const sid = Number(shop_id) || 0;
+        if (!sid) {
+          conn.release();
+          return res
+            .status(400)
+            .json({ error: "shop_id requis pour la création par un admin" });
+        }
+        const [[shop]] = await conn.query(
+          `SELECT id FROM shops WHERE id=? LIMIT 1`,
+          [sid]
+        );
+        if (!shop) {
+          conn.release();
+          return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+        }
+        finalShopId = sid;
       } else {
         conn.release();
         return res.status(403).json({ error: "Forbidden" });
@@ -389,7 +430,7 @@ router.post(
            (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, is_active)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
-          finalShopId, // ← NULL pour ADMIN
+          finalShopId,
           category_id ? Number(category_id) : null,
           name,
           makeSlug(),
@@ -503,6 +544,7 @@ router.put(
       category_id,
       replace_images,
       is_active,
+      shop_id,
     } = req.body || {};
 
     const pool = getPool();
@@ -534,6 +576,24 @@ router.put(
       // Normaliser is_active si fourni
       const active = parseBoolFlag(is_active, null);
 
+      // Gestion éventuelle du changement de boutique (ADMIN uniquement)
+      let newShopIdParam = null;
+      if (shop_id != null && shop_id !== "") {
+        const sid = Number(shop_id) || 0;
+        if (sid > 0 && isAdmin(req.user)) {
+          const [[shop]] = await conn.query(
+            `SELECT id FROM shops WHERE id=? LIMIT 1`,
+            [sid]
+          );
+          if (!shop) {
+            conn.release();
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          }
+          newShopIdParam = sid;
+        }
+        // Si vendeur -> on ignore tout changement de shop_id
+      }
+
       await conn.query(
         `UPDATE products SET
            name          = COALESCE(?, name),
@@ -545,7 +605,8 @@ router.put(
            promo_eligible= COALESCE(?, promo_eligible),
            sub_category  = COALESCE(?, sub_category),
            is_active     = COALESCE(?, is_active),
-           category_id   = COALESCE(?, category_id)
+           category_id   = COALESCE(?, category_id),
+           shop_id       = COALESCE(?, shop_id)
          WHERE id=?`,
         [
           name ?? null,
@@ -558,6 +619,7 @@ router.put(
           sub,
           active,
           category_id != null ? Number(category_id) : null,
+          newShopIdParam,
           id,
         ]
       );
