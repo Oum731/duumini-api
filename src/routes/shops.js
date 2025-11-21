@@ -195,6 +195,8 @@ router.post(
     { name: "cover_file", maxCount: 1 },
   ]),
   async (req, res) => {
+    console.log("CREATE SHOP BODY =", req.body); // 👈 AJOUTE ÇA
+
     const pool = getPool();
     const owner_id = req.user.id;
 
@@ -298,10 +300,9 @@ router.put(
     const pool = getPool();
 
     try {
-      const [rowsOwner] = await pool.query(
-        `SELECT * FROM shops WHERE id=?`,
-        [id]
-      );
+      const [rowsOwner] = await pool.query(`SELECT * FROM shops WHERE id=?`, [
+        id,
+      ]);
       const existing = rowsOwner[0];
       if (!existing) return res.status(404).json({ error: "Shop not found" });
 
