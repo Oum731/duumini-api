@@ -4,9 +4,9 @@ const { getPool } = require("../../lib/db");
 
 /**
  * On autorise le token en query string UNIQUEMENT
- * pour certaines routes (comme SSE /api/events/stream).
+ * pour la route SSE /api/events/stream (et équivalent).
  */
-const ALLOW_QUERY_TOKEN_PATHS = ["/api/events/stream"];
+const ALLOW_QUERY_TOKEN_PATHS = ["/api/events/stream", "/events/stream"];
 
 function extractToken(req) {
   // 1) Authorization: Bearer <token>
@@ -20,14 +20,19 @@ function extractToken(req) {
   const x = req.headers["x-access-token"];
   if (typeof x === "string" && x.trim()) return x.trim();
 
-  // 3) (optionnel) query ?access_token= (seulement pour certaines routes)
-  const path = req.path || req.originalUrl || "";
-  if (
-    req.query &&
-    req.query.access_token &&
-    ALLOW_QUERY_TOKEN_PATHS.includes(path)
-  ) {
-    return String(req.query.access_token).trim();
+  // 3) query ?access_token= (autorisé seulement pour certaines routes)
+  if (req.query && req.query.access_token) {
+    const tokenFromQuery = String(req.query.access_token).trim();
+
+    // Chemin complet SANS query
+    const baseUrl = req.baseUrl || "";
+    const path = req.path || "";
+    const fullPath = (baseUrl + path).split("?")[0];
+
+    const ok = ALLOW_QUERY_TOKEN_PATHS.includes(fullPath);
+    if (ok) {
+      return tokenFromQuery;
+    }
   }
 
   return null;
@@ -110,7 +115,7 @@ function requireRole(...roles) {
   };
 }
 
-const isAdmin  = (u) => String(u?.role).toUpperCase() === "ADMIN";
+const isAdmin = (u) => String(u?.role).toUpperCase() === "ADMIN";
 const isVendor = (u) => String(u?.role).toUpperCase() === "VENDEUR";
 
 module.exports = { authRequired, optionalAuth, requireRole, isAdmin, isVendor };

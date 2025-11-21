@@ -108,15 +108,15 @@ router.get("/pending-rating", authRequired, async (req, res) => {
 
   try {
     /**
-     * Schéma utilisé :
-     * - orders(id, user_id, status, created_at, updated_at, delivered_at|null)
+     * Schéma utilisé (adapté à ta DB) :
+     * - orders(id, user_id, status, created_at, updated_at, ...)
      * - order_items(id, order_id, product_id, qty, unit_price, ...)
      * - products(id, name, ...)
      * - product_images(id, product_id, url, sort_order, ...)
      * - product_ratings(id, product_id, user_id, rating, comment, created_at, ...)
      *
      * Date de "livraison" :
-     *   COALESCE(o.delivered_at, o.updated_at, o.created_at)
+     *   COALESCE(o.updated_at, o.created_at)
      */
     const [rows] = await pool.query(
       `SELECT
@@ -130,7 +130,7 @@ router.get("/pending-rating", authRequired, async (req, res) => {
            LIMIT 1
          ) AS product_image,
          o.id AS order_id,
-         COALESCE(o.delivered_at, o.updated_at, o.created_at) AS delivered_at
+         COALESCE(o.updated_at, o.created_at) AS delivered_at
        FROM orders o
        JOIN order_items oi ON oi.order_id = o.id
        JOIN products p ON p.id = oi.product_id
@@ -140,7 +140,7 @@ router.get("/pending-rating", authRequired, async (req, res) => {
        WHERE o.user_id = ?
          AND o.status = 'DONE'
          AND pr.id IS NULL
-         AND COALESCE(o.delivered_at, o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
+         AND COALESCE(o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
        ORDER BY delivered_at DESC
        LIMIT 1`,
       [userId]
