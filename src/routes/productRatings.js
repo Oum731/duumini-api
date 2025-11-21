@@ -108,32 +108,39 @@ router.get("/pending-rating", authRequired, async (req, res) => {
 
   try {
     /**
-     * Hypothèses de schéma (à ajuster si besoin) :
-     * - orders(id, user_id, status, created_at, updated_at, delivered_at|null)
-     * - order_items(id, order_id, product_id, quantity, unit_price, ...)
-     * - products(id, name, image_url, ...)
+     * Schéma aligné avec orders.js :
+     * - orders(id, user_id, status, total, currency, address, contact, geo_link, created_at, updated_at)
+     * - order_items(id, order_id, product_id, qty, unit_price, ...)
+     * - products(id, name, price, ...)
+     * - product_images(id, product_id, url, sort_order, ...)
      * - product_ratings(id, product_id, user_id, rating, comment, created_at, ...)
      *
      * On prend la date de "livraison" comme :
-     *   COALESCE(o.delivered_at, o.updated_at, o.created_at)
+     *   COALESCE(o.updated_at, o.created_at)
      */
     const [rows] = await pool.query(
       `SELECT
          p.id AS product_id,
          p.name AS product_name,
-         p.image_url AS product_image,
+         (
+           SELECT pi.url
+           FROM product_images pi
+           WHERE pi.product_id = p.id
+           ORDER BY pi.sort_order ASC, pi.id ASC
+           LIMIT 1
+         ) AS product_image,
          o.id AS order_id,
-         COALESCE(o.delivered_at, o.updated_at, o.created_at) AS delivered_at
+         COALESCE(o.updated_at, o.created_at) AS delivered_at
        FROM orders o
        JOIN order_items oi ON oi.order_id = o.id
-       JOIN products p ON p.id = oi.product_id
+       JOIN products p      ON p.id = oi.product_id
        LEFT JOIN product_ratings pr
          ON pr.product_id = p.id
         AND pr.user_id   = o.user_id
        WHERE o.user_id = ?
          AND o.status = 'DONE'
          AND pr.id IS NULL
-         AND COALESCE(o.delivered_at, o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
+         AND COALESCE(o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
        ORDER BY delivered_at DESC
        LIMIT 1`,
       [userId]

@@ -120,7 +120,7 @@ router.get("/", async (req, res) => {
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     console.error("GET /api/shops error:", e);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
@@ -146,7 +146,7 @@ router.get(
       res.json(rows);
     } catch (e) {
       console.error("GET /api/shops/mine error:", e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Erreur serveur" });
     }
   }
 );
@@ -173,7 +173,7 @@ router.get("/:id", async (req, res) => {
     res.json(shop);
   } catch (e) {
     console.error("GET /api/shops/:id error:", e);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
@@ -181,7 +181,7 @@ router.get("/:id", async (req, res) => {
  * POST /api/shops
  * Création d’une boutique (VENDEUR ou ADMIN).
  * Body: multipart/form-data
- *  - name (obligatoire côté UI, fallback API si vide)
+ *  - name (obligatoire)
  *  - description?, category_id?, address?, city?, country?, lat?, lng?
  *  - logo_file? (fichier), cover_file? (fichier)
  *  - logo? / cover? (URL texte, en fallback si pas de fichier)
@@ -195,10 +195,8 @@ router.post(
     { name: "cover_file", maxCount: 1 },
   ]),
   async (req, res) => {
-    console.log("CREATE SHOP BODY =", req.body); // 👈 AJOUTE ÇA
-
     const pool = getPool();
-    const owner_id = req.user.id;
+    const owner_id = req.user.id; // admin OU vendeur → propriétaire de la boutique
 
     try {
       const {
@@ -214,10 +212,12 @@ router.post(
         cover: coverText,
       } = req.body || {};
 
-      // Nettoyage nom + fallback
-      const rawName = (name ?? "").toString();
-      const cleanName = rawName.trim();
-      const finalName = cleanName || "Boutique";
+      // ✅ Nom OBLIGATOIRE (pas de fallback "Boutique")
+      const rawName = (name ?? "").toString().trim();
+      if (!rawName) {
+        return res.status(400).json({ error: "name required" });
+      }
+      const finalName = rawName;
 
       const baseSlug = slugify(finalName);
       const slug = await generateUniqueSlug(pool, baseSlug);
@@ -275,7 +275,7 @@ router.post(
       res.status(201).json(rows[0]);
     } catch (e) {
       console.error("POST /api/shops error:", e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Erreur serveur" });
     }
   }
 );
@@ -393,7 +393,7 @@ router.put(
       res.json(rows[0]);
     } catch (e) {
       console.error("PUT /api/shops/:id error:", e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Erreur serveur" });
     }
   }
 );
@@ -431,7 +431,7 @@ router.delete(
       res.json({ ok: true });
     } catch (e) {
       console.error("DELETE /api/shops/:id error:", e);
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: "Erreur serveur" });
     }
   }
 );
