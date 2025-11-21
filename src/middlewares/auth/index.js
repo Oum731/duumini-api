@@ -3,10 +3,10 @@ const { verifyAccess } = require("../../utils/jwt");
 const { getPool } = require("../../lib/db");
 
 /**
- * ⚠️ Pour SSE / WebSocket, on a besoin de supporter ?access_token=...
- * On passe donc à true. Le tout reste sécurisé tant que tu es en HTTPS.
+ * On autorise le token en query string UNIQUEMENT
+ * pour certaines routes (comme SSE /api/events/stream).
  */
-const ALLOW_QUERY_TOKEN = true;
+const ALLOW_QUERY_TOKEN_PATHS = ["/api/events/stream"];
 
 function extractToken(req) {
   // 1) Authorization: Bearer <token>
@@ -20,8 +20,13 @@ function extractToken(req) {
   const x = req.headers["x-access-token"];
   if (typeof x === "string" && x.trim()) return x.trim();
 
-  // 3) (optionnel) query ?access_token= (utile pour /api/events/stream)
-  if (ALLOW_QUERY_TOKEN && req.query && req.query.access_token) {
+  // 3) (optionnel) query ?access_token= (seulement pour certaines routes)
+  const path = req.path || req.originalUrl || "";
+  if (
+    req.query &&
+    req.query.access_token &&
+    ALLOW_QUERY_TOKEN_PATHS.includes(path)
+  ) {
     return String(req.query.access_token).trim();
   }
 
