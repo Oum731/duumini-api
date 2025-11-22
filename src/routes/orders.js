@@ -287,7 +287,6 @@ async function enqueueOrderStatusForClient(orderId, status) {
     [row.user_id, JSON.stringify(payloadObj)]
   );
 }
-
 /* =========================
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
@@ -299,10 +298,32 @@ router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
 
+  // 🔍 options de filtrage
+  const mine = req.query.mine === '1' || req.query.mine === 'true';
+  const rawStatus = req.query.status
+    ? String(req.query.status).toUpperCase()
+    : null;
+  const hasStatus = rawStatus && rawStatus !== 'ALL';
+
   try {
-    // ===== ADMIN =====
-    if (isAdmin(req.user)) {
-      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders`);
+    /* =========================
+     * CAS 1 : ?mine=1 → TOUJOURS MES COMMANDES
+     * (peu importe le rôle: ADMIN, VENDEUR ou simple client)
+     * =======================*/
+    if (mine) {
+      const params = [req.user.id];
+      let where = 'o.user_id = ?';
+
+      if (hasStatus) {
+        where += ' AND o.status = ?';
+        params.push(rawStatus);
+      }
+
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+        params
+      );
+
       const [rows] = await pool.query(
         `
         SELECT 
@@ -320,19 +341,27 @@ router.get('/', authRequired, async (req, res) => {
           ) AS first_product_cover
         FROM orders o
         LEFT JOIN users u ON u.id = o.user_id
+        WHERE ${where}
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [limit, offset]
+        [...params, limit, offset]
       );
 
-      const items = rows.map(r => {
+      const items = rows.map((r) => {
         const address = safeParseJSON(r.address);
         const contactFromOrder = safeParseJSON(r.contact);
         const contact =
-          (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+          contactFromOrder &&
+          (contactFromOrder.first_name ||
+            contactFromOrder.last_name ||
+            contactFromOrder.phone)
             ? contactFromOrder
-            : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+            : buildContactFromUser({
+                first_name: r.u_first,
+                last_name: r.u_last,
+                phone: r.u_phone,
+              });
 
         const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
@@ -345,11 +374,97 @@ router.get('/', authRequired, async (req, res) => {
         };
       });
 
-      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
+      return res.json({
+        items,
+        pageInfo: buildPageInfo(total, page, pageSize),
+      });
     }
 
-    // ===== VENDEUR =====
+    /* =========================
+     * CAS 2 : ADMIN (backoffice)
+     * =======================*/
+    if (isAdmin(req.user)) {
+      let where = '1=1';
+      const params = [];
+
+      if (hasStatus) {
+        where += ' AND o.status = ?';
+        params.push(rawStatus);
+      }
+
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+        params
+      );
+
+      const [rows] = await pool.query(
+        `
+        SELECT 
+          o.*,
+          u.first_name AS u_first,
+          u.last_name  AS u_last,
+          u.phone      AS u_phone,
+          (
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = o.id
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS first_product_cover
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
+        WHERE ${where}
+        ORDER BY o.created_at DESC
+        LIMIT ? OFFSET ?
+        `,
+        [...params, limit, offset]
+      );
+
+      const items = rows.map((r) => {
+        const address = safeParseJSON(r.address);
+        const contactFromOrder = safeParseJSON(r.contact);
+        const contact =
+          contactFromOrder &&
+          (contactFromOrder.first_name ||
+            contactFromOrder.last_name ||
+            contactFromOrder.phone)
+            ? contactFromOrder
+            : buildContactFromUser({
+                first_name: r.u_first,
+                last_name: r.u_last,
+                phone: r.u_phone,
+              });
+
+        const geo_link = r.geo_link || buildGeoLink(address?.gps);
+
+        return {
+          ...r,
+          display_code: buildDisplayCode(r.id),
+          address,
+          contact,
+          geo_link,
+        };
+      });
+
+      return res.json({
+        items,
+        pageInfo: buildPageInfo(total, page, pageSize),
+      });
+    }
+
+    /* =========================
+     * CAS 3 : VENDEUR (backoffice vendeur)
+     * =======================*/
     if (isVendor(req.user)) {
+      let where = 's.owner_id = ?';
+      const params = [req.user.id];
+
+      if (hasStatus) {
+        where += ' AND o.status = ?';
+        params.push(rawStatus);
+      }
+
       // Nombre de commandes qui contiennent au moins 1 produit de ce vendeur
       const [[{ total }]] = await pool.query(
         `
@@ -358,9 +473,9 @@ router.get('/', authRequired, async (req, res) => {
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
         JOIN shops s        ON s.id = p.shop_id
-        WHERE s.owner_id = ?
+        WHERE ${where}
         `,
-        [req.user.id]
+        params
       );
 
       const [rows] = await pool.query(
@@ -386,21 +501,28 @@ router.get('/', authRequired, async (req, res) => {
         JOIN products p     ON p.id = oi.product_id
         JOIN shops s        ON s.id = p.shop_id
         LEFT JOIN users u   ON u.id = o.user_id
-        WHERE s.owner_id = ?
+        WHERE ${where}
         GROUP BY o.id
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, limit, offset]
+        [...params, limit, offset]
       );
 
-      const items = rows.map(r => {
+      const items = rows.map((r) => {
         const address = safeParseJSON(r.address);
         const contactFromOrder = safeParseJSON(r.contact);
         const contact =
-          (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+          contactFromOrder &&
+          (contactFromOrder.first_name ||
+            contactFromOrder.last_name ||
+            contactFromOrder.phone)
             ? contactFromOrder
-            : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+            : buildContactFromUser({
+                first_name: r.u_first,
+                last_name: r.u_last,
+                phone: r.u_phone,
+              });
 
         const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
@@ -413,14 +535,28 @@ router.get('/', authRequired, async (req, res) => {
         };
       });
 
-      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
+      return res.json({
+        items,
+        pageInfo: buildPageInfo(total, page, pageSize),
+      });
     }
 
-    // ===== CLIENT SIMPLE (historique de ses commandes) =====
+    /* =========================
+     * CAS 4 : CLIENT simple (non admin / non vendeur)
+     * =======================*/
+    const params = [req.user.id];
+    let where = 'o.user_id = ?';
+
+    if (hasStatus) {
+      where += ' AND o.status = ?';
+      params.push(rawStatus);
+    }
+
     const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) total FROM orders WHERE user_id=?`,
-      [req.user.id]
+      `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+      params
     );
+
     const [rows] = await pool.query(
       `
       SELECT 
@@ -438,20 +574,27 @@ router.get('/', authRequired, async (req, res) => {
         ) AS first_product_cover
       FROM orders o
       LEFT JOIN users u ON u.id = o.user_id
-      WHERE o.user_id = ?
+      WHERE ${where}
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
       `,
-      [req.user.id, limit, offset]
+      [...params, limit, offset]
     );
 
-    const items = rows.map(r => {
+    const items = rows.map((r) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
       const contact =
-        (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+        contactFromOrder &&
+        (contactFromOrder.first_name ||
+          contactFromOrder.last_name ||
+          contactFromOrder.phone)
           ? contactFromOrder
-          : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+          : buildContactFromUser({
+              first_name: r.u_first,
+              last_name: r.u_last,
+              phone: r.u_phone,
+            });
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
@@ -464,11 +607,15 @@ router.get('/', authRequired, async (req, res) => {
       };
     });
 
-    return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
+    return res.json({
+      items,
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
 
 /* =========================
  * Create order (UTILISATEUR CONNECTÉ)
