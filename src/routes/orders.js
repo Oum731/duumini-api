@@ -114,6 +114,22 @@ function buildDisplayCode(id) {
   return n.toString(36).toUpperCase(); // ex: 123 => "3F"
 }
 
+/** Commission pour une ligne : 18% food, 11% sinon */
+function computeCommissionForLine(unitPrice, qty, subCategory) {
+  const totalLine = Number(unitPrice || 0) * Number(qty || 1);
+  const sub = String(subCategory || '').trim().toLowerCase();
+  const rate = sub === 'food' ? 0.18 : 0.11;
+  return +(totalLine * rate).toFixed(2);
+}
+
+/** On enlève commission_duumini pour les clients (non admin / non vendeur) */
+function stripCommissionFromOrderRow(row, user) {
+  if (!row) return row;
+  if (isAdmin(user) || isVendor(user)) return row;
+  const { commission_duumini, ...rest } = row;
+  return rest;
+}
+
 /**
  * Charge une commande + vérifie les permissions en fonction de req.user.
  * Règles:
@@ -124,8 +140,8 @@ function buildDisplayCode(id) {
  *   { status: 200, order, items }  ou  { status, error }
  */
 async function getOrderWithPerm(conn, id, user) {
-  const [[order]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
-  if (!order) return { status: 404, error: 'Not found' };
+  const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
+  if (!orderRaw) return { status: 404, error: 'Not found' };
 
   if (!isAdmin(user)) {
     if (isVendor(user)) {
@@ -142,11 +158,14 @@ async function getOrderWithPerm(conn, id, user) {
       );
       if (!own) return { status: 403, error: 'Forbidden' };
     } else {
-      if (String(order.user_id) !== String(user.id)) {
+      if (String(orderRaw.user_id) !== String(user.id)) {
         return { status: 403, error: 'Forbidden' };
       }
     }
   }
+
+  // On masque la commission pour les clients simples
+  const order = stripCommissionFromOrderRow(orderRaw, user);
 
   // ✅ Items + nom produit + image (product_cover)
   const [items] = await conn.query(
@@ -287,6 +306,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
     [row.user_id, JSON.stringify(payloadObj)]
   );
 }
+
 /* =========================
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
@@ -324,7 +344,7 @@ router.get('/', authRequired, async (req, res) => {
         params
       );
 
-      const [rows] = await pool.query(
+      const [rowsRaw] = await pool.query(
         `
         SELECT 
           o.*,
@@ -347,6 +367,8 @@ router.get('/', authRequired, async (req, res) => {
         `,
         [...params, limit, offset]
       );
+
+      const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
 
       const items = rows.map((r) => {
         const address = safeParseJSON(r.address);
@@ -397,7 +419,7 @@ router.get('/', authRequired, async (req, res) => {
         params
       );
 
-      const [rows] = await pool.query(
+      const [rowsRaw] = await pool.query(
         `
         SELECT 
           o.*,
@@ -420,6 +442,9 @@ router.get('/', authRequired, async (req, res) => {
         `,
         [...params, limit, offset]
       );
+
+      // Admin peut voir la commission → pas de strip
+      const rows = rowsRaw;
 
       const items = rows.map((r) => {
         const address = safeParseJSON(r.address);
@@ -478,7 +503,7 @@ router.get('/', authRequired, async (req, res) => {
         params
       );
 
-      const [rows] = await pool.query(
+      const [rowsRaw] = await pool.query(
         `
         SELECT 
           o.*,
@@ -508,6 +533,9 @@ router.get('/', authRequired, async (req, res) => {
         `,
         [...params, limit, offset]
       );
+
+      // Vendeur peut voir la commission → pas de strip
+      const rows = rowsRaw;
 
       const items = rows.map((r) => {
         const address = safeParseJSON(r.address);
@@ -557,7 +585,7 @@ router.get('/', authRequired, async (req, res) => {
       params
     );
 
-    const [rows] = await pool.query(
+    const [rowsRaw] = await pool.query(
       `
       SELECT 
         o.*,
@@ -580,6 +608,8 @@ router.get('/', authRequired, async (req, res) => {
       `,
       [...params, limit, offset]
     );
+
+    const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
 
     const items = rows.map((r) => {
       const address = safeParseJSON(r.address);
@@ -651,6 +681,7 @@ router.post('/', authRequired, async (req, res) => {
 
     // 3) Recalcule total articles côté serveur (ignore price du front)
     let itemsAmount = 0;
+    let totalCommission = 0;
     const cleanItems = [];
 
     for (const it of items) {
@@ -659,14 +690,17 @@ router.post('/', authRequired, async (req, res) => {
       if (!product_id || !qty) throw new Error('product_id & qty required');
 
       const [[p]] = await conn.query(
-        `SELECT id, price FROM products WHERE id=?`,
+        `SELECT id, price, sub_category FROM products WHERE id=?`,
         [product_id]
       );
       if (!p) throw new Error('Product not found: ' + product_id);
 
       const unit_price = Number(p.price);
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+
       cleanItems.push({ product_id: p.id, qty, unit_price });
       itemsAmount += unit_price * qty;
+      totalCommission += lineCommission;
     }
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -676,8 +710,8 @@ router.post('/', authRequired, async (req, res) => {
     // 4) INSERT order
     const [r] = await conn.query(
       `
-      INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
-      VALUES (?, 'OPEN', ?, ?, ?, ?, ?, NOW(), NOW())
+      INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
+      VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, NOW(), NOW())
       `,
       [
         req.user.id,
@@ -685,6 +719,7 @@ router.post('/', authRequired, async (req, res) => {
         JSON.stringify(contactObj),
         geoLink,
         orderTotal,
+        +totalCommission.toFixed(2),
         currency,
       ]
     );
@@ -831,6 +866,7 @@ router.post('/guest', async (req, res) => {
 
     // 2) Recalcule total articles côté serveur
     let itemsAmount = 0;
+    let totalCommission = 0;
     const cleanItems = [];
 
     for (const it of items) {
@@ -839,14 +875,17 @@ router.post('/guest', async (req, res) => {
       if (!product_id || !qty) throw new Error('product_id & qty required');
 
       const [[p]] = await conn.query(
-        `SELECT id, price FROM products WHERE id=?`,
+        `SELECT id, price, sub_category FROM products WHERE id=?`,
         [product_id]
       );
       if (!p) throw new Error('Product not found: ' + product_id);
 
       const unit_price = Number(p.price);
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+
       cleanItems.push({ product_id: p.id, qty, unit_price });
       itemsAmount += unit_price * qty;
+      totalCommission += lineCommission;
     }
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -856,14 +895,15 @@ router.post('/guest', async (req, res) => {
     // 3) INSERT order invité
     const [r] = await conn.query(
       `
-      INSERT INTO orders (user_id, status, address, contact, geo_link, total, currency, created_at, updated_at)
-      VALUES (NULL, 'OPEN', ?, ?, ?, ?, ?, NOW(), NOW())
+      INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
+      VALUES (NULL, 'OPEN', ?, ?, ?, ?, ?, ?, NOW(), NOW())
       `,
       [
         JSON.stringify(addressObj),
         JSON.stringify(contactObj),
         geoLink,
         orderTotal,
+        +totalCommission.toFixed(2),
         currency,
       ]
     );

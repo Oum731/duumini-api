@@ -85,6 +85,21 @@ function parseBoolFlag(value, defaultValue = null) {
   return defaultValue;
 }
 
+// Taux de commission Duumini en fonction de la sous-catégorie
+// sub = 'food' → 18% ; sinon (market/product/…) → 11%
+function computeDuuminiRateFromSubCategory(subCategory) {
+  const sub = String(subCategory || "").trim().toLowerCase();
+  if (sub === "food") return 0.18;    // Food
+  return 0.11;                        // Market / autres
+}
+
+// Supprime duumini_rate avant d'envoyer au front
+function stripDuuminiRateFromProduct(row) {
+  if (!row) return row;
+  const { duumini_rate, ...rest } = row;
+  return rest;
+}
+
 async function listProducts(pool, { limit, offset, channel, onlyActive }) {
   // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
   const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
@@ -109,7 +124,7 @@ async function listProducts(pool, { limit, offset, channel, onlyActive }) {
       WHERE ${where}`
   );
 
-  const [rows] = await pool.query(
+  const [rowsRaw] = await pool.query(
     `SELECT 
         p.*,
         s.name AS shop_name,
@@ -127,6 +142,8 @@ async function listProducts(pool, { limit, offset, channel, onlyActive }) {
       LIMIT ? OFFSET ?`,
     [Number(limit), Number(offset)]
   );
+
+  const rows = rowsRaw.map(stripDuuminiRateFromProduct);
 
   return { rows, total };
 }
@@ -219,7 +236,7 @@ router.get("/top-ordered", async (req, res, next) => {
   const limit = toPositiveInt(req.query.limit, 8); // ✅ pas de NaN
 
   try {
-    const [rows] = await pool.query(
+    const [rowsRaw] = await pool.query(
       `
       SELECT 
         p.*,
@@ -245,6 +262,8 @@ router.get("/top-ordered", async (req, res, next) => {
       [limit]
     );
 
+    const rows = rowsRaw.map(stripDuuminiRateFromProduct);
+
     res.json(rows);
   } catch (e) {
     next(e);
@@ -262,7 +281,7 @@ router.get("/top-rated", async (req, res, next) => {
   const minCount = toPositiveInt(req.query.minCount, 2);
 
   try {
-    const [rows] = await pool.query(
+    const [rowsRaw] = await pool.query(
       `
       SELECT 
         p.*,
@@ -287,6 +306,8 @@ router.get("/top-rated", async (req, res, next) => {
       `,
       [minCount, limit]
     );
+
+    const rows = rowsRaw.map(stripDuuminiRateFromProduct);
 
     res.json(rows);
   } catch (e) {
@@ -315,8 +336,10 @@ router.get("/:id", async (req, res, next) => {
        WHERE p.id=?`,
       [id]
     );
-    const product = rows[0];
-    if (!product) return res.status(404).json({ error: "Not found" });
+    const rawProduct = rows[0];
+    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+
+    const product = stripDuuminiRateFromProduct(rawProduct);
 
     const [images] = await pool.query(
       `SELECT id, url, sort_order
@@ -413,7 +436,11 @@ router.post(
 
       // Normaliser sub_category: 'food' | 'product' (par défaut 'product')
       const rawSub = String(sub_category || "").trim().toLowerCase();
-      const sub = rawSub === "food" || rawSub === "product" ? rawSub : "product";
+      const sub =
+        rawSub === "food" || rawSub === "product" ? rawSub : "product";
+
+      // Calcul du taux de commission Duumini (caché du front)
+      const duuminiRate = computeDuuminiRateFromSubCategory(sub);
 
       // Normaliser is_active (par défaut 1 = actif)
       const active = parseBoolFlag(is_active, 1);
@@ -427,8 +454,8 @@ router.post(
       await conn.beginTransaction();
       const [r] = await conn.query(
         `INSERT INTO products
-           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, is_active)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, duumini_rate, is_active)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           finalShopId,
           category_id ? Number(category_id) : null,
@@ -441,6 +468,7 @@ router.post(
           is_featured ? 1 : 0,
           promo_eligible ? 1 : 0,
           sub,
+          duuminiRate,
           active,
         ]
       );
@@ -571,7 +599,19 @@ router.put(
       // Normaliser sub_category: appliquer uniquement si valeur valide
       const rawSub =
         sub_category != null ? String(sub_category).trim().toLowerCase() : null;
-      const sub = rawSub === "food" || rawSub === "product" ? rawSub : null;
+      let sub = null;
+      if (rawSub === "food" || rawSub === "product") {
+        sub = rawSub;
+      }
+
+      // Sous-catégorie effective (si pas envoyée, on garde l'existant)
+      const effectiveSub =
+        sub != null
+          ? sub
+          : String(prod.sub_category || "").trim().toLowerCase() || "product";
+
+      // Recalcul du taux Duumini en fonction de la sous-catégorie effective
+      const duuminiRate = computeDuuminiRateFromSubCategory(effectiveSub);
 
       // Normaliser is_active si fourni
       const active = parseBoolFlag(is_active, null);
@@ -603,7 +643,8 @@ router.put(
            stock         = COALESCE(?, stock),
            is_featured   = COALESCE(?, is_featured),
            promo_eligible= COALESCE(?, promo_eligible),
-           sub_category  = COALESCE(?, sub_category),
+           sub_category  = ?,
+           duumini_rate  = ?,
            is_active     = COALESCE(?, is_active),
            category_id   = COALESCE(?, category_id),
            shop_id       = COALESCE(?, shop_id)
@@ -616,7 +657,8 @@ router.put(
           stock != null ? Number(stock) : null,
           is_featured === undefined ? null : is_featured ? 1 : 0,
           promo_eligible === undefined ? null : promo_eligible ? 1 : 0,
-          sub,
+          effectiveSub,
+          duuminiRate,
           active,
           category_id != null ? Number(category_id) : null,
           newShopIdParam,
