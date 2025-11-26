@@ -28,6 +28,10 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
 });
 
+/* ========= Commission Duumini ========= */
+// Exemple : DUUMINI_COMMISSION_RATE=0.15 dans .env => 15%
+const COMMISSION_RATE = Number(env.DUUMINI_COMMISSION_RATE || 0.15);
+
 /* ========= Helpers ========= */
 
 // Slugify simple
@@ -176,6 +180,135 @@ router.get("/:id", async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
+/* ============================================================================
+ * GET /api/shops/:id/stats
+ * Stats CA / Duumini / produits les plus commandés pour UNE boutique (ADMIN).
+ *
+ * Retour:
+ * {
+ *   turnover: { day, month, year },
+ *   duumini: { day, month, year },
+ *   top_products: [{ product_id, name, total_qty, total_amount, cover }]
+ * }
+ * ==========================================================================*/
+router.get(
+  "/:id/stats",
+  authRequired,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const shopId = Number(req.params.id) || 0;
+    if (!shopId) return res.status(400).json({ error: "Invalid id" });
+
+    const pool = getPool();
+
+    try {
+      // Vérifier que la boutique existe
+      const [rowsShop] = await pool.query(
+        "SELECT id, name FROM shops WHERE id=? LIMIT 1",
+        [shopId]
+      );
+      if (!rowsShop.length) {
+        return res.status(404).json({ error: "Shop not found" });
+      }
+
+      // On ne compte que les commandes non annulées
+      const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
+
+      // ===== CA jour / mois / année (somme des totaux de commandes) =====
+      const [rowsTurnover] = await pool.query(
+        `
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN DATE(o.created_at) = CURDATE()
+              AND o.status IN (${validStatuses.map(() => "?").join(",")})
+            THEN o.total
+          END), 0) AS day_turnover,
+          COALESCE(SUM(CASE
+            WHEN YEAR(o.created_at) = YEAR(CURDATE())
+              AND MONTH(o.created_at) = MONTH(CURDATE())
+              AND o.status IN (${validStatuses.map(() => "?").join(",")})
+            THEN o.total
+          END), 0) AS month_turnover,
+          COALESCE(SUM(CASE
+            WHEN YEAR(o.created_at) = YEAR(CURDATE())
+              AND o.status IN (${validStatuses.map(() => "?").join(",")})
+            THEN o.total
+          END), 0) AS year_turnover
+        FROM orders o
+        WHERE o.shop_id = ?
+        `,
+        [
+          // DAY
+          ...validStatuses,
+          // MONTH
+          ...validStatuses,
+          // YEAR
+          ...validStatuses,
+          shopId,
+        ]
+      );
+
+      const t = rowsTurnover[0] || {
+        day_turnover: 0,
+        month_turnover: 0,
+        year_turnover: 0,
+      };
+
+      const turnover = {
+        day: Number(t.day_turnover || 0),
+        month: Number(t.month_turnover || 0),
+        year: Number(t.year_turnover || 0),
+      };
+
+      const duumini = {
+        day: Math.round(turnover.day * COMMISSION_RATE * 100) / 100,
+        month: Math.round(turnover.month * COMMISSION_RATE * 100) / 100,
+        year: Math.round(turnover.year * COMMISSION_RATE * 100) / 100,
+      };
+
+      // ===== Produits les plus commandés (sur les 30 derniers jours) =====
+      const [rowsTopProducts] = await pool.query(
+        `
+        SELECT
+          oi.product_id,
+          COALESCE(p.name, oi.product_name, CONCAT('Produit #', oi.product_id)) AS name,
+          p.cover,
+          SUM(oi.qty) AS total_qty,
+          SUM(oi.qty * COALESCE(oi.unit_price, oi.price, 0)) AS total_amount
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        LEFT JOIN products p ON p.id = oi.product_id
+        WHERE
+          o.shop_id = ?
+          AND o.status IN (${validStatuses.map(() => "?").join(",")})
+          AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        GROUP BY oi.product_id, name, p.cover
+        ORDER BY total_qty DESC, total_amount DESC
+        LIMIT 10
+        `,
+        [shopId, ...validStatuses]
+      );
+
+      const top_products = rowsTopProducts.map((r) => ({
+        product_id: r.product_id,
+        name: r.name,
+        total_qty: Number(r.total_qty || 0),
+        total_amount: Number(r.total_amount || 0),
+        cover: r.cover || null,
+      }));
+
+      res.json({
+        turnover,
+        duumini,
+        top_products,
+      });
+    } catch (e) {
+      console.error("GET /api/shops/:id/stats error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
 
 /* ============================================================================
  * POST /api/shops
