@@ -93,11 +93,30 @@ function computeDuuminiRateFromSubCategory(subCategory) {
   return 0.11;                        // Market / autres
 }
 
-// Supprime duumini_rate avant d'envoyer au front
+/**
+ * Normalise un produit pour le front :
+ * - price = prix client (prix vendeur + commission)
+ * - vendor_price = prix vendeur (optionnel, utile pour backoffice)
+ * - duumini_rate est masqué
+ */
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
-  const { duumini_rate, ...rest } = row;
-  return rest;
+
+  const { duumini_rate, price, ...rest } = row;
+
+  const rate =
+    typeof duumini_rate === "number"
+      ? duumini_rate
+      : computeDuuminiRateFromSubCategory(row.sub_category);
+
+  const base = Number(price || 0); // prix vendeur stocké en BDD
+  const clientPrice = +(base * (1 + rate)).toFixed(2); // prix client (avec commission)
+
+  return {
+    ...rest,
+    vendor_price: base,  // visible si tu l'utilises côté backoffice
+    price: clientPrice,  // 💰 prix final affiché à tous les clients
+  };
 }
 
 async function listProducts(pool, { limit, offset, channel, onlyActive }) {
@@ -461,7 +480,7 @@ router.post(
           category_id ? Number(category_id) : null,
           name,
           makeSlug(),
-          Number(price),
+          Number(price),            // prix vendeur en base
           currency || "MAD",
           description || null,
           stock != null ? Number(stock) : 0,
@@ -651,7 +670,7 @@ router.put(
          WHERE id=?`,
         [
           name ?? null,
-          price != null ? Number(price) : null,
+          price != null ? Number(price) : null,   // prix vendeur
           currency ?? null,
           description ?? null,
           stock != null ? Number(stock) : null,

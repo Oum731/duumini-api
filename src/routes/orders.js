@@ -114,12 +114,26 @@ function buildDisplayCode(id) {
   return n.toString(36).toUpperCase(); // ex: 123 => "3F"
 }
 
-/** Commission pour une ligne : 18% food, 11% sinon */
-function computeCommissionForLine(unitPrice, qty, subCategory) {
-  const totalLine = Number(unitPrice || 0) * Number(qty || 1);
+/**
+ * Commission pour une ligne : 18% food, 11% sinon.
+ * ⚠️ Ici on passe le PRIX VENDEUR (base) pour calculer la commission Duumini.
+ */
+function computeCommissionForLine(baseUnitPrice, qty, subCategory) {
+  const totalBaseLine = Number(baseUnitPrice || 0) * Number(qty || 1);
   const sub = String(subCategory || '').trim().toLowerCase();
   const rate = sub === 'food' ? 0.18 : 0.11;
-  return +(totalLine * rate).toFixed(2);
+  return +(totalBaseLine * rate).toFixed(2);
+}
+
+/**
+ * Prix unitaire payé par le client = prix vendeur + commission
+ * → utilisé pour order_items.unit_price
+ */
+function computeClientUnitPrice(basePrice, subCategory) {
+  const sub = String(subCategory || '').trim().toLowerCase();
+  const rate = sub === 'food' ? 0.18 : 0.11;
+  const base = Number(basePrice || 0);
+  return +(base * (1 + rate)).toFixed(2);
 }
 
 /** On enlève commission_duumini pour les clients (non admin / non vendeur) */
@@ -311,6 +325,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
  * → ajoute first_product_cover pour la miniature
+ * → ajoute items_amount (somme des lignes produits)
  * → ajoute geo_link pour ouvrir la localisation (connecté + invité)
  * → ajoute display_code (ID alphanumérique)
  * =======================*/
@@ -351,6 +366,11 @@ router.get('/', authRequired, async (req, res) => {
           u.first_name AS u_first,
           u.last_name  AS u_last,
           u.phone      AS u_phone,
+          (
+            SELECT SUM(oi2.qty * oi2.unit_price)
+            FROM order_items oi2
+            WHERE oi2.order_id = o.id
+          ) AS items_amount,
           (
             SELECT pi.url
             FROM order_items oi
@@ -426,6 +446,11 @@ router.get('/', authRequired, async (req, res) => {
           u.first_name AS u_first,
           u.last_name  AS u_last,
           u.phone      AS u_phone,
+          (
+            SELECT SUM(oi2.qty * oi2.unit_price)
+            FROM order_items oi2
+            WHERE oi2.order_id = o.id
+          ) AS items_amount,
           (
             SELECT pi.url
             FROM order_items oi
@@ -511,6 +536,11 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
+            SELECT SUM(oi_all.qty * oi_all.unit_price)
+            FROM order_items oi_all
+            WHERE oi_all.order_id = o.id
+          ) AS items_amount,
+          (
             SELECT pi.url
             FROM order_items oi2
             JOIN products p2     ON p2.id = oi2.product_id
@@ -592,6 +622,11 @@ router.get('/', authRequired, async (req, res) => {
         u.first_name AS u_first,
         u.last_name  AS u_last,
         u.phone      AS u_phone,
+        (
+          SELECT SUM(oi2.qty * oi2.unit_price)
+          FROM order_items oi2
+          WHERE oi2.order_id = o.id
+        ) AS items_amount,
         (
           SELECT pi.url
           FROM order_items oi
@@ -704,17 +739,18 @@ router.post('/', authRequired, async (req, res) => {
         throw err;
       }
 
-      const unit_price = Number(p.price);
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+      const basePrice = Number(p.price); // prix vendeur en base
+      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // prix client
+      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category);
 
       cleanItems.push({
         product_id: p.id,
         qty,
-        unit_price,
+        unit_price,          // ✅ ce que paie le client
         current_stock: p.stock,
       });
 
-      itemsAmount += unit_price * qty;
+      itemsAmount += unit_price * qty;  // ✅ total client
       totalCommission += lineCommission;
     }
 
@@ -935,13 +971,14 @@ router.post('/guest', async (req, res) => {
         throw err;
       }
 
-      const unit_price = Number(p.price);
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+      const basePrice = Number(p.price); // prix vendeur
+      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // prix client
+      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category);
 
       cleanItems.push({
         product_id: p.id,
         qty,
-        unit_price,
+        unit_price,          // ✅ prix payé par le client
         current_stock: p.stock,
       });
 
