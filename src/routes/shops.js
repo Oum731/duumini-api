@@ -269,13 +269,19 @@ router.get(
         year: Math.round(turnover.year * COMMISSION_RATE * 100) / 100,
       };
 
-      // ===== Produits les plus commandés (sur les 30 derniers jours) =====
+            // ===== Produits les plus commandés (sur les 30 derniers jours) =====
       const [rowsTopProducts] = await pool.query(
         `
         SELECT
           oi.product_id,
           COALESCE(p.name, oi.product_name, CONCAT('Produit #', oi.product_id)) AS name,
-          p.cover,
+          (
+            SELECT pi.url
+            FROM product_images pi
+            WHERE pi.product_id = p.id
+            ORDER BY pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS cover,
           SUM(oi.qty) AS total_qty,
           SUM(oi.qty * COALESCE(oi.unit_price, oi.price, 0)) AS total_amount
         FROM orders o
@@ -285,7 +291,7 @@ router.get(
           p.shop_id = ?
           AND o.status IN (${validStatuses.map(() => "?").join(",")})
           AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-        GROUP BY oi.product_id, name, p.cover
+        GROUP BY oi.product_id, name
         ORDER BY total_qty DESC, total_amount DESC
         LIMIT 10
         `,
@@ -299,6 +305,7 @@ router.get(
         total_amount: Number(r.total_amount || 0),
         cover: r.cover || null,
       }));
+
 
       res.json({
         turnover,
