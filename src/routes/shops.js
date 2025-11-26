@@ -181,13 +181,6 @@ router.get("/:id", async (req, res) => {
  * GET /api/shops/:id/stats
  * Stats CA / Duumini / produits les plus commandés pour UNE boutique
  * (ADMIN ou VENDEUR propriétaire).
- *
- * Retour:
- * {
- *   turnover: { day, month, year },
- *   duumini: { day, month, year },
- *   top_products: [{ product_id, name, total_qty, total_amount, cover }]
- * }
  * ==========================================================================*/
 router.get(
   "/:id/stats",
@@ -263,9 +256,7 @@ router.get(
 
       /* ===== Commission Duumini jour / mois / année =====
          → commission = prix vendeur * taux * quantité
-         → taux = p.duumini_rate si présent,
-                  sinon 0.18 si sub_category = 'food',
-                  sinon 0.11
+         → taux = 0.18 si sub_category = 'food', sinon 0.11
       */
       const [rowsCommission] = await pool.query(
         `
@@ -273,38 +264,29 @@ router.get(
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
             THEN oi.qty * COALESCE(p.price, 0)
-              * COALESCE(
-                  p.duumini_rate,
-                  CASE
-                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
-                    ELSE 0.11
-                  END
-                )
+              * CASE
+                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
           END), 0) AS day_commission,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
             THEN oi.qty * COALESCE(p.price, 0)
-              * COALESCE(
-                  p.duumini_rate,
-                  CASE
-                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
-                    ELSE 0.11
-                  END
-                )
+              * CASE
+                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
           END), 0) AS month_commission,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
             THEN oi.qty * COALESCE(p.price, 0)
-              * COALESCE(
-                  p.duumini_rate,
-                  CASE
-                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
-                    ELSE 0.11
-                  END
-                )
+              * CASE
+                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
           END), 0) AS year_commission
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
@@ -378,6 +360,7 @@ router.get(
     }
   }
 );
+
 
 /* ============================================================================
  * POST /api/shops
