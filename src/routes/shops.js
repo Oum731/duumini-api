@@ -185,7 +185,7 @@ router.get("/:id", async (req, res) => {
  * Retour:
  * {
  *   turnover: { day, month, year },
- *   duumini:  { day, month, year },
+ *   duumini: { day, month, year },
  *   top_products: [{ product_id, name, total_qty, total_amount, cover }]
  * }
  * ==========================================================================*/
@@ -218,40 +218,35 @@ router.get(
         }
       }
 
-      // On ne compte que les commandes DONE (CA réellement réalisé)
-      const validStatus = "DONE";
+      // On ne compte que les commandes terminées
+      const validStatuses = ["DONE"];
 
-      /* ===== CA jour / mois / année (CA côté client, pour CETTE boutique) =====
-       * On se base sur:
-       *   - orders o
-       *   - order_items oi
-       *   - products p (pour filtrer par shop_id)
-       *
-       * CA = SUM(oi.qty * COALESCE(oi.unit_price, p.price, 0))
-       */
+      /* ===== CA jour / mois / année (prix NORMAL vendeur) =====
+         → basé sur products.price (prix vendeur en BDD)
+      */
       const [rowsTurnover] = await pool.query(
         `
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
+            THEN oi.qty * COALESCE(p.price, 0)
           END), 0) AS day_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
+            THEN oi.qty * COALESCE(p.price, 0)
           END), 0) AS month_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
+            THEN oi.qty * COALESCE(p.price, 0)
           END), 0) AS year_turnover
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
         WHERE p.shop_id = ?
-          AND o.status = ?
+          AND o.status IN (${validStatuses.map(() => "?").join(",")})
         `,
-        [shopId, validStatus]
+        [shopId, ...validStatuses]
       );
 
       const t = rowsTurnover[0] || {
@@ -266,62 +261,58 @@ router.get(
         year: Number(t.year_turnover || 0),
       };
 
-      /* ===== Commission Duumini (jour / mois / année) =====
-       * Même logique que computeCommissionForLine dans routes/orders.js :
-       *   - 18% si sub_category = 'food'
-       *   - 11% sinon
-       *
-       * On recalcule par ligne côté SQL pour CETTE boutique uniquement.
-       */
+      /* ===== Commission Duumini jour / mois / année =====
+         → commission = prix vendeur * taux * quantité
+         → taux = p.duumini_rate si présent,
+                  sinon 0.18 si sub_category = 'food',
+                  sinon 0.11
+      */
       const [rowsCommission] = await pool.query(
         `
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-            THEN ROUND(
-              p.price
-              * CASE
-                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
-                  ELSE 0.11
-                END
-              * oi.qty,
-              2
-            )
+            THEN oi.qty * COALESCE(p.price, 0)
+              * COALESCE(
+                  p.duumini_rate,
+                  CASE
+                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                    ELSE 0.11
+                  END
+                )
           END), 0) AS day_commission,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-            THEN ROUND(
-              p.price
-              * CASE
-                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
-                  ELSE 0.11
-                END
-              * oi.qty,
-              2
-            )
+            THEN oi.qty * COALESCE(p.price, 0)
+              * COALESCE(
+                  p.duumini_rate,
+                  CASE
+                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                    ELSE 0.11
+                  END
+                )
           END), 0) AS month_commission,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-            THEN ROUND(
-              p.price
-              * CASE
-                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
-                  ELSE 0.11
-                END
-              * oi.qty,
-              2
-            )
+            THEN oi.qty * COALESCE(p.price, 0)
+              * COALESCE(
+                  p.duumini_rate,
+                  CASE
+                    WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                    ELSE 0.11
+                  END
+                )
           END), 0) AS year_commission
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
         WHERE p.shop_id = ?
-          AND o.status = ?
+          AND o.status IN (${validStatuses.map(() => "?").join(",")})
         `,
-        [shopId, validStatus]
+        [shopId, ...validStatuses]
       );
 
       const c = rowsCommission[0] || {
@@ -336,7 +327,10 @@ router.get(
         year: Number(c.year_commission || 0),
       };
 
-      /* ===== Produits les plus commandés (30 derniers jours, DONE uniquement) ===== */
+      /* ===== Produits les plus commandés (30 derniers jours)
+         - total_qty = somme des quantités
+         - total_amount = somme (qty * prix vendeur)
+      */
       const [rowsTopProducts] = await pool.query(
         `
         SELECT
@@ -350,19 +344,19 @@ router.get(
             LIMIT 1
           ) AS cover,
           SUM(oi.qty) AS total_qty,
-          SUM(oi.qty * COALESCE(oi.unit_price, p.price, 0)) AS total_amount
+          SUM(oi.qty * COALESCE(p.price, 0)) AS total_amount
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
         WHERE
           p.shop_id = ?
-          AND o.status = ?
+          AND o.status IN (${validStatuses.map(() => "?").join(",")})
           AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
         GROUP BY oi.product_id, name
         ORDER BY total_qty DESC, total_amount DESC
         LIMIT 10
         `,
-        [shopId, validStatus]
+        [shopId, ...validStatuses]
       );
 
       const top_products = rowsTopProducts.map((r) => ({
