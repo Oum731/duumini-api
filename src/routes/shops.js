@@ -181,6 +181,11 @@ router.get("/:id", async (req, res) => {
  * GET /api/shops/:id/stats
  * Stats CA / Duumini / produits les plus commandés pour UNE boutique
  * (ADMIN ou VENDEUR propriétaire).
+ *
+ * IMPORTANT :
+ * - CA = somme(qty * products.price)  → prix Vendeur (normal)
+ * - Commission Duumini = qty * products.price * taux (0.18 food, 0.11 sinon)
+ * - AUCUN frais de livraison pris en compte (pas de delivery_fee, etc.)
  * ==========================================================================*/
 router.get(
   "/:id/stats",
@@ -211,11 +216,12 @@ router.get(
         }
       }
 
-      // On ne compte que les commandes terminées
-      const validStatuses = ["DONE"];
+      // On ne compte que les commandes "valides"
+      const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
       /* ===== CA jour / mois / année (prix NORMAL vendeur) =====
-         → basé sur products.price (prix vendeur en BDD)
+         → basé UNIQUEMENT sur products.price
+         → AUCUN frais de livraison utilisé ici
       */
       const [rowsTurnover] = await pool.query(
         `
@@ -224,11 +230,13 @@ router.get(
             WHEN DATE(o.created_at) = CURDATE()
             THEN oi.qty * COALESCE(p.price, 0)
           END), 0) AS day_turnover,
+
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
             THEN oi.qty * COALESCE(p.price, 0)
           END), 0) AS month_turnover,
+
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
             THEN oi.qty * COALESCE(p.price, 0)
@@ -255,8 +263,9 @@ router.get(
       };
 
       /* ===== Commission Duumini jour / mois / année =====
-         → commission = prix vendeur * taux * quantité
-         → taux = 0.18 si sub_category = 'food', sinon 0.11
+         - commission = qty * products.price * taux
+         - taux = 0.18 si sub_category = 'food', sinon 0.11
+         - toujours SANS frais de livraison
       */
       const [rowsCommission] = await pool.query(
         `
@@ -312,6 +321,7 @@ router.get(
       /* ===== Produits les plus commandés (30 derniers jours)
          - total_qty = somme des quantités
          - total_amount = somme (qty * prix vendeur)
+         - SANS frais de livraison
       */
       const [rowsTopProducts] = await pool.query(
         `
