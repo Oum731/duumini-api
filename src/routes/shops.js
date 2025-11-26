@@ -67,7 +67,7 @@ function uploadBufferToCloudinary(file, folder = "shops") {
   if (!file || !file.buffer) return Promise.resolve(null);
 
   return new Promise((resolve, reject) => {
-    const now = new Date(); // ✅ corrigé
+    const now = new Date();
     const folderPath = `${folder}/${now.getFullYear()}/${String(
       now.getMonth() + 1
     ).padStart(2, "0")}`;
@@ -226,21 +226,22 @@ router.get(
       const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
       // ===== CA jour / mois / année (somme des lignes produits de cette boutique) =====
+      // On se base sur orders + order_items + products
       const [rowsTurnover] = await pool.query(
         `
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
           END), 0) AS day_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
           END), 0) AS month_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, p.price, 0)
           END), 0) AS year_turnover
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
@@ -263,18 +264,19 @@ router.get(
         year: Number(t.year_turnover || 0),
       };
 
+      // Commission Duumini basée sur un taux global (simple)
       const duumini = {
         day: Math.round(turnover.day * COMMISSION_RATE * 100) / 100,
         month: Math.round(turnover.month * COMMISSION_RATE * 100) / 100,
         year: Math.round(turnover.year * COMMISSION_RATE * 100) / 100,
       };
 
-            // ===== Produits les plus commandés (sur les 30 derniers jours) =====
+      // ===== Produits les plus commandés (sur les 30 derniers jours) =====
       const [rowsTopProducts] = await pool.query(
         `
         SELECT
           oi.product_id,
-          COALESCE(p.name, oi.product_name, CONCAT('Produit #', oi.product_id)) AS name,
+          COALESCE(p.name, CONCAT('Produit #', oi.product_id)) AS name,
           (
             SELECT pi.url
             FROM product_images pi
@@ -283,7 +285,7 @@ router.get(
             LIMIT 1
           ) AS cover,
           SUM(oi.qty) AS total_qty,
-          SUM(oi.qty * COALESCE(oi.unit_price, oi.price, 0)) AS total_amount
+          SUM(oi.qty * COALESCE(oi.unit_price, p.price, 0)) AS total_amount
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
@@ -305,7 +307,6 @@ router.get(
         total_amount: Number(r.total_amount || 0),
         cover: r.cover || null,
       }));
-
 
       res.json({
         turnover,
