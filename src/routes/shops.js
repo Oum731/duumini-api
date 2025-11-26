@@ -28,10 +28,6 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
 });
 
-/* ========= Commission Duumini ========= */
-// Exemple : DUUMINI_COMMISSION_RATE=0.15 dans .env => 15%
-const COMMISSION_RATE = Number(env.DUUMINI_COMMISSION_RATE || 0.15);
-
 /* ========= Helpers ========= */
 
 // Slugify simple
@@ -189,7 +185,7 @@ router.get("/:id", async (req, res) => {
  * Retour:
  * {
  *   turnover: { day, month, year },
- *   duumini: { day, month, year },
+ *   duumini:  { day, month, year },
  *   top_products: [{ product_id, name, total_qty, total_amount, cover }]
  * }
  * ==========================================================================*/
@@ -222,11 +218,17 @@ router.get(
         }
       }
 
-      // On ne compte que les commandes non annulées
-      const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
+      // On ne compte que les commandes DONE (CA réellement réalisé)
+      const validStatus = "DONE";
 
-      // ===== CA jour / mois / année (somme des lignes produits de cette boutique) =====
-      // On se base sur orders + order_items + products
+      /* ===== CA jour / mois / année (CA côté client, pour CETTE boutique) =====
+       * On se base sur:
+       *   - orders o
+       *   - order_items oi
+       *   - products p (pour filtrer par shop_id)
+       *
+       * CA = SUM(oi.qty * COALESCE(oi.unit_price, p.price, 0))
+       */
       const [rowsTurnover] = await pool.query(
         `
         SELECT
@@ -247,9 +249,9 @@ router.get(
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
         WHERE p.shop_id = ?
-          AND o.status IN (${validStatuses.map(() => "?").join(",")})
+          AND o.status = ?
         `,
-        [shopId, ...validStatuses]
+        [shopId, validStatus]
       );
 
       const t = rowsTurnover[0] || {
@@ -264,14 +266,77 @@ router.get(
         year: Number(t.year_turnover || 0),
       };
 
-      // Commission Duumini basée sur un taux global (simple)
-      const duumini = {
-        day: Math.round(turnover.day * COMMISSION_RATE * 100) / 100,
-        month: Math.round(turnover.month * COMMISSION_RATE * 100) / 100,
-        year: Math.round(turnover.year * COMMISSION_RATE * 100) / 100,
+      /* ===== Commission Duumini (jour / mois / année) =====
+       * Même logique que computeCommissionForLine dans routes/orders.js :
+       *   - 18% si sub_category = 'food'
+       *   - 11% sinon
+       *
+       * On recalcule par ligne côté SQL pour CETTE boutique uniquement.
+       */
+      const [rowsCommission] = await pool.query(
+        `
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN DATE(o.created_at) = CURDATE()
+            THEN ROUND(
+              p.price
+              * CASE
+                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
+              * oi.qty,
+              2
+            )
+          END), 0) AS day_commission,
+
+          COALESCE(SUM(CASE
+            WHEN YEAR(o.created_at) = YEAR(CURDATE())
+              AND MONTH(o.created_at) = MONTH(CURDATE())
+            THEN ROUND(
+              p.price
+              * CASE
+                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
+              * oi.qty,
+              2
+            )
+          END), 0) AS month_commission,
+
+          COALESCE(SUM(CASE
+            WHEN YEAR(o.created_at) = YEAR(CURDATE())
+            THEN ROUND(
+              p.price
+              * CASE
+                  WHEN LOWER(COALESCE(p.sub_category, '')) = 'food' THEN 0.18
+                  ELSE 0.11
+                END
+              * oi.qty,
+              2
+            )
+          END), 0) AS year_commission
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p     ON p.id = oi.product_id
+        WHERE p.shop_id = ?
+          AND o.status = ?
+        `,
+        [shopId, validStatus]
+      );
+
+      const c = rowsCommission[0] || {
+        day_commission: 0,
+        month_commission: 0,
+        year_commission: 0,
       };
 
-      // ===== Produits les plus commandés (sur les 30 derniers jours) =====
+      const duumini = {
+        day: Number(c.day_commission || 0),
+        month: Number(c.month_commission || 0),
+        year: Number(c.year_commission || 0),
+      };
+
+      /* ===== Produits les plus commandés (30 derniers jours, DONE uniquement) ===== */
       const [rowsTopProducts] = await pool.query(
         `
         SELECT
@@ -291,13 +356,13 @@ router.get(
         JOIN products p     ON p.id = oi.product_id
         WHERE
           p.shop_id = ?
-          AND o.status IN (${validStatuses.map(() => "?").join(",")})
+          AND o.status = ?
           AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
         GROUP BY oi.product_id, name
         ORDER BY total_qty DESC, total_amount DESC
         LIMIT 10
         `,
-        [shopId, ...validStatuses]
+        [shopId, validStatus]
       );
 
       const top_products = rowsTopProducts.map((r) => ({
