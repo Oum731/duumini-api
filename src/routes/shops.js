@@ -67,7 +67,7 @@ function uploadBufferToCloudinary(file, folder = "shops") {
   if (!file || !file.buffer) return Promise.resolve(null);
 
   return new Promise((resolve, reject) => {
-    const now = new Date();
+    const now = new Date(); // ✅ corrigé
     const folderPath = `${folder}/${now.getFullYear()}/${String(
       now.getMonth() + 1
     ).padStart(2, "0")}`;
@@ -183,7 +183,8 @@ router.get("/:id", async (req, res) => {
 
 /* ============================================================================
  * GET /api/shops/:id/stats
- * Stats CA / Duumini / produits les plus commandés pour UNE boutique (ADMIN).
+ * Stats CA / Duumini / produits les plus commandés pour UNE boutique
+ * (ADMIN ou VENDEUR propriétaire).
  *
  * Retour:
  * {
@@ -195,7 +196,7 @@ router.get("/:id", async (req, res) => {
 router.get(
   "/:id/stats",
   authRequired,
-  requireRole("ADMIN"),
+  requireRole("ADMIN", "VENDEUR"),
   async (req, res) => {
     const shopId = Number(req.params.id) || 0;
     if (!shopId) return res.status(400).json({ error: "Invalid id" });
@@ -203,50 +204,51 @@ router.get(
     const pool = getPool();
 
     try {
-      // Vérifier que la boutique existe
+      // Vérifier que la boutique existe + owner_id
       const [rowsShop] = await pool.query(
-        "SELECT id, name FROM shops WHERE id=? LIMIT 1",
+        "SELECT id, name, owner_id FROM shops WHERE id=? LIMIT 1",
         [shopId]
       );
       if (!rowsShop.length) {
         return res.status(404).json({ error: "Shop not found" });
       }
 
+      const shop = rowsShop[0];
+
+      // 🔐 Si VENDEUR → il doit être propriétaire de la boutique
+      if (!isAdmin(req.user) && isVendor(req.user)) {
+        if (String(shop.owner_id) !== String(req.user.id)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
+
       // On ne compte que les commandes non annulées
       const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
-      // ===== CA jour / mois / année (somme des totaux de commandes) =====
+      // ===== CA jour / mois / année (somme des lignes produits de cette boutique) =====
       const [rowsTurnover] = await pool.query(
         `
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-              AND o.status IN (${validStatuses.map(() => "?").join(",")})
-            THEN o.total
+            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
           END), 0) AS day_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-              AND o.status IN (${validStatuses.map(() => "?").join(",")})
-            THEN o.total
+            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
           END), 0) AS month_turnover,
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-              AND o.status IN (${validStatuses.map(() => "?").join(",")})
-            THEN o.total
+            THEN oi.qty * COALESCE(oi.unit_price, oi.price, 0)
           END), 0) AS year_turnover
         FROM orders o
-        WHERE o.shop_id = ?
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p     ON p.id = oi.product_id
+        WHERE p.shop_id = ?
+          AND o.status IN (${validStatuses.map(() => "?").join(",")})
         `,
-        [
-          // DAY
-          ...validStatuses,
-          // MONTH
-          ...validStatuses,
-          // YEAR
-          ...validStatuses,
-          shopId,
-        ]
+        [shopId, ...validStatuses]
       );
 
       const t = rowsTurnover[0] || {
@@ -278,9 +280,9 @@ router.get(
           SUM(oi.qty * COALESCE(oi.unit_price, oi.price, 0)) AS total_amount
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
-        LEFT JOIN products p ON p.id = oi.product_id
+        JOIN products p     ON p.id = oi.product_id
         WHERE
-          o.shop_id = ?
+          p.shop_id = ?
           AND o.status IN (${validStatuses.map(() => "?").join(",")})
           AND o.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
         GROUP BY oi.product_id, name, p.cover

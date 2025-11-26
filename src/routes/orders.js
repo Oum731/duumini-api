@@ -687,18 +687,33 @@ router.post('/', authRequired, async (req, res) => {
     for (const it of items) {
       const product_id = Number(it?.product_id);
       const qty = Number(it?.qty);
-      if (!product_id || !qty) throw new Error('product_id & qty required');
+      if (!product_id || !qty) {
+        const err = new Error('product_id & qty required');
+        err.statusCode = 400;
+        throw err;
+      }
 
+      // 🔒 On verrouille la ligne produit + on récupère le stock
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category FROM products WHERE id=?`,
+        `SELECT id, price, sub_category, stock FROM products WHERE id=? FOR UPDATE`,
         [product_id]
       );
-      if (!p) throw new Error('Product not found: ' + product_id);
+      if (!p) {
+        const err = new Error('Product not found: ' + product_id);
+        err.statusCode = 400;
+        throw err;
+      }
 
       const unit_price = Number(p.price);
       const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
-      cleanItems.push({ product_id: p.id, qty, unit_price });
+      cleanItems.push({
+        product_id: p.id,
+        qty,
+        unit_price,
+        current_stock: p.stock,
+      });
+
       itemsAmount += unit_price * qty;
       totalCommission += lineCommission;
     }
@@ -735,16 +750,44 @@ router.post('/', authRequired, async (req, res) => {
       );
     }
 
+    // 6) Décrémenter le stock pour chaque produit
+    for (const it of cleanItems) {
+      // Stock NULL ou undefined → stock illimité → on ne touche pas
+      if (it.current_stock === null || it.current_stock === undefined) {
+        continue;
+      }
+
+      const currentStock = Number(it.current_stock || 0);
+      const newStock = currentStock - Number(it.qty || 0);
+
+      if (newStock < 0) {
+        const err = new Error('STOCK_INSUFFICIENT');
+        err.statusCode = 400;
+        err.payload = {
+          code: 'STOCK_INSUFFICIENT',
+          product_id: it.product_id,
+          requested: Number(it.qty || 0),
+          available: currentStock,
+        };
+        throw err;
+      }
+
+      await conn.query(
+        `UPDATE products SET stock=? WHERE id=?`,
+        [newStock, it.product_id]
+      );
+    }
+
     await conn.commit();
 
-    // 🔔 6) Enfiler des notifications pour vendeurs + admins
+    // 🔔 7) Enfiler des notifications pour vendeurs + admins
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch (eNot) {
       console.error('[Notify] enqueueOrderCreatedNotifications failed', eNot);
     }
 
-    // 7) Notification temps réel pour le client (best effort, direct)
+    // 8) Notification temps réel pour le client (best effort, direct)
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', {
@@ -754,7 +797,7 @@ router.post('/', authRequired, async (req, res) => {
       });
     } catch {}
 
-    // 8) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    // 9) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
     (async () => {
       try {
         const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client Duumini';
@@ -826,6 +869,9 @@ router.post('/', authRequired, async (req, res) => {
     });
   } catch (e) {
     try { await conn.rollback(); } catch {}
+    if (e && e.statusCode === 400 && e.payload?.code === 'STOCK_INSUFFICIENT') {
+      return res.status(400).json(e.payload);
+    }
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -872,18 +918,33 @@ router.post('/guest', async (req, res) => {
     for (const it of items) {
       const product_id = Number(it?.product_id);
       const qty = Number(it?.qty);
-      if (!product_id || !qty) throw new Error('product_id & qty required');
+      if (!product_id || !qty) {
+        const err = new Error('product_id & qty required');
+        err.statusCode = 400;
+        throw err;
+      }
 
+      // 🔒 On verrouille la ligne produit + on récupère le stock
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category FROM products WHERE id=?`,
+        `SELECT id, price, sub_category, stock FROM products WHERE id=? FOR UPDATE`,
         [product_id]
       );
-      if (!p) throw new Error('Product not found: ' + product_id);
+      if (!p) {
+        const err = new Error('Product not found: ' + product_id);
+        err.statusCode = 400;
+        throw err;
+      }
 
       const unit_price = Number(p.price);
       const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
-      cleanItems.push({ product_id: p.id, qty, unit_price });
+      cleanItems.push({
+        product_id: p.id,
+        qty,
+        unit_price,
+        current_stock: p.stock,
+      });
+
       itemsAmount += unit_price * qty;
       totalCommission += lineCommission;
     }
@@ -919,16 +980,43 @@ router.post('/guest', async (req, res) => {
       );
     }
 
+    // 5) Décrémenter le stock pour chaque produit
+    for (const it of cleanItems) {
+      if (it.current_stock === null || it.current_stock === undefined) {
+        continue;
+      }
+
+      const currentStock = Number(it.current_stock || 0);
+      const newStock = currentStock - Number(it.qty || 0);
+
+      if (newStock < 0) {
+        const err = new Error('STOCK_INSUFFICIENT');
+        err.statusCode = 400;
+        err.payload = {
+          code: 'STOCK_INSUFFICIENT',
+          product_id: it.product_id,
+          requested: Number(it.qty || 0),
+          available: currentStock,
+        };
+        throw err;
+      }
+
+      await conn.query(
+        `UPDATE products SET stock=? WHERE id=?`,
+        [newStock, it.product_id]
+      );
+    }
+
     await conn.commit();
 
-    // 🔔 5) Enfiler des notifications pour vendeurs + admins
+    // 🔔 6) Enfiler des notifications pour vendeurs + admins
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch (eNot) {
       console.error('[Notify] enqueueOrderCreatedNotifications failed (guest)', eNot);
     }
 
-    // 6) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    // 7) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
     (async () => {
       try {
         const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim()
@@ -1001,6 +1089,9 @@ router.post('/guest', async (req, res) => {
     });
   } catch (e) {
     try { await conn.rollback(); } catch {}
+    if (e && e.statusCode === 400 && e.payload?.code === 'STOCK_INSUFFICIENT') {
+      return res.status(400).json(e.payload);
+    }
     res.status(500).json({ error: e.message });  
   } finally {
     conn.release();
