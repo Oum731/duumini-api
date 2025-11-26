@@ -325,9 +325,8 @@ async function enqueueOrderStatusForClient(orderId, status) {
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
  * → ajoute first_product_cover pour la miniature
- * → ajoute items_amount (somme des lignes produits)
- * → ajoute geo_link pour ouvrir la localisation (connecté + invité)
- * → ajoute display_code (ID alphanumérique)
+ * → ajoute items_amount (somme des lignes produits → CA hors livraison)
+ * → ajoute geo_link + display_code
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -343,7 +342,6 @@ router.get('/', authRequired, async (req, res) => {
   try {
     /* =========================
      * CAS 1 : ?mine=1 → TOUJOURS MES COMMANDES
-     * (peu importe le rôle: ADMIN, VENDEUR ou simple client)
      * =======================*/
     if (mine) {
       const params = [req.user.id];
@@ -407,12 +405,23 @@ router.get('/', authRequired, async (req, res) => {
 
         const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
+        const itemsAmount = Number(r.items_amount || 0);
+        const totalAmount = Number(r.total || itemsAmount);
+        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+        const currency = (r.currency || 'MAD').toUpperCase();
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -447,6 +456,7 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
+            -- 💰 CA hors livraison = sous-total produits (prix client)
             SELECT SUM(oi2.qty * oi2.unit_price)
             FROM order_items oi2
             WHERE oi2.order_id = o.id
@@ -488,12 +498,23 @@ router.get('/', authRequired, async (req, res) => {
 
         const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
+        const itemsAmount = Number(r.items_amount || 0);
+        const totalAmount = Number(r.total || itemsAmount);
+        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+        const currency = (r.currency || 'MAD').toUpperCase();
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -536,15 +557,17 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
+            -- CA hors livraison (côté client, toute la commande)
             SELECT SUM(oi_all.qty * oi_all.unit_price)
             FROM order_items oi_all
             WHERE oi_all.order_id = o.id
           ) AS items_amount,
           (
+            -- image d'un produit de CE vendeur (pour la carte)
             SELECT pi.url
             FROM order_items oi2
-            JOIN products p2     ON p2.id = oi2.product_id
-            JOIN shops s2        ON s2.id = p2.shop_id
+            JOIN products p2       ON p2.id = oi2.product_id
+            JOIN shops s2          ON s2.id = p2.shop_id
             JOIN product_images pi ON pi.product_id = p2.id
             WHERE oi2.order_id = o.id
               AND s2.owner_id = ?
@@ -584,12 +607,23 @@ router.get('/', authRequired, async (req, res) => {
 
         const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
+        const itemsAmount = Number(r.items_amount || 0);
+        const totalAmount = Number(r.total || itemsAmount);
+        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+        const currency = (r.currency || 'MAD').toUpperCase();
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -663,12 +697,23 @@ router.get('/', authRequired, async (req, res) => {
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
+      const itemsAmount = Number(r.items_amount || 0);
+      const totalAmount = Number(r.total || itemsAmount);
+      const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+      const currency = (r.currency || 'MAD').toUpperCase();
+
       return {
         ...r,
         display_code: buildDisplayCode(r.id),
         address,
         contact,
         geo_link,
+        totals: {
+          items_amount: itemsAmount,
+          delivery_fee: deliveryFee,
+          amount: totalAmount,
+          currency,
+        },
       };
     });
 
@@ -750,7 +795,7 @@ router.post('/', authRequired, async (req, res) => {
         current_stock: p.stock,
       });
 
-      itemsAmount += unit_price * qty;  // ✅ total client
+      itemsAmount += unit_price * qty;  // ✅ total client (hors livraison)
       totalCommission += lineCommission;
     }
 
@@ -823,7 +868,7 @@ router.post('/', authRequired, async (req, res) => {
       console.error('[Notify] enqueueOrderCreatedNotifications failed', eNot);
     }
 
-    // 8) Notification temps réel pour le client (best effort, direct)
+    // 8) Notification temps réel pour le client
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', {
@@ -871,10 +916,10 @@ router.post('/', authRequired, async (req, res) => {
         }
 
         await sendWhatsAppOrderConfirmation({
-          to: BACKOFFICE_WHATSAPP,         // 👉 numéro interne
+          to: BACKOFFICE_WHATSAPP,
           name: fullName,
           orderId,
-          displayCode,                     // ✅ code alphanumérique pour le message
+          displayCode,
           total: orderTotal,
           ville: addressObj.city || null,
           commune: addressObj.commune || null,
@@ -978,7 +1023,7 @@ router.post('/guest', async (req, res) => {
       cleanItems.push({
         product_id: p.id,
         qty,
-        unit_price,          // ✅ prix payé par le client
+        unit_price,
         current_stock: p.stock,
       });
 
@@ -1092,10 +1137,10 @@ router.post('/guest', async (req, res) => {
         }
 
         await sendWhatsAppOrderConfirmation({
-          to: BACKOFFICE_WHATSAPP,        // 👉 numéro interne
+          to: BACKOFFICE_WHATSAPP,
           name: fullName,
           orderId,
-          displayCode,                    // ✅ code alphanumérique
+          displayCode,
           total: orderTotal,
           ville: addressObj.city || null,
           commune: addressObj.commune || null,
@@ -1160,7 +1205,7 @@ router.get('/:id', authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // ✅ Totaux pour le front (utiles pour livraison / total)
+    // ✅ Totaux pour le front
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0
