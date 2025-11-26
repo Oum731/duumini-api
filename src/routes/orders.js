@@ -117,6 +117,7 @@ function buildDisplayCode(id) {
 /**
  * Commission pour une ligne : 18% food, 11% sinon.
  * ⚠️ Ici on passe le PRIX VENDEUR (base) pour calculer la commission Duumini.
+ *    Ex: base = 750 → commission = 750 * taux, JAMAIS déduite de 750.
  */
 function computeCommissionForLine(baseUnitPrice, qty, subCategory) {
   const totalBaseLine = Number(baseUnitPrice || 0) * Number(qty || 1);
@@ -128,6 +129,7 @@ function computeCommissionForLine(baseUnitPrice, qty, subCategory) {
 /**
  * Prix unitaire payé par le client = prix vendeur + commission
  * → utilisé pour order_items.unit_price
+ *    Ex: base = 750, rate=0.11 → client_unit = 750 * 1.11 = 832.5
  */
 function computeClientUnitPrice(basePrice, subCategory) {
   const sub = String(subCategory || '').trim().toLowerCase();
@@ -325,7 +327,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
  * List (admin : tout / client : ses commandes)
  * → ajoute toujours un champ contact (fallback users)
  * → ajoute first_product_cover pour la miniature
- * → ajoute items_amount (somme des lignes produits → CA hors livraison)
+ * → ajoute items_amount (somme des lignes produits → CA hors livraison côté client)
  * → ajoute geo_link + display_code
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
@@ -417,7 +419,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,
+            items_amount: itemsAmount,  // 🔥 sous-total client hors livraison
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -456,7 +458,7 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
-            -- 💰 CA hors livraison = sous-total produits (prix client)
+            -- 💰 CA hors livraison = sous-total produits (PRIX CLIENT)
             SELECT SUM(oi2.qty * oi2.unit_price)
             FROM order_items oi2
             WHERE oi2.order_id = o.id
@@ -510,7 +512,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,
+            items_amount: itemsAmount,  // CA client hors livraison
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -619,7 +621,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,
+            items_amount: itemsAmount,  // CA client hors livraison
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -709,7 +711,7 @@ router.get('/', authRequired, async (req, res) => {
         contact,
         geo_link,
         totals: {
-          items_amount: itemsAmount,
+          items_amount: itemsAmount,   // CA client hors livraison
           delivery_fee: deliveryFee,
           amount: totalAmount,
           currency,
@@ -784,9 +786,9 @@ router.post('/', authRequired, async (req, res) => {
         throw err;
       }
 
-      const basePrice = Number(p.price); // prix vendeur en base
-      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // prix client
-      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category);
+      const basePrice = Number(p.price); // 💰 PRIX VENDEUR (ex: 750)
+      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // 💸 PRIX CLIENT (base + commission)
+      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category); // 🧾 commission Duumini sur base
 
       cleanItems.push({
         product_id: p.id,
@@ -795,8 +797,8 @@ router.post('/', authRequired, async (req, res) => {
         current_stock: p.stock,
       });
 
-      itemsAmount += unit_price * qty;  // ✅ total client (hors livraison)
-      totalCommission += lineCommission;
+      itemsAmount += unit_price * qty;   // ✅ total client (hors livraison)
+      totalCommission += lineCommission; // ✅ somme des commissions (sur prix vendeur)
     }
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -822,7 +824,7 @@ router.post('/', authRequired, async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // 5) INSERT order_items (snapshots des prix)
+    // 5) INSERT order_items (snapshots des prix client)
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -1205,7 +1207,7 @@ router.get('/:id', authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // ✅ Totaux pour le front
+    // ✅ Totaux pour le front (CA client hors livraison)
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0
