@@ -183,8 +183,8 @@ router.get("/:id", async (req, res) => {
  * (ADMIN ou VENDEUR propriétaire).
  *
  * IMPORTANT :
- * - CA = somme(qty * products.price)  → prix Vendeur (normal)
- * - Commission Duumini = qty * products.price * taux (0.18 food, 0.11 sinon)
+ * - CA (turnover) = somme(qty * products.price)  → prix normal vendeur
+ * - Commission Duumini (duumini) = qty * products.price * taux (0.18 food, 0.11 sinon)
  * - AUCUN frais de livraison pris en compte (pas de delivery_fee, etc.)
  * ==========================================================================*/
 router.get(
@@ -220,7 +220,7 @@ router.get(
       const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
       /* ===== CA jour / mois / année (prix NORMAL vendeur) =====
-         → basé UNIQUEMENT sur products.price
+         → basé UNIQUEMENT sur products.price (prix vendeur)
          → AUCUN frais de livraison utilisé ici
       */
       const [rowsTurnover] = await pool.query(
@@ -263,7 +263,7 @@ router.get(
       };
 
       /* ===== Commission Duumini jour / mois / année =====
-         - commission = qty * products.price * taux
+         - commission = qty * products.price (prix vendeur) * taux
          - taux = 0.18 si sub_category = 'food', sinon 0.11
          - toujours SANS frais de livraison
       */
@@ -320,7 +320,7 @@ router.get(
 
       /* ===== Produits les plus commandés (30 derniers jours)
          - total_qty = somme des quantités
-         - total_amount = somme (qty * prix vendeur)
+         - total_amount = somme (qty * prix normal vendeur)
          - SANS frais de livraison
       */
       const [rowsTopProducts] = await pool.query(
@@ -355,7 +355,7 @@ router.get(
         product_id: r.product_id,
         name: r.name,
         total_qty: Number(r.total_qty || 0),
-        total_amount: Number(r.total_amount || 0),
+        total_amount: Number(r.total_amount || 0), // CA 30j sur prix normal vendeur
         cover: r.cover || null,
       }));
 
@@ -370,7 +370,6 @@ router.get(
     }
   }
 );
-
 
 /* ============================================================================
  * POST /api/shops
