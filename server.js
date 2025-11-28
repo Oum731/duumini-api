@@ -137,6 +137,12 @@ app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
 app.use("/api/products", products);
 app.use("/api/orders", orders);
+
+// ✅ Route de partage avec meta OG
+if (products.shareRouter) {
+  app.use("/share", products.shareRouter); // /share/product/:id
+}
+
 app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
 app.use("/api/events", events);        // ✅ flux SSE: /api/events/stream

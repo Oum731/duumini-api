@@ -6,6 +6,16 @@ const bcrypt = require('bcryptjs');
 
 const router = Router();
 
+/* ===== Helper ville: code → libellé ===== */
+function normalizeVille(ville) {
+  if (!ville) return null;
+  const code = String(ville).trim().toUpperCase();
+  if (code === 'CASABLANCA') return 'Casablanca';
+  if (code === 'MARRAKECH')  return 'Marrakech';
+  // sinon on laisse tel quel
+  return ville;
+}
+
 /* ===== Middleware admin local ===== */
 function adminRequired(req, res, next) {
   if (!req.user || req.user.role !== 'ADMIN') {
@@ -49,7 +59,10 @@ router.put('/me', authRequired, async (req, res) => {
   if (typeof first_name !== 'undefined') { fields.push('first_name=?'); values.push(first_name || null); }
   if (typeof last_name  !== 'undefined') { fields.push('last_name=?');  values.push(last_name || null); }
   if (typeof avatar     !== 'undefined') { fields.push('avatar=?');     values.push(avatar || null); }
-  if (typeof ville      !== 'undefined') { fields.push('ville=?');      values.push(ville || null); }
+  if (typeof ville      !== 'undefined') {
+    fields.push('ville=?');
+    values.push(normalizeVille(ville) || null);
+  }
   if (typeof commune    !== 'undefined') { fields.push('commune=?');    values.push(commune || null); }
   if (typeof quartier   !== 'undefined') { fields.push('quartier=?');   values.push(quartier || null); }
   if (typeof sexe       !== 'undefined') {
@@ -179,7 +192,10 @@ router.put('/:id', authRequired, adminRequired, async (req, res) => {
   if (typeof phone !== 'undefined')      { fields.push('phone=?');      values.push(String(phone).trim()); }
   if (typeof first_name !== 'undefined') { fields.push('first_name=?'); values.push(first_name || null); }
   if (typeof last_name  !== 'undefined') { fields.push('last_name=?');  values.push(last_name || null); }
-  if (typeof ville      !== 'undefined') { fields.push('ville=?');      values.push(ville || null); }
+  if (typeof ville      !== 'undefined') {
+    fields.push('ville=?');
+    values.push(normalizeVille(ville) || null);
+  }
   if (typeof commune    !== 'undefined') { fields.push('commune=?');    values.push(commune || null); }
   if (typeof quartier   !== 'undefined') { fields.push('quartier=?');   values.push(quartier || null); }
   if (typeof sexe       !== 'undefined') {

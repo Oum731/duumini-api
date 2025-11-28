@@ -6,6 +6,15 @@ const { signAccess, signRefresh, verifyRefresh } = require('../utils/jwt');
 
 const router = Router();
 
+/* ===== Helper ville: code → libellé ===== */
+function normalizeVille(ville) {
+  if (!ville) return null;
+  const code = String(ville).trim().toUpperCase();
+  if (code === 'CASABLANCA') return 'Casablanca';
+  if (code === 'MARRAKECH')  return 'Marrakech';
+  return ville;
+}
+
 /**
  * POST /api/auth/register
  */
@@ -14,6 +23,7 @@ router.post('/register', async (req, res) => {
   if (!phone || !password) return res.status(400).json({ error: 'phone & password required' });
 
   const _sexe = ['M','F'].includes(sexe) ? sexe : null;
+  const _ville = normalizeVille(ville);
 
   const pool = getPool();
   try {
@@ -32,7 +42,7 @@ router.post('/register', async (req, res) => {
         first_name || null,
         last_name || null,
         avatar || null,
-        ville || null,
+        _ville || null,
         commune || null,
         quartier || null,
         _sexe

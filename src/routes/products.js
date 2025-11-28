@@ -85,81 +85,127 @@ function parseBoolFlag(value, defaultValue = null) {
   return defaultValue;
 }
 
+// Normalise la ville envoyée en query (?ville= / ?city=)
+function normalizeVilleFilter(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const low = raw.toLowerCase();
+  if (low.startsWith("cas")) return "Casablanca";
+  if (low.startsWith("mar")) return "Marrakech";
+  // fallback : renvoyer la chaîne telle quelle
+  return raw;
+}
+
 // Taux de commission Duumini en fonction de la sous-catégorie
 // sub = 'food' → 18% ; sinon (market/product/…) → 11%
 function computeDuuminiRateFromSubCategory(subCategory) {
   const sub = String(subCategory || "").trim().toLowerCase();
-  if (sub === "food") return 0.18;    // Food
-  return 0.11;                        // Market / autres
+  if (sub === "food") return 0.18; // Food
+  return 0.11; // Market / autres
 }
 
 /**
  * Normalise un produit pour le front :
- * - price = prix client (prix vendeur + commission)
- * - vendor_price = prix vendeur (optionnel, utile pour backoffice)
- * - duumini_rate est masqué
+ * - price      = prix normal du produit (prix client final, tel qu'en BDD)
+ * - vendor_price = montant net estimé pour le vendeur (price - commission Duumini)
+ * - duumini_rate est masqué dans la réponse API
+ *
+ * 💡 Logique demandée :
+ *    → le pourcentage Duumini est DÉDIT du prix normal du produit,
+ *       on NE l'ajoute pas au prix.
  */
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
 
   const { duumini_rate, price, ...rest } = row;
 
-  const rate =
-    typeof duumini_rate === "number"
-      ? duumini_rate
-      : computeDuuminiRateFromSubCategory(row.sub_category);
+  // Récupérer un taux valide, sinon calculer depuis sub_category
+  let rate = computeDuuminiRateFromSubCategory(row.sub_category);
+  if (duumini_rate != null) {
+    const r = Number(duumini_rate);
+    if (Number.isFinite(r) && r >= 0 && r <= 1) {
+      rate = r;
+    }
+  }
 
-  const base = Number(price || 0); // prix vendeur stocké en BDD
-  const clientPrice = +(base * (1 + rate)).toFixed(2); // prix client (avec commission)
+  const clientPrice = Number(price || 0); // prix normal du produit (client)
+  const duuminiAmount = +(clientPrice * rate).toFixed(2);
+  const vendorNet = +(clientPrice - duuminiAmount).toFixed(2); // ce que touche le vendeur
 
   return {
     ...rest,
-    vendor_price: base,  // visible si tu l'utilises côté backoffice
-    price: clientPrice,  // 💰 prix final affiché à tous les clients
+    price: clientPrice, // 💰 prix final payé par le client (inchangé)
+    vendor_price: vendorNet, // net vendeur
   };
 }
 
-async function listProducts(pool, { limit, offset, channel, onlyActive }) {
-  // Normalisation SQL pour tolérer Food / ' food ' / '' / NULL
-  const norm = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
+/**
+ * Liste des produits avec filtres :
+ * - channel: null | 'african-food' | 'african-market'
+ * - onlyActive: bool
+ * - ville: 'Casablanca' | 'Marrakech' | null
+ */
+async function listProducts(pool, { limit, offset, channel, onlyActive, ville }) {
+  const normSub = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
+  const whereParts = [];
+  const params = [];
 
-  let where = "1=1";
+  // Filtre par canal (food / market)
   if (channel === "african-food") {
-    // Uniquement FOOD (normalisé)
-    where = `${norm} = 'food'`;
+    whereParts.push(`${normSub} = 'food'`);
   } else if (channel === "african-market") {
-    // Tout ce qui n'est PAS 'food' : 'product', NULL, vide, legacy…
-    where = `${norm} <> 'food'`;
+    whereParts.push(`${normSub} <> 'food'`);
+  } else {
+    whereParts.push("1=1");
   }
 
-  // Filtre produits actifs si demandé
+  // Filtre produits actifs
   if (onlyActive) {
-    where = `(${where}) AND p.is_active = 1`;
+    whereParts.push("p.is_active = 1");
   }
 
+  // Filtre par ville de la boutique (s.city)
+  if (ville) {
+    whereParts.push(
+      "LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
+    );
+    params.push(ville);
+  }
+
+  const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
+
+  // COUNT avec join sur shops (pour ville)
   const [[{ total }]] = await pool.query(
-    `SELECT COUNT(*) AS total
-       FROM products p
-      WHERE ${where}`
+    `
+    SELECT COUNT(*) AS total
+      FROM products p
+      LEFT JOIN shops s ON s.id = p.shop_id
+     WHERE ${whereSql}
+    `,
+    params
   );
 
   const [rowsRaw] = await pool.query(
-    `SELECT 
-        p.*,
-        s.name AS shop_name,
-        s.logo AS shop_logo,
-        s.cover AS shop_cover,
-        (SELECT url
-           FROM product_images pi
-          WHERE pi.product_id = p.id
-          ORDER BY sort_order ASC, id ASC
-          LIMIT 1) AS cover
-       FROM products p
-       LEFT JOIN shops s ON s.id = p.shop_id
-      WHERE ${where}
-      ORDER BY p.created_at DESC
-      LIMIT ? OFFSET ?`,
-    [Number(limit), Number(offset)]
+    `
+    SELECT 
+      p.*,
+      s.name AS shop_name,
+      s.logo AS shop_logo,
+      s.cover AS shop_cover,
+      s.city AS shop_city,
+      (SELECT url
+         FROM product_images pi
+        WHERE pi.product_id = p.id
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1) AS cover
+     FROM products p
+     LEFT JOIN shops s ON s.id = p.shop_id
+     WHERE ${whereSql}
+     ORDER BY p.created_at DESC
+     LIMIT ? OFFSET ?
+    `,
+    [...params, Number(limit), Number(offset)]
   );
 
   const rows = rowsRaw.map(stripDuuminiRateFromProduct);
@@ -178,6 +224,11 @@ async function listHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
+  // Ville (user) → filtre sur shops.city
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
@@ -185,6 +236,7 @@ async function listHandler(req, res, next) {
       offset,
       channel: null,
       onlyActive,
+      ville,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -202,6 +254,10 @@ async function listFoodHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
@@ -209,6 +265,7 @@ async function listFoodHandler(req, res, next) {
       offset,
       channel: "african-food",
       onlyActive,
+      ville,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -226,6 +283,10 @@ async function listMarketHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
+
   const pool = getPool();
   try {
     const { rows, total } = await listProducts(pool, {
@@ -233,6 +294,7 @@ async function listMarketHandler(req, res, next) {
       offset,
       channel: "african-market",
       onlyActive,
+      ville,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -247,14 +309,25 @@ router.get("/african-market", listMarketHandler);
 
 /* ----------------------------- Top produits : plus commandés ----------------------------- */
 /**
- * GET /api/products/top-ordered?limit=8
+ * GET /api/products/top-ordered?limit=8&ville=Casablanca
  * → Retourne les produits les plus commandés (commandes DONE)
+ *    filtrés éventuellement par ville (shops.city).
  */
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
-  const limit = toPositiveInt(req.query.limit, 8); // ✅ pas de NaN
+  const limit = toPositiveInt(req.query.limit, 8);
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
 
   try {
+    const whereVille = ville
+      ? "AND LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
+      : "";
+    const params = [];
+    if (ville) params.push(ville);
+    params.push(limit);
+
     const [rowsRaw] = await pool.query(
       `
       SELECT 
@@ -262,6 +335,7 @@ router.get("/top-ordered", async (req, res, next) => {
         s.name AS shop_name,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
+        s.city AS shop_city,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -274,11 +348,12 @@ router.get("/top-ordered", async (req, res, next) => {
       LEFT JOIN shops s ON s.id = p.shop_id
       WHERE o.status = 'DONE'
         AND p.is_active = 1
+        ${whereVille}
       GROUP BY p.id
       ORDER BY total_qty DESC
       LIMIT ?
       `,
-      [limit]
+      params
     );
 
     const rows = rowsRaw.map(stripDuuminiRateFromProduct);
@@ -291,15 +366,27 @@ router.get("/top-ordered", async (req, res, next) => {
 
 /* ----------------------------- Top produits : mieux notés ----------------------------- */
 /**
- * GET /api/products/top-rated?limit=8&minCount=2
+ * GET /api/products/top-rated?limit=8&minCount=2&ville=Casablanca
  * → Retourne les produits les mieux notés (moyenne + nb avis)
+ *    filtrés éventuellement par ville.
  */
 router.get("/top-rated", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
   const minCount = toPositiveInt(req.query.minCount, 2);
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
 
   try {
+    const whereVille = ville
+      ? "AND LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
+      : "";
+    const params = [];
+    params.push(minCount);
+    if (ville) params.push(ville);
+    params.push(limit);
+
     const [rowsRaw] = await pool.query(
       `
       SELECT 
@@ -307,6 +394,7 @@ router.get("/top-rated", async (req, res, next) => {
         s.name AS shop_name,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
+        s.city AS shop_city,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -320,10 +408,11 @@ router.get("/top-rated", async (req, res, next) => {
       LEFT JOIN shops s ON s.id = p.shop_id
       GROUP BY p.id
       HAVING rating_count >= ?
+      ${whereVille}
       ORDER BY avg_rating DESC, rating_count DESC
       LIMIT ?
       `,
-      [minCount, limit]
+      params
     );
 
     const rows = rowsRaw.map(stripDuuminiRateFromProduct);
@@ -349,7 +438,8 @@ router.get("/:id", async (req, res, next) => {
          p.*,
          s.name AS shop_name,
          s.logo AS shop_logo,
-         s.cover AS shop_cover
+         s.cover AS shop_cover,
+         s.city AS shop_city
        FROM products p
        LEFT JOIN shops s ON s.id = p.shop_id
        WHERE p.id=?`,
@@ -376,7 +466,7 @@ router.get("/:id", async (req, res, next) => {
 /* ----------------------------- Create (multipart) ----------------------------- */
 /**
  * FormData attendu:
- *  - name, price
+ *  - name, price (⚠️ prix normal du produit = prix client)
  *  - shop_id (OBLIGATOIRE pour ADMIN, ignoré pour VENDEUR)
  *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'), is_active?
  *  - images[] (max 8)
@@ -480,7 +570,7 @@ router.post(
           category_id ? Number(category_id) : null,
           name,
           makeSlug(),
-          Number(price),            // prix vendeur en base
+          Number(price), // prix normal du produit (client)
           currency || "MAD",
           description || null,
           stock != null ? Number(stock) : 0,
@@ -540,7 +630,10 @@ router.post(
           }
         }
       } catch (e) {
-        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
+        console.error(
+          "[products] Failed to enqueue PRODUCT_CREATED notifications",
+          e
+        );
       }
 
       // Notif temps réel (optionnel) — seulement si un shop existe
@@ -670,7 +763,7 @@ router.put(
          WHERE id=?`,
         [
           name ?? null,
-          price != null ? Number(price) : null,   // prix vendeur
+          price != null ? Number(price) : null, // prix normal (client)
           currency ?? null,
           description ?? null,
           stock != null ? Number(stock) : null,
@@ -880,4 +973,140 @@ router.delete(
   }
 );
 
+/* =======================================================================
+ *  Route de partage avec meta OG
+ *  GET /share/product/:id   (monté via productsRouter.shareRouter côté server.js)
+ * ======================================================================= */
+
+/* =======================================================================
+ *  Route de partage avec meta OG
+ *  GET /share/product/:id
+ * ======================================================================= */
+
+const shareRouter = express.Router();
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+shareRouter.get("/product/:id", async (req, res, next) => {
+  const id = parseIdParam(req.params.id);
+  if (!id) {
+    return res.status(404).send("Not found");
+  }
+
+  const pool = getPool();
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        p.id,
+        p.name,
+        p.description,
+        p.price,
+        p.sub_category,
+        p.is_active,
+        s.name AS shop_name,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover
+      FROM products p
+      LEFT JOIN shops s ON s.id = p.shop_id
+      WHERE p.id = ?
+      `,
+      [id]
+    );
+
+    const product = rows[0];
+    if (!product || !product.is_active) {
+      return res.status(404).send("Not found");
+    }
+
+    // Base Duumini web
+    const baseWeb =
+      env.FRONT_WEB_BASE_URL ||
+      process.env.FRONT_WEB_BASE_URL ||
+      "https://www.duumini.com";
+
+    // food -> /african-food, sinon -> /african-market
+    const sub = String(product.sub_category || "").trim().toLowerCase();
+    const channelPath = sub === "food" ? "/african-food" : "/african-market";
+    const finalUrl = `${baseWeb}${channelPath}`;
+
+    const ogTitle = escapeHtml(
+      `${product.name} — Duumini${
+        product.shop_name ? ` (${product.shop_name})` : ""
+      }`
+    );
+
+    const descriptionRaw =
+      product.description ||
+      "Découvrez ce produit africain disponible sur Duumini.";
+    const ogDescription = escapeHtml(
+      descriptionRaw.length > 180
+        ? descriptionRaw.slice(0, 177) + "..."
+        : descriptionRaw
+    );
+
+    // Image OG = cover produit si possible
+    let ogImage = product.cover || null;
+
+    if (ogImage && !/^https?:\/\//i.test(ogImage)) {
+      // Si jamais c'est une URL relative, on la colle sur baseWeb
+      if (ogImage.startsWith("/")) {
+        ogImage = `${baseWeb}${ogImage}`;
+      }
+    }
+
+    if (!ogImage) {
+      // Fallback image catégorie
+      ogImage = `${baseWeb}/images/share-default-product.jpg`;
+    }
+
+    const html = `<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>${ogTitle}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="product" />
+    <meta property="og:title" content="${ogTitle}" />
+    <meta property="og:description" content="${ogDescription}" />
+    <meta property="og:image" content="${ogImage}" />
+    <meta property="og:url" content="${finalUrl}" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${ogTitle}" />
+    <meta name="twitter:description" content="${ogDescription}" />
+    <meta name="twitter:image" content="${ogImage}" />
+
+    <!-- Redirection vers la catégorie Duumini -->
+    <meta http-equiv="refresh" content="0;url=${finalUrl}" />
+    <script>
+      window.location.replace(${JSON.stringify(finalUrl)});
+    </script>
+  </head>
+  <body>
+    <p>Redirection vers <a href="${finalUrl}">${finalUrl}</a>…</p>
+  </body>
+</html>`;
+
+    res.status(200).send(html);
+  } catch (e) {
+    next(e);
+  }
+});
+
+
+/* Export principal API + sous-router de partage */
 module.exports = router;
+module.exports.shareRouter = shareRouter;
