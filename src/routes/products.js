@@ -51,7 +51,8 @@ const router = express.Router();
  * ========================= */
 
 // On garde ces constantes pour compat, même si on ne sert plus de local
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
+const UPLOAD_DIR =
+  process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
@@ -443,7 +444,8 @@ router.get("/:id", async (req, res, next) => {
          s.city AS shop_city
        FROM products p
        LEFT JOIN shops s ON s.id = p.shop_id
-       WHERE p.id=?`,
+       WHERE p.id=?
+      `,
       [id]
     );
     const rawProduct = rows[0];
@@ -642,7 +644,9 @@ router.post(
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
         if (io && emitToShops && finalShopId != null) {
-          emitToShops([finalShopId], "product:created", { product_id: productId });
+          emitToShops([finalShopId], "product:created", {
+            product_id: productId,
+          });
         }
       } catch {}
 
@@ -740,7 +744,9 @@ router.put(
           );
           if (!shop) {
             conn.release();
-            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+            return res
+              .status(400)
+              .json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
         }
@@ -785,7 +791,9 @@ router.put(
       if (files.length) {
         const doReplace = String(replace_images || "").toLowerCase() === "true";
         if (doReplace) {
-          await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
+          await conn.query(`DELETE FROM product_images WHERE product_id=?`, [
+            id,
+          ]);
         }
         const [[{ maxOrder }]] = await conn.query(
           `SELECT COALESCE(MAX(sort_order), -1) AS maxOrder FROM product_images WHERE product_id=?`,
@@ -813,7 +821,9 @@ router.put(
         const { getIO } = require("../ws");
         const io = getIO && getIO();
         if (io && io.broadcastToUser && prod.owner_id != null) {
-          io.broadcastToUser(prod.owner_id, "product:updated", { product_id: id });
+          io.broadcastToUser(prod.owner_id, "product:updated", {
+            product_id: id,
+          });
         }
       } catch {}
 
@@ -959,7 +969,9 @@ router.delete(
         const { getIO } = require("../ws");
         const io = getIO && getIO();
         if (io && io.broadcastToUser && prod.owner_id != null) {
-          io.broadcastToUser(prod.owner_id, "product:deleted", { product_id: id });
+          io.broadcastToUser(prod.owner_id, "product:deleted", {
+            product_id: id,
+          });
         }
       } catch {}
 
@@ -1002,12 +1014,17 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       `
       SELECT 
         p.id,
+        p.slug,
         p.name,
         p.description,
         p.price,
+        p.currency,
         p.sub_category,
         p.is_active,
         s.name AS shop_name,
+        s.city AS shop_city,
+        s.logo AS shop_logo,
+        s.cover AS shop_cover,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -1025,16 +1042,19 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       return res.status(404).send("Not found");
     }
 
-    // Base Duumini web
+    // Base Duumini web (front SPA)
     const baseWeb =
       env.FRONT_WEB_BASE_URL ||
       process.env.FRONT_WEB_BASE_URL ||
       "https://www.duumini.com";
 
-    // food -> /african-food, sinon -> /african-market
+    // URL finale : page produit SPA
+    const slugOrId = product.slug || product.id;
+    const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
+
+    // Catégorie logique pour info (facultatif)
     const sub = String(product.sub_category || "").trim().toLowerCase();
     const channelPath = sub === "food" ? "/african-food" : "/african-market";
-    const finalUrl = `${baseWeb}${channelPath}`;
 
     const ogTitle = escapeHtml(
       `${product.name} — Duumini${
@@ -1045,26 +1065,54 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const descriptionRaw =
       product.description ||
       "Découvrez ce produit africain disponible sur Duumini.";
-    const ogDescription = escapeHtml(
+    const shortDesc =
       descriptionRaw.length > 180
         ? descriptionRaw.slice(0, 177) + "..."
-        : descriptionRaw
-    );
+        : descriptionRaw;
+    const ogDescription = escapeHtml(shortDesc);
 
-    // Image OG = cover produit si possible
-    let ogImage = product.cover || null;
+    // Image principale = cover produit depuis la BDD (Cloudinary)
+    let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
 
+    // Si jamais l'URL n'est pas absolue, on la colle sur baseWeb
     if (ogImage && !/^https?:\/\//i.test(ogImage)) {
-      // Si jamais c'est une URL relative, on la colle sur baseWeb
       if (ogImage.startsWith("/")) {
         ogImage = `${baseWeb}${ogImage}`;
+      } else {
+        ogImage = `${baseWeb}/${ogImage}`;
       }
     }
 
+    // Dernier recours : image statique (très rare, mais évite un partage sans visuel)
     if (!ogImage) {
-      // Fallback image catégorie
       ogImage = `${baseWeb}/images/share-default-product.jpg`;
     }
+
+    // Prix / currency
+    const priceAmount = Number(product.price || 0);
+    const priceCurrency = product.currency || "MAD";
+
+    // JSON-LD Product (SEO + Rich Snippets sur la vraie page, ici juste pour cohérence)
+    const jsonLd = {
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: product.name,
+      description: shortDesc,
+      image: [ogImage],
+      sku: String(product.id),
+      brand: {
+        "@type": "Brand",
+        name: "Duumini",
+      },
+      offers: {
+        "@type": "Offer",
+        priceCurrency: priceCurrency,
+        price: priceAmount,
+        availability: "https://schema.org/InStock",
+        url: finalUrl,
+      },
+      category: sub === "food" ? "African Food" : "African Market",
+    };
 
     const html = `<!doctype html>
 <html lang="fr">
@@ -1072,13 +1120,24 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <meta charset="utf-8" />
     <title>${ogTitle}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+
+    <link rel="canonical" href="${finalUrl}" />
 
     <!-- Open Graph -->
     <meta property="og:type" content="product" />
+    <meta property="og:site_name" content="Duumini" />
+    <meta property="og:locale" content="fr_FR" />
     <meta property="og:title" content="${ogTitle}" />
     <meta property="og:description" content="${ogDescription}" />
     <meta property="og:image" content="${ogImage}" />
     <meta property="og:url" content="${finalUrl}" />
+    <meta property="product:price:amount" content="${priceAmount}" />
+    <meta property="product:price:currency" content="${escapeHtml(
+      priceCurrency
+    )}" />
+    <meta property="product:retailer_item_id" content="${product.id}" />
+    <meta property="product:category" content="${escapeHtml(channelPath)}" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -1086,7 +1145,12 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <meta name="twitter:description" content="${ogDescription}" />
     <meta name="twitter:image" content="${ogImage}" />
 
-    <!-- Redirection vers la catégorie Duumini -->
+    <!-- Données structurées JSON-LD -->
+    <script type="application/ld+json">
+${JSON.stringify(jsonLd)}
+    </script>
+
+    <!-- Redirection rapide vers la page produit Duumini -->
     <meta http-equiv="refresh" content="0;url=${finalUrl}" />
     <script>
       window.location.replace(${JSON.stringify(finalUrl)});
