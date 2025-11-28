@@ -107,13 +107,16 @@ function computeDuuminiRateFromSubCategory(subCategory) {
 
 /**
  * Normalise un produit pour le front :
- * - price      = prix normal du produit (prix client final, tel qu'en BDD)
+ * - price        = prix normal du produit (prix client final, tel qu'en BDD)
  * - vendor_price = montant net estimé pour le vendeur (price - commission Duumini)
  * - duumini_rate est masqué dans la réponse API
  *
- * 💡 Logique demandée :
- *    → le pourcentage Duumini est DÉDIT du prix normal du produit,
+ * 💡 Logique :
+ *    → le pourcentage Duumini est DÉDIT du prix normal du produit (saisi par le vendeur),
  *       on NE l'ajoute pas au prix.
+ *
+ * Exemple :
+ *    price = 50, rate = 0.18 → vendor_price = 50 - (50 * 0.18) = 41
  */
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
@@ -129,14 +132,14 @@ function stripDuuminiRateFromProduct(row) {
     }
   }
 
-  const clientPrice = Number(price || 0); // prix normal du produit (client)
+  const clientPrice = Number(price || 0); // prix normal du produit (client, saisi dans le back-office)
   const duuminiAmount = +(clientPrice * rate).toFixed(2);
   const vendorNet = +(clientPrice - duuminiAmount).toFixed(2); // ce que touche le vendeur
 
   return {
     ...rest,
     price: clientPrice, // 💰 prix final payé par le client (inchangé)
-    vendor_price: vendorNet, // net vendeur
+    vendor_price: vendorNet, // net vendeur (après déduction commission)
   };
 }
 
@@ -167,9 +170,7 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville })
 
   // Filtre par ville de la boutique (s.city)
   if (ville) {
-    whereParts.push(
-      "LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
-    );
+    whereParts.push("LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))");
     params.push(ville);
   }
 
@@ -466,7 +467,7 @@ router.get("/:id", async (req, res, next) => {
 /* ----------------------------- Create (multipart) ----------------------------- */
 /**
  * FormData attendu:
- *  - name, price (⚠️ prix normal du produit = prix client)
+ *  - name, price (⚠️ prix normal du produit = prix client final saisi par le vendeur)
  *  - shop_id (OBLIGATOIRE pour ADMIN, ignoré pour VENDEUR)
  *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'), is_active?
  *  - images[] (max 8)
@@ -570,7 +571,7 @@ router.post(
           category_id ? Number(category_id) : null,
           name,
           makeSlug(),
-          Number(price), // prix normal du produit (client)
+          Number(price), // prix normal du produit (client, saisi par le vendeur)
           currency || "MAD",
           description || null,
           stock != null ? Number(stock) : 0,
@@ -763,7 +764,8 @@ router.put(
          WHERE id=?`,
         [
           name ?? null,
-          price != null ? Number(price) : null, // prix normal (client)
+          // prix normal (client, saisi dans le back-office)
+          price != null ? Number(price) : null,
           currency ?? null,
           description ?? null,
           stock != null ? Number(stock) : null,
@@ -978,11 +980,6 @@ router.delete(
  *  GET /share/product/:id   (monté via productsRouter.shareRouter côté server.js)
  * ======================================================================= */
 
-/* =======================================================================
- *  Route de partage avec meta OG
- *  GET /share/product/:id
- * ======================================================================= */
-
 const shareRouter = express.Router();
 
 function escapeHtml(str) {
@@ -1105,7 +1102,6 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     next(e);
   }
 });
-
 
 /* Export principal API + sous-router de partage */
 module.exports = router;

@@ -182,9 +182,10 @@ router.get("/:id", async (req, res) => {
  * Stats CA / Duumini / produits les plus commandés pour UNE boutique
  * (ADMIN ou VENDEUR propriétaire).
  *
- * IMPORTANT :
- * - CA (turnover) = somme(qty * products.price)  → prix normal vendeur
- * - Commission Duumini (duumini) = qty * products.price * taux (0.18 food, 0.11 sinon)
+ * 🔔 NOUVELLE LOGIQUE :
+ * - order_items.unit_price = prix client payé (snapshot au moment de la commande)
+ * - CA (turnover) = somme(qty * unit_price) → CA client hors livraison
+ * - Commission Duumini (duumini) = qty * unit_price * taux (0.18 food, 0.11 sinon)
  * - AUCUN frais de livraison pris en compte (pas de delivery_fee, etc.)
  * ==========================================================================*/
 router.get(
@@ -219,8 +220,8 @@ router.get(
       // On ne compte que les commandes "valides"
       const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
-      /* ===== CA jour / mois / année (prix NORMAL vendeur) =====
-         → basé UNIQUEMENT sur products.price (prix vendeur)
+      /* ===== CA jour / mois / année (prix CLIENT, unit_price) =====
+         → basé sur order_items.unit_price (snapshot du prix affiché au client)
          → AUCUN frais de livraison utilisé ici
       */
       const [rowsTurnover] = await pool.query(
@@ -228,18 +229,18 @@ router.get(
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
           END), 0) AS day_turnover,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
           END), 0) AS month_turnover,
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
           END), 0) AS year_turnover
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
@@ -263,7 +264,7 @@ router.get(
       };
 
       /* ===== Commission Duumini jour / mois / année =====
-         - commission = qty * products.price (prix vendeur) * taux
+         - commission = qty * unit_price (prix client) * taux
          - taux = 0.18 si sub_category = 'food', sinon 0.11
          - toujours SANS frais de livraison
       */
@@ -272,7 +273,7 @@ router.get(
         SELECT
           COALESCE(SUM(CASE
             WHEN DATE(o.created_at) = CURDATE()
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
                   WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
                   ELSE 0.11
@@ -282,7 +283,7 @@ router.get(
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
               AND MONTH(o.created_at) = MONTH(CURDATE())
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
                   WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
                   ELSE 0.11
@@ -291,7 +292,7 @@ router.get(
 
           COALESCE(SUM(CASE
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
-            THEN oi.qty * COALESCE(p.price, 0)
+            THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
                   WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
                   ELSE 0.11
@@ -320,7 +321,7 @@ router.get(
 
       /* ===== Produits les plus commandés (30 derniers jours)
          - total_qty = somme des quantités
-         - total_amount = somme (qty * prix normal vendeur)
+         - total_amount = somme (qty * unit_price = prix client)
          - SANS frais de livraison
       */
       const [rowsTopProducts] = await pool.query(
@@ -336,7 +337,7 @@ router.get(
             LIMIT 1
           ) AS cover,
           SUM(oi.qty) AS total_qty,
-          SUM(oi.qty * COALESCE(p.price, 0)) AS total_amount
+          SUM(oi.qty * COALESCE(oi.unit_price, 0)) AS total_amount
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
@@ -355,7 +356,7 @@ router.get(
         product_id: r.product_id,
         name: r.name,
         total_qty: Number(r.total_qty || 0),
-        total_amount: Number(r.total_amount || 0), // CA 30j sur prix normal vendeur
+        total_amount: Number(r.total_amount || 0), // CA 30j sur prix client
         cover: r.cover || null,
       }));
 

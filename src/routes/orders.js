@@ -116,26 +116,20 @@ function buildDisplayCode(id) {
 
 /**
  * Commission pour une ligne : 18% food, 11% sinon.
- * ⚠️ Ici on passe le PRIX VENDEUR (base) pour calculer la commission Duumini.
- *    Ex: base = 750 → commission = 750 * taux, JAMAIS déduite de 750.
+ *
+ * ⚠️ NOUVELLE LOGIQUE:
+ *    - Ici on passe le PRIX CLIENT (products.price en BDD).
+ *    - La commission Duumini est prélevée sur ce prix client.
+ *
+ * Exemple:
+ *    clientUnit = 50, rate=0.18 → commission = 50 * 0.18 = 9
+ *    net vendeur = 50 - 9 = 41
  */
-function computeCommissionForLine(baseUnitPrice, qty, subCategory) {
-  const totalBaseLine = Number(baseUnitPrice || 0) * Number(qty || 1);
+function computeCommissionForLine(clientUnitPrice, qty, subCategory) {
+  const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
   const sub = String(subCategory || '').trim().toLowerCase();
   const rate = sub === 'food' ? 0.18 : 0.11;
-  return +(totalBaseLine * rate).toFixed(2);
-}
-
-/**
- * Prix unitaire payé par le client = prix vendeur + commission
- * → utilisé pour order_items.unit_price
- *    Ex: base = 750, rate=0.11 → client_unit = 750 * 1.11 = 832.5
- */
-function computeClientUnitPrice(basePrice, subCategory) {
-  const sub = String(subCategory || '').trim().toLowerCase();
-  const rate = sub === 'food' ? 0.18 : 0.11;
-  const base = Number(basePrice || 0);
-  return +(base * (1 + rate)).toFixed(2);
+  return +(totalClientLine * rate).toFixed(2);
 }
 
 /** On enlève commission_duumini pour les clients (non admin / non vendeur) */
@@ -786,9 +780,10 @@ router.post('/', authRequired, async (req, res) => {
         throw err;
       }
 
-      const basePrice = Number(p.price); // 💰 PRIX VENDEUR (ex: 750)
-      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // 💸 PRIX CLIENT (base + commission)
-      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category); // 🧾 commission Duumini sur base
+      // ❗ NOUVELLE LOGIQUE :
+      // p.price = PRIX CLIENT final (déjà incluant la marge Duumini).
+      const unit_price = Number(p.price); // prix client
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
       cleanItems.push({
         product_id: p.id,
@@ -798,7 +793,7 @@ router.post('/', authRequired, async (req, res) => {
       });
 
       itemsAmount += unit_price * qty;   // ✅ total client (hors livraison)
-      totalCommission += lineCommission; // ✅ somme des commissions (sur prix vendeur)
+      totalCommission += lineCommission; // ✅ somme des commissions (sur prix client)
     }
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -1018,9 +1013,10 @@ router.post('/guest', async (req, res) => {
         throw err;
       }
 
-      const basePrice = Number(p.price); // prix vendeur
-      const unit_price = computeClientUnitPrice(basePrice, p.sub_category); // prix client
-      const lineCommission = computeCommissionForLine(basePrice, qty, p.sub_category);
+      // ❗ NOUVELLE LOGIQUE :
+      // p.price = PRIX CLIENT final.
+      const unit_price = Number(p.price); // prix client
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
       cleanItems.push({
         product_id: p.id,
