@@ -319,10 +319,6 @@ async function enqueueOrderStatusForClient(orderId, status) {
 
 /* =========================
  * List (admin : tout / client : ses commandes)
- * → ajoute toujours un champ contact (fallback users)
- * → ajoute first_product_cover pour la miniature
- * → ajoute items_amount (somme des lignes produits → CA hors livraison côté client)
- * → ajoute geo_link + display_code
  * =======================*/
 router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -760,24 +756,55 @@ router.post('/', authRequired, async (req, res) => {
     let totalCommission = 0;
     const cleanItems = [];
 
+    // ✅ Contrainte : pour les produits "food", un seul restaurant (shop_id)
+    let firstFoodShopId = null;
+
     for (const it of items) {
       const product_id = Number(it?.product_id);
       const qty = Number(it?.qty);
       if (!product_id || !qty) {
         const err = new Error('product_id & qty required');
         err.statusCode = 400;
+        err.payload = {
+          code: 'INVALID_ITEM',
+          message: 'Un ou plusieurs produits sont invalides dans votre panier.',
+        };
         throw err;
       }
 
-      // 🔒 On verrouille la ligne produit + on récupère le stock
+      // 🔒 On verrouille la ligne produit + on récupère le stock + shop_id
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock FROM products WHERE id=? FOR UPDATE`,
+        `SELECT id, price, sub_category, stock, shop_id FROM products WHERE id=? FOR UPDATE`,
         [product_id]
       );
       if (!p) {
         const err = new Error('Product not found: ' + product_id);
         err.statusCode = 400;
+        err.payload = {
+          code: 'PRODUCT_NOT_FOUND',
+          message: "Un produit de votre panier n'est plus disponible.",
+          product_id,
+        };
         throw err;
+      }
+
+      const isFood = String(p.sub_category || '').trim().toLowerCase() === 'food';
+      if (isFood) {
+        const shopId = p.shop_id != null ? Number(p.shop_id) : null;
+        if (shopId != null) {
+          if (firstFoodShopId == null) {
+            firstFoodShopId = shopId;
+          } else if (firstFoodShopId !== shopId) {
+            const err = new Error('MULTIPLE_FOOD_SHOPS_NOT_ALLOWED');
+            err.statusCode = 400;
+            err.payload = {
+              code: 'MULTIPLE_FOOD_SHOPS_NOT_ALLOWED',
+              message:
+                "Vous ne pouvez pas commander dans plusieurs restaurants (catégorie Food) en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
+            };
+            throw err;
+          }
+        }
       }
 
       // ❗ NOUVELLE LOGIQUE :
@@ -843,6 +870,8 @@ router.post('/', authRequired, async (req, res) => {
         err.statusCode = 400;
         err.payload = {
           code: 'STOCK_INSUFFICIENT',
+          message:
+            "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
           requested: Number(it.qty || 0),
           available: currentStock,
@@ -947,7 +976,7 @@ router.post('/', authRequired, async (req, res) => {
     });
   } catch (e) {
     try { await conn.rollback(); } catch {}
-    if (e && e.statusCode === 400 && e.payload?.code === 'STOCK_INSUFFICIENT') {
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
     }
     res.status(500).json({ error: e.message });
@@ -975,7 +1004,10 @@ router.post('/guest', async (req, res) => {
   // 👇 Invité : on veut au minimum un téléphone + un nom si possible
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
-    return res.status(400).json({ error: 'phone required' });
+    return res.status(400).json({
+      code: 'PHONE_REQUIRED',
+      message: 'Un numéro de téléphone est obligatoire pour passer une commande.',
+    });
   }
 
   const pool = getPool();
@@ -993,24 +1025,55 @@ router.post('/guest', async (req, res) => {
     let totalCommission = 0;
     const cleanItems = [];
 
+    // ✅ Contrainte : pour les produits "food", un seul restaurant (shop_id)
+    let firstFoodShopId = null;
+
     for (const it of items) {
       const product_id = Number(it?.product_id);
       const qty = Number(it?.qty);
       if (!product_id || !qty) {
         const err = new Error('product_id & qty required');
         err.statusCode = 400;
+        err.payload = {
+          code: 'INVALID_ITEM',
+          message: 'Un ou plusieurs produits sont invalides dans votre panier.',
+        };
         throw err;
       }
 
-      // 🔒 On verrouille la ligne produit + on récupère le stock
+      // 🔒 On verrouille la ligne produit + on récupère le stock + shop_id
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock FROM products WHERE id=? FOR UPDATE`,
+        `SELECT id, price, sub_category, stock, shop_id FROM products WHERE id=? FOR UPDATE`,
         [product_id]
       );
       if (!p) {
         const err = new Error('Product not found: ' + product_id);
         err.statusCode = 400;
+        err.payload = {
+          code: 'PRODUCT_NOT_FOUND',
+          message: "Un produit de votre panier n'est plus disponible.",
+          product_id,
+        };
         throw err;
+      }
+
+      const isFood = String(p.sub_category || '').trim().toLowerCase() === 'food';
+      if (isFood) {
+        const shopId = p.shop_id != null ? Number(p.shop_id) : null;
+        if (shopId != null) {
+          if (firstFoodShopId == null) {
+            firstFoodShopId = shopId;
+          } else if (firstFoodShopId !== shopId) {
+            const err = new Error('MULTIPLE_FOOD_SHOPS_NOT_ALLOWED');
+            err.statusCode = 400;
+            err.payload = {
+              code: 'MULTIPLE_FOOD_SHOPS_NOT_ALLOWED',
+              message:
+                "Vous ne pouvez pas commander dans plusieurs restaurants en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
+            };
+            throw err;
+          }
+        }
       }
 
       // ❗ NOUVELLE LOGIQUE :
@@ -1074,6 +1137,8 @@ router.post('/guest', async (req, res) => {
         err.statusCode = 400;
         err.payload = {
           code: 'STOCK_INSUFFICIENT',
+          message:
+            "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
           requested: Number(it.qty || 0),
           available: currentStock,
@@ -1153,7 +1218,7 @@ router.post('/guest', async (req, res) => {
         );
       } catch (errWa) {
         console.error(
-          `[WhatsApp] Erreur envoi commande invité #${orderId} au backoffice`,
+          `[WhatsApp] Erreur envoi commande invité #${orderId}`,
           errWa
         );
       }
@@ -1169,7 +1234,7 @@ router.post('/guest', async (req, res) => {
     });
   } catch (e) {
     try { await conn.rollback(); } catch {}
-    if (e && e.statusCode === 400 && e.payload?.code === 'STOCK_INSUFFICIENT') {
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
     }
     res.status(500).json({ error: e.message });  
