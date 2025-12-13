@@ -5,7 +5,9 @@ const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const http = require("http");
 const path = require("path");
-require("dotenv").config();
+
+// ✅ dotenv silencieux (supprime les logs "[dotenv] Injection...")
+require("dotenv").config({ quiet: true });
 
 const { env } = require("./src/lib/env");
 const { notFound, errorHandler } = require("./src/utils/errors");
@@ -32,6 +34,36 @@ try {
 } catch {
   // optionnel si pas encore créé
 }
+
+// ✅ (optionnel) env-check admin-only
+let authRequired, isAdmin;
+try {
+  ({ authRequired, isAdmin } = require("./src/middlewares/auth"));
+} catch {
+  // si jamais le chemin change, on ignore
+}
+
+/* =========================
+ * ✅ SAFE env log (sans secrets)
+ * ========================= */
+function yn(v) {
+  return v ? "OK" : "MISSING";
+}
+
+console.log("[ENV] NODE_ENV =", env.NODE_ENV);
+console.log("[ENV] PORT =", env.PORT);
+console.log("[ENV] CORS_ORIGINS =", env.CORS_ORIGINS || "*");
+
+// AI / OPENAI
+console.log("[ENV] DUUMINI_AI_MODE =", env.DUUMINI_AI_MODE || "SAFE");
+console.log("[ENV] OPENAI_API_KEY =", yn(env.OPENAI_API_KEY));
+console.log("[ENV] OPENAI_MODEL =", env.OPENAI_MODEL || "(default)");
+
+// META ADS
+console.log("[ENV] META_AD_ACCOUNT_ID =", yn(env.META_AD_ACCOUNT_ID));
+console.log("[ENV] META_AD_ACCESS_TOKEN =", yn(env.META_AD_ACCESS_TOKEN));
+console.log("[ENV] META_PAGE_ID =", yn(env.META_PAGE_ID));
+console.log("[ENV] META_DEFAULT_ADSET_ID =", yn(env.META_DEFAULT_ADSET_ID));
 
 const app = express();
 app.set("trust proxy", 1);
@@ -88,7 +120,10 @@ app.use((req, res, next) => {
   }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
   res.setHeader(
     "Access-Control-Allow-Headers",
     [
@@ -133,6 +168,31 @@ app.get("/api/health", (_req, res) =>
  * ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
 app.head("/", (_req, res) => res.status(200).end());
+
+/* =========================
+ * ✅ Admin env-check (optionnel)
+ * ========================= */
+if (authRequired && isAdmin) {
+  app.get("/api/admin/env-check", authRequired, isAdmin, (_req, res) => {
+    return res.json({
+      ok: true,
+      ai: {
+        DUUMINI_AI_MODE: env.DUUMINI_AI_MODE || "SAFE",
+        OPENAI_API_KEY: !!env.OPENAI_API_KEY,
+        OPENAI_MODEL: env.OPENAI_MODEL || null,
+      },
+      meta: {
+        META_AD_ACCOUNT_ID: !!env.META_AD_ACCOUNT_ID,
+        META_AD_ACCESS_TOKEN: !!env.META_AD_ACCESS_TOKEN,
+        META_PAGE_ID: !!env.META_PAGE_ID,
+        META_DEFAULT_ADSET_ID: !!env.META_DEFAULT_ADSET_ID,
+        META_PIXEL_ID: !!env.META_PIXEL_ID,
+        META_BUSINESS_ID: !!env.META_BUSINESS_ID,
+        META_APP_ID: !!env.META_APP_ID,
+      },
+    });
+  });
+}
 
 /* =========================
  * API routes
