@@ -6,7 +6,12 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
+const {
+  authRequired,
+  requireRole,
+  isVendor,
+  isAdmin,
+} = require("../middlewares/auth");
 
 // --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
@@ -51,8 +56,7 @@ const router = express.Router();
  * ========================= */
 
 // On garde ces constantes pour compat, même si on ne sert plus de local
-const UPLOAD_DIR =
-  process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
@@ -94,53 +98,110 @@ function normalizeVilleFilter(value) {
   const low = raw.toLowerCase();
   if (low.startsWith("cas")) return "Casablanca";
   if (low.startsWith("mar")) return "Marrakech";
-  // fallback : renvoyer la chaîne telle quelle
   return raw;
 }
 
-// Taux de commission Duumini en fonction de la sous-catégorie
-// sub = 'food' → 18% ; sinon (market/product/…) → 11%
-function computeDuuminiRateFromSubCategory(subCategory) {
-  const sub = String(subCategory || "").trim().toLowerCase();
-  if (sub === "food") return 0.18; // Food
-  return 0.11; // Market / autres
+/**
+ * ✅ Affichage “Casa ↔ Marrakech”
+ * Si l'utilisateur filtre sur Casablanca OU Marrakech, on affiche les 2 villes.
+ * Sinon on filtre sur la ville fournie.
+ */
+function expandCasaMarr(ville) {
+  const v = normalizeVilleFilter(ville);
+  if (!v) return null;
+  if (v === "Casablanca" || v === "Marrakech") return ["Casablanca", "Marrakech"];
+  return [v];
 }
 
-/**
- * Normalise un produit pour le front :
- * - price        = prix normal du produit (prix client final, tel qu'en BDD)
- * - vendor_price = montant net estimé pour le vendeur (price - commission Duumini)
- * - duumini_rate est masqué dans la réponse API
- *
- * 💡 Logique :
- *    → le pourcentage Duumini est DÉDIT du prix normal du produit (saisi par le vendeur),
- *       on NE l'ajoute pas au prix.
- *
- * Exemple :
- *    price = 50, rate = 0.18 → vendor_price = 50 - (50 * 0.18) = 41
- */
+/* ============================
+ *  Villes dispo par produit
+ *  (sans créer de table)
+ *  -> on stocke si une colonne existe dans products:
+ *     available_cities | cities | villes
+ * ============================ */
+
+async function detectCitiesColumn(conn) {
+  const candidates = ["available_cities", "cities", "villes"];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'products'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return candidates.find((c) => found.has(c)) || null;
+}
+
+function parseCitiesBody(body) {
+  const raw =
+    body?.cities ??
+    body?.["cities[]"] ??
+    body?.villes ??
+    body?.["villes[]"] ??
+    null;
+
+  if (raw == null) return null; // null => pas envoyé
+
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else {
+    const s = String(raw || "").trim();
+    if (!s) arr = [];
+    else if (s.startsWith("[") && s.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(s);
+        arr = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        arr = [];
+      }
+    } else if (s.includes(",")) {
+      arr = s.split(",").map((x) => x.trim());
+    } else {
+      arr = [s];
+    }
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const it of arr) {
+    const c = normalizeVilleFilter(it) || String(it || "").trim();
+    if (!c) continue;
+    const k = c.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+  }
+  return out;
+}
+
+// Taux de commission Duumini en fonction de la sous-catégorie
+function computeDuuminiRateFromSubCategory(subCategory) {
+  const sub = String(subCategory || "").trim().toLowerCase();
+  if (sub === "food") return 0.18;
+  return 0.11;
+}
+
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
 
   const { duumini_rate, price, ...rest } = row;
 
-  // Récupérer un taux valide, sinon calculer depuis sub_category
   let rate = computeDuuminiRateFromSubCategory(row.sub_category);
   if (duumini_rate != null) {
     const r = Number(duumini_rate);
-    if (Number.isFinite(r) && r >= 0 && r <= 1) {
-      rate = r;
-    }
+    if (Number.isFinite(r) && r >= 0 && r <= 1) rate = r;
   }
 
-  const clientPrice = Number(price || 0); // prix normal du produit (client, saisi dans le back-office)
+  const clientPrice = Number(price || 0);
   const duuminiAmount = +(clientPrice * rate).toFixed(2);
-  const vendorNet = +(clientPrice - duuminiAmount).toFixed(2); // ce que touche le vendeur
+  const vendorNet = +(clientPrice - duuminiAmount).toFixed(2);
 
   return {
     ...rest,
-    price: clientPrice, // 💰 prix final payé par le client (inchangé)
-    vendor_price: vendorNet, // net vendeur (après déduction commission)
+    price: clientPrice,
+    vendor_price: vendorNet,
   };
 }
 
@@ -155,29 +216,22 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville })
   const whereParts = [];
   const params = [];
 
-  // Filtre par canal (food / market)
-  if (channel === "african-food") {
-    whereParts.push(`${normSub} = 'food'`);
-  } else if (channel === "african-market") {
-    whereParts.push(`${normSub} <> 'food'`);
-  } else {
-    whereParts.push("1=1");
-  }
+  if (channel === "african-food") whereParts.push(`${normSub} = 'food'`);
+  else if (channel === "african-market") whereParts.push(`${normSub} <> 'food'`);
+  else whereParts.push("1=1");
 
-  // Filtre produits actifs
-  if (onlyActive) {
-    whereParts.push("p.is_active = 1");
-  }
+  if (onlyActive) whereParts.push("p.is_active = 1");
 
-  // Filtre par ville de la boutique (s.city)
-  if (ville) {
-    whereParts.push("LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))");
-    params.push(ville);
+  // ✅ Filtre ville (Casa ↔ Marrakech : on prend les deux)
+  const villes = ville ? expandCasaMarr(ville) : null;
+  if (villes && villes.length) {
+    const placeholders = villes.map(() => "?").join(",");
+    whereParts.push(`LOWER(TRIM(COALESCE(s.city,''))) IN (${placeholders})`);
+    params.push(...villes);
   }
 
   const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
 
-  // COUNT avec join sur shops (pour ville)
   const [[{ total }]] = await pool.query(
     `
     SELECT COUNT(*) AS total
@@ -211,12 +265,10 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville })
   );
 
   const rows = rowsRaw.map(stripDuuminiRateFromProduct);
-
   return { rows, total };
 }
 
 /* ----------------------------- Listing ----------------------------- */
-// Handler générique (sans canal)
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
@@ -226,7 +278,6 @@ async function listHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  // Ville (user) → filtre sur shops.city
   const ville =
     normalizeVilleFilter(req.query.ville) ||
     normalizeVilleFilter(req.query.city);
@@ -246,7 +297,6 @@ async function listHandler(req, res, next) {
   }
 }
 
-// Handler spécifique FOOD
 async function listFoodHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
@@ -275,7 +325,6 @@ async function listFoodHandler(req, res, next) {
   }
 }
 
-// Handler spécifique MARKET (non-food)
 async function listMarketHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
@@ -304,17 +353,11 @@ async function listMarketHandler(req, res, next) {
   }
 }
 
-// Routes listing
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
 
 /* ----------------------------- Top produits : plus commandés ----------------------------- */
-/**
- * GET /api/products/top-ordered?limit=8&ville=Casablanca
- * → Retourne les produits les plus commandés (commandes DONE)
- *    filtrés éventuellement par ville (shops.city).
- */
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
@@ -323,11 +366,15 @@ router.get("/top-ordered", async (req, res, next) => {
     normalizeVilleFilter(req.query.city);
 
   try {
-    const whereVille = ville
-      ? "AND LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
+    const villes = ville ? expandCasaMarr(ville) : null;
+    const whereVille = villes?.length
+      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes
+          .map(() => "?")
+          .join(",")})`
       : "";
+
     const params = [];
-    if (ville) params.push(ville);
+    if (villes?.length) params.push(...villes);
     params.push(limit);
 
     const [rowsRaw] = await pool.query(
@@ -358,20 +405,13 @@ router.get("/top-ordered", async (req, res, next) => {
       params
     );
 
-    const rows = rowsRaw.map(stripDuuminiRateFromProduct);
-
-    res.json(rows);
+    res.json(rowsRaw.map(stripDuuminiRateFromProduct));
   } catch (e) {
     next(e);
   }
 });
 
 /* ----------------------------- Top produits : mieux notés ----------------------------- */
-/**
- * GET /api/products/top-rated?limit=8&minCount=2&ville=Casablanca
- * → Retourne les produits les mieux notés (moyenne + nb avis)
- *    filtrés éventuellement par ville.
- */
 router.get("/top-rated", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
@@ -381,12 +421,17 @@ router.get("/top-rated", async (req, res, next) => {
     normalizeVilleFilter(req.query.city);
 
   try {
-    const whereVille = ville
-      ? "AND LOWER(TRIM(COALESCE(s.city, ''))) = LOWER(TRIM(?))"
+    const villes = ville ? expandCasaMarr(ville) : null;
+
+    // ⚠️ HAVING vient avant le filtre ville ici (pour garder la structure existante)
+    const whereVille = villes?.length
+      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes
+          .map(() => "?")
+          .join(",")})`
       : "";
-    const params = [];
-    params.push(minCount);
-    if (ville) params.push(ville);
+
+    const params = [minCount];
+    if (villes?.length) params.push(...villes);
     params.push(limit);
 
     const [rowsRaw] = await pool.query(
@@ -417,9 +462,7 @@ router.get("/top-rated", async (req, res, next) => {
       params
     );
 
-    const rows = rowsRaw.map(stripDuuminiRateFromProduct);
-
-    res.json(rows);
+    res.json(rowsRaw.map(stripDuuminiRateFromProduct));
   } catch (e) {
     next(e);
   }
@@ -428,10 +471,7 @@ router.get("/top-rated", async (req, res, next) => {
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
-  if (!id) {
-    // ID non numérique (ex: "pending-rating") → laisse passer au prochain router
-    return next();
-  }
+  if (!id) return next();
 
   const pool = getPool();
   try {
@@ -444,8 +484,7 @@ router.get("/:id", async (req, res, next) => {
          s.city AS shop_city
        FROM products p
        LEFT JOIN shops s ON s.id = p.shop_id
-       WHERE p.id=?
-      `,
+       WHERE p.id=?`,
       [id]
     );
     const rawProduct = rows[0];
@@ -460,24 +499,43 @@ router.get("/:id", async (req, res, next) => {
         ORDER BY sort_order ASC, id ASC`,
       [id]
     );
-    res.json({ ...product, images });
+
+    // ✅ si une colonne existe, on renvoie aussi cities (pour prefill du form)
+    let cities = undefined;
+    try {
+      const conn = await pool.getConnection();
+      try {
+        const col = await detectCitiesColumn(conn);
+        if (col) {
+          const [r2] = await conn.query(
+            `SELECT ${col} AS cities_json FROM products WHERE id=? LIMIT 1`,
+            [id]
+          );
+          const raw = r2?.[0]?.cities_json;
+          if (raw != null && raw !== "") {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) cities = parsed;
+            } catch {
+              // fallback csv
+              const s = String(raw || "");
+              if (s.includes(",")) cities = s.split(",").map((x) => x.trim());
+              else cities = [s].filter(Boolean);
+            }
+          }
+        }
+      } finally {
+        conn.release();
+      }
+    } catch {}
+
+    res.json({ ...product, images, ...(cities ? { cities } : {}) });
   } catch (e) {
     next(e);
   }
 });
 
 /* ----------------------------- Create (multipart) ----------------------------- */
-/**
- * FormData attendu:
- *  - name, price (⚠️ prix normal du produit = prix client final saisi par le vendeur)
- *  - shop_id (OBLIGATOIRE pour ADMIN, ignoré pour VENDEUR)
- *  - currency?, description?, stock?, is_featured?, promo_eligible?, sub_category? ('product'|'food'), is_active?
- *  - images[] (max 8)
- *
- * Règles:
- *  - VENDEUR: shop_id déduit de la boutique du vendeur (obligatoire pour lui)
- *  - ADMIN:  shop_id doit être fourni, on vérifie que la boutique existe
- */
 router.post(
   "/",
   authRequired,
@@ -502,7 +560,6 @@ router.post(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
-      // Détermination du shop_id selon le rôle
       let finalShopId = null;
       const role = String(req.user?.role || "").toUpperCase();
 
@@ -519,7 +576,6 @@ router.post(
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
-        // ADMIN: shop_id DOIT être fourni et valide
         const sid = Number(shop_id) || 0;
         if (!sid) {
           conn.release();
@@ -546,15 +602,9 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      // Normaliser sub_category: 'food' | 'product' (par défaut 'product')
       const rawSub = String(sub_category || "").trim().toLowerCase();
-      const sub =
-        rawSub === "food" || rawSub === "product" ? rawSub : "product";
-
-      // Calcul du taux de commission Duumini (caché du front)
+      const sub = rawSub === "food" || rawSub === "product" ? rawSub : "product";
       const duuminiRate = computeDuuminiRateFromSubCategory(sub);
-
-      // Normaliser is_active (par défaut 1 = actif)
       const active = parseBoolFlag(is_active, 1);
 
       const makeSlug = () =>
@@ -563,27 +613,42 @@ router.post(
           .toString(36)
           .slice(2, 7)}`.toLowerCase();
 
+      // ✅ villes envoyées par l'admin (libre) -> stockées seulement si colonne existe
+      const citiesCol = await detectCitiesColumn(conn);
+      const incomingCities = parseCitiesBody(req.body); // null si pas envoyé
+      const cities =
+        incomingCities == null ? null : incomingCities.map(normalizeVilleFilter).filter(Boolean);
+      const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
+
       await conn.beginTransaction();
-      const [r] = await conn.query(
-        `INSERT INTO products
-           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, duumini_rate, is_active)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          finalShopId,
-          category_id ? Number(category_id) : null,
-          name,
-          makeSlug(),
-          Number(price), // prix normal du produit (client, saisi par le vendeur)
-          currency || "MAD",
-          description || null,
-          stock != null ? Number(stock) : 0,
-          is_featured ? 1 : 0,
-          promo_eligible ? 1 : 0,
-          sub,
-          duuminiRate,
-          active,
-        ]
-      );
+
+      // INSERT dynamique (sans migration)
+      let insertSql = `INSERT INTO products
+           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, duumini_rate, is_active`;
+      const insertVals = [
+        finalShopId,
+        category_id ? Number(category_id) : null,
+        name,
+        makeSlug(),
+        Number(price),
+        currency || "MAD",
+        description || null,
+        stock != null ? Number(stock) : 0,
+        is_featured ? 1 : 0,
+        promo_eligible ? 1 : 0,
+        sub,
+        duuminiRate,
+        active,
+      ];
+
+      if (citiesCol && cities != null) {
+        insertSql += `, ${citiesCol}`;
+        insertVals.push(citiesJson);
+      }
+
+      insertSql += `) VALUES (${insertVals.map(() => "?").join(",")})`;
+
+      const [r] = await conn.query(insertSql, insertVals);
       const productId = r.insertId;
 
       // Images -> Cloudinary
@@ -591,10 +656,7 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -607,7 +669,6 @@ router.post(
 
       const channel = sub === "food" ? "african-food" : "african-market";
 
-      // 🟢 Enquêter une notification pour TOUS les users ayant un device
       try {
         const [userRows] = await pool.query(
           `SELECT DISTINCT user_id
@@ -633,20 +694,14 @@ router.post(
           }
         }
       } catch (e) {
-        console.error(
-          "[products] Failed to enqueue PRODUCT_CREATED notifications",
-          e
-        );
+        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
       }
 
-      // Notif temps réel (optionnel) — seulement si un shop existe
       try {
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
         if (io && emitToShops && finalShopId != null) {
-          emitToShops([finalShopId], "product:created", {
-            product_id: productId,
-          });
+          emitToShops([finalShopId], "product:created", { product_id: productId });
         }
       } catch {}
 
@@ -673,9 +728,7 @@ router.put(
   upload.array("images[]", 8),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
-    if (!id) {
-      return next();
-    }
+    if (!id) return next();
 
     const {
       name,
@@ -695,7 +748,6 @@ router.put(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
-      // LEFT JOIN pour supporter produits ADMIN sans boutique
       const [[prod]] = await conn.query(
         `SELECT p.*, s.owner_id
            FROM products p
@@ -707,33 +759,24 @@ router.put(
         conn.release();
         return res.status(404).json({ error: "Not found" });
       }
-      // Vendeur: uniquement ses produits (owner_id NULL => interdit)
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
         conn.release();
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      // Normaliser sub_category: appliquer uniquement si valeur valide
       const rawSub =
         sub_category != null ? String(sub_category).trim().toLowerCase() : null;
       let sub = null;
-      if (rawSub === "food" || rawSub === "product") {
-        sub = rawSub;
-      }
+      if (rawSub === "food" || rawSub === "product") sub = rawSub;
 
-      // Sous-catégorie effective (si pas envoyée, on garde l'existant)
       const effectiveSub =
         sub != null
           ? sub
           : String(prod.sub_category || "").trim().toLowerCase() || "product";
 
-      // Recalcul du taux Duumini en fonction de la sous-catégorie effective
       const duuminiRate = computeDuuminiRateFromSubCategory(effectiveSub);
-
-      // Normaliser is_active si fourni
       const active = parseBoolFlag(is_active, null);
 
-      // Gestion éventuelle du changement de boutique (ADMIN uniquement)
       let newShopIdParam = null;
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
@@ -744,33 +787,29 @@ router.put(
           );
           if (!shop) {
             conn.release();
-            return res
-              .status(400)
-              .json({ error: "Boutique invalide (shop_id)" });
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
         }
-        // Si vendeur -> on ignore tout changement de shop_id
       }
 
       await conn.query(
         `UPDATE products SET
-           name          = COALESCE(?, name),
-           price         = COALESCE(?, price),
-           currency      = COALESCE(?, currency),
-           description   = COALESCE(?, description),
-           stock         = COALESCE(?, stock),
-           is_featured   = COALESCE(?, is_featured),
-           promo_eligible= COALESCE(?, promo_eligible),
-           sub_category  = ?,
-           duumini_rate  = ?,
-           is_active     = COALESCE(?, is_active),
-           category_id   = COALESCE(?, category_id),
-           shop_id       = COALESCE(?, shop_id)
+           name           = COALESCE(?, name),
+           price          = COALESCE(?, price),
+           currency       = COALESCE(?, currency),
+           description    = COALESCE(?, description),
+           stock          = COALESCE(?, stock),
+           is_featured    = COALESCE(?, is_featured),
+           promo_eligible = COALESCE(?, promo_eligible),
+           sub_category   = ?,
+           duumini_rate   = ?,
+           is_active      = COALESCE(?, is_active),
+           category_id    = COALESCE(?, category_id),
+           shop_id        = COALESCE(?, shop_id)
          WHERE id=?`,
         [
           name ?? null,
-          // prix normal (client, saisi dans le back-office)
           price != null ? Number(price) : null,
           currency ?? null,
           description ?? null,
@@ -786,27 +825,36 @@ router.put(
         ]
       );
 
-      // Images -> Cloudinary
+      // ✅ update villes si envoyées (admin libre) et colonne existe
+      const citiesCol = await detectCitiesColumn(conn);
+      const incomingCities = parseCitiesBody(req.body); // null si pas envoyé
+      if (citiesCol && incomingCities != null) {
+        const cities = (incomingCities || [])
+          .map(normalizeVilleFilter)
+          .filter(Boolean);
+        await conn.query(
+          `UPDATE products SET ${citiesCol}=? WHERE id=?`,
+          [JSON.stringify(cities), id]
+        );
+      }
+
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
         const doReplace = String(replace_images || "").toLowerCase() === "true";
         if (doReplace) {
-          await conn.query(`DELETE FROM product_images WHERE product_id=?`, [
-            id,
-          ]);
+          await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
         }
         const [[{ maxOrder }]] = await conn.query(
-          `SELECT COALESCE(MAX(sort_order), -1) AS maxOrder FROM product_images WHERE product_id=?`,
+          `SELECT COALESCE(MAX(sort_order), -1) AS maxOrder
+             FROM product_images
+            WHERE product_id=?`,
           [id]
         );
         let start = (maxOrder ?? -1) + 1;
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(
-            f.buffer,
-            f.originalname || undefined
-          );
+          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -816,14 +864,11 @@ router.put(
         }
       }
 
-      // Notifs (optionnel)
       try {
         const { getIO } = require("../ws");
         const io = getIO && getIO();
         if (io && io.broadcastToUser && prod.owner_id != null) {
-          io.broadcastToUser(prod.owner_id, "product:updated", {
-            product_id: id,
-          });
+          io.broadcastToUser(prod.owner_id, "product:updated", { product_id: id });
         }
       } catch {}
 
@@ -844,9 +889,7 @@ router.put(
   upload.array("images[]", 8),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
-    if (!id) {
-      return next();
-    }
+    if (!id) return next();
 
     const pool = getPool();
     const conn = await pool.getConnection();
@@ -874,7 +917,6 @@ router.put(
       await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
 
       let order = 0;
-      // URLs passées dans le body (Cloudinary direct)
       for (const url of bodyImages) {
         const u = String(url || "").trim();
         if (!u) continue;
@@ -883,14 +925,11 @@ router.put(
           [id, u, order++]
         );
       }
-      // Fichiers -> Cloudinary
+
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -919,9 +958,7 @@ router.delete(
   requireRole("VENDEUR", "ADMIN"),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
-    if (!id) {
-      return next();
-    }
+    if (!id) return next();
 
     const pool = getPool();
     const conn = await pool.getConnection();
@@ -952,26 +989,21 @@ router.delete(
       await conn.query(`DELETE FROM products WHERE id=?`, [id]);
       await conn.commit();
 
-      // Nettoyage local (inutile si Cloudinary, inoffensif sinon)
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
-        const abs = path
-          .join(
-            process.cwd(),
-            u.replace(/^\//, "").replace(/\//g, path.sep)
-          );
+        const abs = path.join(
+          process.cwd(),
+          u.replace(/^\//, "").replace(/\//g, path.sep)
+        );
         fs.promises.unlink(abs).catch(() => {});
       }
 
-      // Notif (optionnel)
       try {
         const { getIO } = require("../ws");
         const io = getIO && getIO();
         if (io && io.broadcastToUser && prod.owner_id != null) {
-          io.broadcastToUser(prod.owner_id, "product:deleted", {
-            product_id: id,
-          });
+          io.broadcastToUser(prod.owner_id, "product:deleted", { product_id: id });
         }
       } catch {}
 
@@ -989,7 +1021,6 @@ router.delete(
 
 /* =======================================================================
  *  Route de partage avec meta OG
- *  GET /share/product/:id   (monté via productsRouter.shareRouter côté server.js)
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1004,9 +1035,7 @@ function escapeHtml(str) {
 
 shareRouter.get("/product/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
-  if (!id) {
-    return res.status(404).send("Not found");
-  }
+  if (!id) return res.status(404).send("Not found");
 
   const pool = getPool();
   try {
@@ -1038,61 +1067,41 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     );
 
     const product = rows[0];
-    if (!product || !product.is_active) {
-      return res.status(404).send("Not found");
-    }
+    if (!product || !product.is_active) return res.status(404).send("Not found");
 
-    // Base Duumini web (front SPA)
     const baseWeb =
       env.FRONT_WEB_BASE_URL ||
       process.env.FRONT_WEB_BASE_URL ||
       "https://www.duumini.com";
 
-    // URL finale : page produit SPA
     const slugOrId = product.slug || product.id;
     const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
 
-    // Catégorie logique pour info (facultatif)
     const sub = String(product.sub_category || "").trim().toLowerCase();
     const channelPath = sub === "food" ? "/african-food" : "/african-market";
 
     const ogTitle = escapeHtml(
-      `${product.name} — Duumini${
-        product.shop_name ? ` (${product.shop_name})` : ""
-      }`
+      `${product.name} — Duumini${product.shop_name ? ` (${product.shop_name})` : ""}`
     );
 
     const descriptionRaw =
-      product.description ||
-      "Découvrez ce produit africain disponible sur Duumini.";
+      product.description || "Découvrez ce produit africain disponible sur Duumini.";
     const shortDesc =
-      descriptionRaw.length > 180
-        ? descriptionRaw.slice(0, 177) + "..."
-        : descriptionRaw;
+      descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
     const ogDescription = escapeHtml(shortDesc);
 
-    // Image principale = cover produit depuis la BDD (Cloudinary)
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
 
-    // Si jamais l'URL n'est pas absolue, on la colle sur baseWeb
     if (ogImage && !/^https?:\/\//i.test(ogImage)) {
-      if (ogImage.startsWith("/")) {
-        ogImage = `${baseWeb}${ogImage}`;
-      } else {
-        ogImage = `${baseWeb}/${ogImage}`;
-      }
+      if (ogImage.startsWith("/")) ogImage = `${baseWeb}${ogImage}`;
+      else ogImage = `${baseWeb}/${ogImage}`;
     }
 
-    // Dernier recours : image statique (très rare, mais évite un partage sans visuel)
-    if (!ogImage) {
-      ogImage = `${baseWeb}/images/share-default-product.jpg`;
-    }
+    if (!ogImage) ogImage = `${baseWeb}/images/share-default-product.jpg`;
 
-    // Prix / currency
     const priceAmount = Number(product.price || 0);
     const priceCurrency = product.currency || "MAD";
 
-    // JSON-LD Product (SEO + Rich Snippets sur la vraie page, ici juste pour cohérence)
     const jsonLd = {
       "@context": "https://schema.org",
       "@type": "Product",
@@ -1100,10 +1109,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       description: shortDesc,
       image: [ogImage],
       sku: String(product.id),
-      brand: {
-        "@type": "Brand",
-        name: "Duumini",
-      },
+      brand: { "@type": "Brand", name: "Duumini" },
       offers: {
         "@type": "Offer",
         priceCurrency: priceCurrency,
@@ -1124,7 +1130,6 @@ shareRouter.get("/product/:id", async (req, res, next) => {
 
     <link rel="canonical" href="${finalUrl}" />
 
-    <!-- Open Graph -->
     <meta property="og:type" content="product" />
     <meta property="og:site_name" content="Duumini" />
     <meta property="og:locale" content="fr_FR" />
@@ -1133,24 +1138,19 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <meta property="og:image" content="${ogImage}" />
     <meta property="og:url" content="${finalUrl}" />
     <meta property="product:price:amount" content="${priceAmount}" />
-    <meta property="product:price:currency" content="${escapeHtml(
-      priceCurrency
-    )}" />
+    <meta property="product:price:currency" content="${escapeHtml(priceCurrency)}" />
     <meta property="product:retailer_item_id" content="${product.id}" />
     <meta property="product:category" content="${escapeHtml(channelPath)}" />
 
-    <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="${ogTitle}" />
     <meta name="twitter:description" content="${ogDescription}" />
     <meta name="twitter:image" content="${ogImage}" />
 
-    <!-- Données structurées JSON-LD -->
     <script type="application/ld+json">
 ${JSON.stringify(jsonLd)}
     </script>
 
-    <!-- Redirection rapide vers la page produit Duumini -->
     <meta http-equiv="refresh" content="0;url=${finalUrl}" />
     <script>
       window.location.replace(${JSON.stringify(finalUrl)});
@@ -1167,6 +1167,5 @@ ${JSON.stringify(jsonLd)}
   }
 });
 
-/* Export principal API + sous-router de partage */
 module.exports = router;
 module.exports.shareRouter = shareRouter;
