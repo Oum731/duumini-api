@@ -7,7 +7,11 @@ const http = require("http");
 const path = require("path");
 
 // ✅ dotenv silencieux (supprime les logs "[dotenv] Injection...")
-require("dotenv").config({ quiet: true });
+// ✅ dotenv uniquement en local/dev
+if (process.env.NODE_ENV !== "production") {
+  require("dotenv").config({ quiet: true });
+}
+
 
 const { env } = require("./src/lib/env");
 const { notFound, errorHandler } = require("./src/utils/errors");
