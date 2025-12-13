@@ -8,11 +8,42 @@ function pick(...names) {
 
 function required(nameArr) {
   const val = Array.isArray(nameArr) ? pick(...nameArr) : process.env[nameArr];
-  if (!val)
+  if (!val) {
     throw new Error(
       `Missing env: ${Array.isArray(nameArr) ? nameArr.join("/") : nameArr}`
     );
+  }
   return val;
+}
+
+/**
+ * ✅ Rend une variable obligatoire seulement si condition=true.
+ * Exemple:
+ *  OPENAI_API_KEY: requireIf(isAiEnabled(), "OPENAI_API_KEY", "")
+ */
+function requireIf(condition, nameArr, fallback = "") {
+  if (!condition) {
+    // pas obligatoire → retourne fallback
+    const v = Array.isArray(nameArr) ? pick(...nameArr) : process.env[nameArr];
+    return v ?? fallback;
+  }
+  // obligatoire → required()
+  return required(nameArr);
+}
+
+function upper(v) {
+  return String(v || "").trim().toUpperCase();
+}
+
+function isAiOn(mode) {
+  const m = upper(mode);
+  return m !== "OFF";
+}
+
+function isMetaAutoAllowed(mode) {
+  // AUTO permet activation, SAFE force pause côté route
+  const m = upper(mode);
+  return m === "AUTO" || m === "SAFE";
 }
 
 const env = {
@@ -21,7 +52,7 @@ const env = {
   CORS_ORIGINS: pick("CORS_ORIGINS", "CORS_ORIGIN") || "*",
 
   /* =========================
-   * DB
+   * DB (toujours obligatoire)
    * =======================*/
   DB_HOST: required(["DB_HOST", "MYSQL_HOST"]),
   DB_PORT: Number(pick("DB_PORT", "MYSQL_PORT") || 3306),
@@ -31,7 +62,7 @@ const env = {
   MYSQL_SSL: String(pick("MYSQL_SSL") || "false").toLowerCase() === "true",
 
   /* =========================
-   * JWT
+   * JWT (toujours obligatoire)
    * =======================*/
   JWT_ACCESS_SECRET: required([
     "JWT_ACCESS_SECRET",
@@ -49,20 +80,20 @@ const env = {
   JWT_REFRESH_TTL: process.env.JWT_REFRESH_TTL || "30d",
 
   /* =========================
-   * CLOUDINARY
+   * CLOUDINARY (optionnel)
    * =======================*/
-  CLOUDINARY_CLOUD_NAME: pick("CLOUDINARY_CLOUD_NAME"),
-  CLOUDINARY_API_KEY: pick("CLOUDINARY_API_KEY"),
-  CLOUDINARY_API_SECRET: pick("CLOUDINARY_API_SECRET"),
+  CLOUDINARY_CLOUD_NAME: pick("CLOUDINARY_CLOUD_NAME") || "",
+  CLOUDINARY_API_KEY: pick("CLOUDINARY_API_KEY") || "",
+  CLOUDINARY_API_SECRET: pick("CLOUDINARY_API_SECRET") || "",
 
   /* =========================
-   * TWILIO
+   * TWILIO (optionnel)
    * =======================*/
-  TWILIO_ACCOUNT_SID: pick("TWILIO_ACCOUNT_SID"),
-  TWILIO_AUTH_TOKEN: pick("TWILIO_AUTH_TOKEN"),
-  TWILIO_API_KEY_SID: pick("TWILIO_API_KEY_SID"),
-  TWILIO_API_KEY_SECRET: pick("TWILIO_API_KEY_SECRET"),
-  TWILIO_VERIFY_SID: pick("TWILIO_VERIFY_SID"),
+  TWILIO_ACCOUNT_SID: pick("TWILIO_ACCOUNT_SID") || "",
+  TWILIO_AUTH_TOKEN: pick("TWILIO_AUTH_TOKEN") || "",
+  TWILIO_API_KEY_SID: pick("TWILIO_API_KEY_SID") || "",
+  TWILIO_API_KEY_SECRET: pick("TWILIO_API_KEY_SECRET") || "",
+  TWILIO_VERIFY_SID: pick("TWILIO_VERIFY_SID") || "",
 
   /* =========================
    * PUSHY
@@ -83,24 +114,24 @@ const env = {
   DUUMINI_AI_BRAND_NAME: pick("DUUMINI_AI_BRAND_NAME") || "Duumini",
 
   /* =========================
-   * META ADS
+   * META ADS (optionnel sauf si AI ON)
    * =======================*/
   META_APP_ID: pick("META_APP_ID") || "",
   META_BUSINESS_ID: pick("META_BUSINESS_ID") || "",
   META_PIXEL_ID: pick("META_PIXEL_ID") || "",
 
-  // compte pub + token (OBLIGATOIRE pour créer une pub)
-  META_AD_ACCOUNT_ID: pick("META_AD_ACCOUNT_ID") || "",
-  META_AD_ACCESS_TOKEN: pick("META_AD_ACCESS_TOKEN") || "",
+  // ✅ requis seulement si AI ads meta est utilisé (mode != OFF)
+  META_AD_ACCOUNT_ID: requireIf(isAiOn(pick("DUUMINI_AI_MODE") || "SAFE"), "META_AD_ACCOUNT_ID", ""),
+  META_AD_ACCESS_TOKEN: requireIf(isAiOn(pick("DUUMINI_AI_MODE") || "SAFE"), "META_AD_ACCESS_TOKEN", ""),
 
-  // Page + Adset par défaut (ce que tu veux utiliser)
+  // ✅ utiles pour éviter de retaper dans l’admin
   META_PAGE_ID: pick("META_PAGE_ID") || "",
   META_DEFAULT_ADSET_ID: pick("META_DEFAULT_ADSET_ID") || "",
 
   /* =========================
-   * OPENAI
+   * OPENAI (requis seulement si AI ON)
    * =======================*/
-  OPENAI_API_KEY: pick("OPENAI_API_KEY") || "",
+  OPENAI_API_KEY: requireIf(isAiOn(pick("DUUMINI_AI_MODE") || "SAFE"), "OPENAI_API_KEY", ""),
   OPENAI_BASE_URL: pick("OPENAI_BASE_URL") || "",
 
   // options (si non fournis, duuminiAgent a ses defaults)
@@ -109,4 +140,27 @@ const env = {
   OPENAI_MAX_TOKENS: pick("OPENAI_MAX_TOKENS") || "",
 };
 
-module.exports = { env };
+/* =========================
+ * ✅ Logs “OK / missing” (optionnel)
+ * =======================*/
+function mask(v) {
+  return v ? "OK" : "missing";
+}
+
+function logEnv() {
+  // à appeler dans server.js si tu veux
+  console.log("[ENV] NODE_ENV =", env.NODE_ENV);
+  console.log("[ENV] PORT =", env.PORT);
+  console.log("[ENV] CORS_ORIGINS =", env.CORS_ORIGINS);
+  console.log("[ENV] DUUMINI_AI_MODE =", env.DUUMINI_AI_MODE);
+
+  console.log("[ENV] OPENAI_API_KEY =", mask(env.OPENAI_API_KEY));
+  console.log("[ENV] OPENAI_MODEL =", env.OPENAI_MODEL || "default");
+
+  console.log("[ENV] META_AD_ACCOUNT_ID =", mask(env.META_AD_ACCOUNT_ID));
+  console.log("[ENV] META_AD_ACCESS_TOKEN =", mask(env.META_AD_ACCESS_TOKEN));
+  console.log("[ENV] META_PAGE_ID =", mask(env.META_PAGE_ID));
+  console.log("[ENV] META_DEFAULT_ADSET_ID =", mask(env.META_DEFAULT_ADSET_ID));
+}
+
+module.exports = { env, pick, required, requireIf, logEnv };

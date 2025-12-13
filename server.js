@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -6,12 +5,14 @@ const cookieParser = require("cookie-parser");
 const http = require("http");
 const path = require("path");
 
-// ✅ dotenv silencieux (supprime les logs "[dotenv] Injection...")
-// ✅ dotenv uniquement en local/dev
+/**
+ * ✅ dotenv uniquement en local/dev
+ * Render injecte déjà les variables d'env en production.
+ * (et ça évite les logs "[dotenv] Injection..." en prod)
+ */
 if (process.env.NODE_ENV !== "production") {
-  require("dotenv").config({ quiet: true });
+  require("dotenv").config(); // pas de "quiet" ici
 }
-
 
 const { env } = require("./src/lib/env");
 const { notFound, errorHandler } = require("./src/utils/errors");
@@ -44,7 +45,7 @@ let authRequired, isAdmin;
 try {
   ({ authRequired, isAdmin } = require("./src/middlewares/auth"));
 } catch {
-  // si jamais le chemin change, on ignore
+  // ignore
 }
 
 /* =========================
@@ -221,15 +222,13 @@ app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
 /* =========================
- * ✅ AI ADS ROUTES (IMPORTANT: AVANT notFound/errorHandler)
+ * ✅ AI ADS ROUTES
  * ========================= */
 app.use("/api/ads", googleAiAdsRoutes);
-if (metaAiAdsRoutes) {
-  app.use("/api/ads", metaAiAdsRoutes);
-}
+if (metaAiAdsRoutes) app.use("/api/ads", metaAiAdsRoutes);
 
 /* =========================
- * 404 + Error handler (TOUJOURS À LA FIN)
+ * 404 + Error handler
  * ========================= */
 app.use(notFound);
 app.use(errorHandler);
