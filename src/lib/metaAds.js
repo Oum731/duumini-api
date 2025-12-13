@@ -1,4 +1,3 @@
-// api/lib/metaAds.js
 let fetchFn = global.fetch;
 if (!fetchFn) {
   // fallback si runtime ancien
@@ -32,7 +31,9 @@ function normalizeCta(cta) {
 
 async function metaPost(endpoint, payload) {
   if (!AD_ACCOUNT_ID || !META_TOKEN) {
-    throw new Error("meta_config_missing: META_AD_ACCOUNT_ID / META_AD_ACCESS_TOKEN");
+    throw new Error(
+      "meta_config_missing: META_AD_ACCOUNT_ID / META_AD_ACCESS_TOKEN"
+    );
   }
 
   const res = await fetchFn(endpoint, {

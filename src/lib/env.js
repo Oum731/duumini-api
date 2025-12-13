@@ -5,6 +5,7 @@ function pick(...names) {
   }
   return undefined;
 }
+
 function required(nameArr) {
   const val = Array.isArray(nameArr) ? pick(...nameArr) : process.env[nameArr];
   if (!val)
@@ -58,6 +59,19 @@ const env = {
   LISTENERS_ENABLED:
     String(process.env.LISTENERS_ENABLED || "true").toLowerCase() === "true",
   POLL_INTERVAL_MS: Number(process.env.POLL_INTERVAL_MS || 10000),
+
+  /* =========================
+   * META ADS (ajout)
+   * =======================*/
+  META_AD_ACCOUNT_ID: pick("META_AD_ACCOUNT_ID") || "",
+  META_AD_ACCESS_TOKEN: pick("META_AD_ACCESS_TOKEN") || "",
+  META_PAGE_ID: pick("META_PAGE_ID") || "",
+
+  /* =========================
+   * OPENAI (ajout)
+   * =======================*/
+  OPENAI_API_KEY: pick("OPENAI_API_KEY") || "",
+  OPENAI_BASE_URL: pick("OPENAI_BASE_URL") || "",
 };
 
 module.exports = { env };

@@ -1,4 +1,3 @@
-// api/lib/openai.js
 const OpenAI = require("openai");
 const { env } = require("./env");
 
