@@ -17,7 +17,10 @@ function pickMaxTokens() {
 function extractJsonLoose(text) {
   const s = String(text || "").trim();
   // retire ```json ... ```
-  const noFence = s.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
+  const noFence = s
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
 
   // essaye parse direct
   try {
@@ -198,6 +201,108 @@ Délivre un JSON structuré:
 }
 Respecte bien les limitations (30 caractères titres, 90 descriptions).
 Répond STRICTEMENT en JSON valide, rien d'autre.
+`.trim();
+      break;
+    }
+    case "campaign_meta": {
+      const {
+        objective = "SALES",
+        offer = "Produits africains authentiques • Paiement à la livraison",
+        url = siteUrl,
+        audience = "Diaspora africaine au Maroc (Casablanca/Marrakech), 18-45",
+        daily_budget_mad = 80,
+        days = 7,
+        city_focus = "Casablanca",
+      } = payload;
+
+      userPrompt = `
+Tâche: Créer une CAMPAGNE Meta complète pour ${brand}.
+Objectif: ${objective}
+Offre: ${offer}
+URL: ${url}
+Audience: ${audience}
+Budget/jour (MAD): ${daily_budget_mad}
+Durée (jours): ${days}
+Ville focus: ${city_focus}
+
+Réponds STRICTEMENT en JSON valide:
+{
+  "meta": {
+    "campaign": {
+      "name": "...",
+      "objective": "OUTCOME_SALES",
+      "status_default": "PAUSED"
+    },
+    "adset": {
+      "name": "...",
+      "daily_budget_mad": ${Number(daily_budget_mad) || 80},
+      "days": ${Number(days) || 7},
+      "targeting_hint": {
+        "country": "MA",
+        "cities": ["Casablanca", "Marrakech"],
+        "age_min": 18,
+        "age_max": 45
+      }
+    },
+    "creative": {
+      "primary_text": "...",
+      "headline": "...",
+      "description": "...",
+      "call_to_action": "SHOP_NOW"
+    }
+  }
+}
+Notes:
+- N'invente pas de promo.
+- Texte court, orienté commande.
+- Respecte le ton Duumini.
+`.trim();
+      break;
+    }
+
+    case "campaign_google": {
+      const {
+        objective = "Conversions",
+        offer = "Livraison à domicile + Paiement à la livraison",
+        url = siteUrl,
+        audience = "Diaspora Afrique subsaharienne au Maroc, 18-45",
+        variants = 2,
+        city_focus = "Casablanca",
+      } = payload;
+
+      userPrompt = `
+Tâche: Créer une CAMPAGNE Google Ads Search pour ${brand}.
+Objectif: ${objective}
+Offre: ${offer}
+Landing: ${url}
+Audience: ${audience}
+Ville focus: ${city_focus}
+Variants: ${variants}
+
+Réponds STRICTEMENT en JSON valide:
+{
+  "google": {
+    "campaign_name": "...",
+    "adgroup_name": "...",
+    "final_url": "${url}",
+    "keywords": [
+      { "text": "epicerie africaine", "match": "PHRASE" },
+      { "text": "produits africains casablanca", "match": "PHRASE" }
+    ],
+    "ads": [
+      {
+        "headlines": ["(<=30)", "(<=30)", "(<=30)"],
+        "descriptions": ["(<=90)", "(<=90)"],
+        "path1": "epicerie",
+        "path2": "afrique"
+      }
+    ]
+  }
+}
+Contraintes:
+- Headlines max 30 caractères
+- Descriptions max 90 caractères
+- Pas de fausses promos
 `.trim();
       break;
     }

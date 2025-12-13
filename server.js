@@ -32,6 +32,8 @@ const events = require("./src/routes/events");
 const productRatingsRouter = require("./src/routes/productRatings");
 
 // ✅ AI Ads routes
+const metaCampaignRoutes = require("./src/routes/meta_campaign");
+const googleCampaignRoutes = require("./src/routes/google_campaign");
 const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
 let metaAiAdsRoutes = null;
 try {
@@ -226,7 +228,8 @@ app.use("/api/products", productRatingsRouter);
  * ========================= */
 app.use("/api/ads", googleAiAdsRoutes);
 if (metaAiAdsRoutes) app.use("/api/ads", metaAiAdsRoutes);
-
+app.use("/api/ads", metaCampaignRoutes);
+app.use("/api/ads", googleCampaignRoutes);
 /* =========================
  * 404 + Error handler
  * ========================= */
