@@ -21,8 +21,17 @@ const orders = require("./src/routes/orders");
 const uploads = require("./src/routes/uploads");
 const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
-const events = require("./src/routes/events"); // ✅ SSE événements temps réel
+const events = require("./src/routes/events");
 const productRatingsRouter = require("./src/routes/productRatings");
+
+// ✅ AI Ads routes
+const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
+let metaAiAdsRoutes = null;
+try {
+  metaAiAdsRoutes = require("./src/routes/meta_ai_ads");
+} catch {
+  // optionnel si pas encore créé
+}
 
 const app = express();
 app.set("trust proxy", 1);
@@ -41,8 +50,8 @@ const corsOrigins =
 app.use(
   cors({
     origin(origin, cb) {
-      if (corsOrigins === true) return cb(null, true); // autorise tout
-      if (!origin) return cb(null, true); // Postman/SSR
+      if (corsOrigins === true) return cb(null, true);
+      if (!origin) return cb(null, true);
       if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) {
         return cb(null, true);
       }
@@ -57,7 +66,6 @@ app.use(
       "Origin",
       "X-Requested-With",
       "x-access-token",
-      // ✅ ajoute les headers que le navigateur envoie automatiquement
       "Cache-Control",
       "Pragma",
     ],
@@ -130,8 +138,8 @@ app.head("/", (_req, res) => res.status(200).end());
  * API routes
  * ========================= */
 app.use("/api/auth", auth);
-app.use("/api/auth", otpRoutes);       // /api/auth/*
-app.use("/api/user", users);           // /api/user/me
+app.use("/api/auth", otpRoutes);
+app.use("/api/user", users);
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
@@ -140,16 +148,24 @@ app.use("/api/orders", orders);
 
 // ✅ Route de partage avec meta OG
 if (products.shareRouter) {
-  app.use("/share", products.shareRouter); // /share/product/:id
+  app.use("/share", products.shareRouter);
 }
 
 app.use("/api/uploads", uploads);
 app.use("/api/devices", devices);
-app.use("/api/events", events);        // ✅ flux SSE: /api/events/stream
+app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
 /* =========================
- * 404 + Error handler
+ * ✅ AI ADS ROUTES (IMPORTANT: AVANT notFound/errorHandler)
+ * ========================= */
+app.use("/api/ads", googleAiAdsRoutes);
+if (metaAiAdsRoutes) {
+  app.use("/api/ads", metaAiAdsRoutes);
+}
+
+/* =========================
+ * 404 + Error handler (TOUJOURS À LA FIN)
  * ========================= */
 app.use(notFound);
 app.use(errorHandler);
