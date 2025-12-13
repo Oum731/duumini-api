@@ -11,7 +11,7 @@ function pickTemp() {
 }
 function pickMaxTokens() {
   const n = Number(env.OPENAI_MAX_TOKENS);
-  return Number.isFinite(n) ? n : 1500;
+  return Number.isFinite(n) ? n : 800; // au lieu de 1500
 }
 
 function extractJsonLoose(text) {
