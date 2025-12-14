@@ -109,7 +109,8 @@ function normalizeVilleFilter(value) {
 function expandCasaMarr(ville) {
   const v = normalizeVilleFilter(ville);
   if (!v) return null;
-  if (v === "Casablanca" || v === "Marrakech") return ["Casablanca", "Marrakech"];
+  if (v === "Casablanca" || v === "Marrakech")
+    return ["Casablanca", "Marrakech"];
   return [v];
 }
 
@@ -176,6 +177,63 @@ function parseCitiesBody(body) {
   return out;
 }
 
+/* ============================
+ *  Promotions (type/valeur)
+ * ============================ */
+
+function normalizePromoType(value) {
+  const t = String(value || "").trim().toUpperCase();
+  if (t === "AMOUNT") return "AMOUNT";
+  if (t === "PERCENT") return "PERCENT";
+  return "PERCENT";
+}
+
+function parsePromoFields(body) {
+  const eligible = parseBoolFlag(body?.promo_eligible, null); // null => pas envoyé
+
+  // Valeurs par défaut si non envoyées
+  const freeDelivery =
+    body?.promo_free_delivery === undefined
+      ? null
+      : parseBoolFlag(body?.promo_free_delivery, 0);
+
+  // Si promo_eligible non envoyé -> on ne touche pas promo_discount_*
+  if (eligible === null) {
+    return {
+      promo_eligible: null,
+      promo_discount_type: null,
+      promo_discount_value: null,
+      promo_free_delivery: freeDelivery,
+      promo_mode: "UNTOUCHED",
+    };
+  }
+
+  // Promo OFF => purge
+  if (eligible === 0) {
+    return {
+      promo_eligible: 0,
+      promo_discount_type: null,
+      promo_discount_value: null,
+      promo_free_delivery: freeDelivery,
+      promo_mode: "OFF",
+    };
+  }
+
+  // Promo ON => on valide
+  const type = normalizePromoType(body?.promo_discount_type);
+  const v = Number(body?.promo_discount_value);
+  const value = Number.isFinite(v) && v > 0 ? v : null;
+
+  // Si promo ON mais pas de valeur -> on garde promo ON mais sans discount (ou tu peux refuser)
+  return {
+    promo_eligible: 1,
+    promo_discount_type: value ? type : null,
+    promo_discount_value: value,
+    promo_free_delivery: freeDelivery,
+    promo_mode: "ON",
+  };
+}
+
 // Taux de commission Duumini en fonction de la sous-catégorie
 function computeDuuminiRateFromSubCategory(subCategory) {
   const sub = String(subCategory || "").trim().toLowerCase();
@@ -210,8 +268,9 @@ function stripDuuminiRateFromProduct(row) {
  * - channel: null | 'african-food' | 'african-market'
  * - onlyActive: bool
  * - ville: 'Casablanca' | 'Marrakech' | null
+ * - onlyPromos: bool
  */
-async function listProducts(pool, { limit, offset, channel, onlyActive, ville }) {
+async function listProducts(pool, { limit, offset, channel, onlyActive, ville, onlyPromos }) {
   const normSub = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
   const whereParts = [];
   const params = [];
@@ -221,6 +280,13 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville })
   else whereParts.push("1=1");
 
   if (onlyActive) whereParts.push("p.is_active = 1");
+
+  // ✅ promos réelles
+  if (onlyPromos) {
+    whereParts.push(
+      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
+    );
+  }
 
   // ✅ Filtre ville (Casa ↔ Marrakech : on prend les deux)
   const villes = ville ? expandCasaMarr(ville) : null;
@@ -271,6 +337,7 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville })
 /* ----------------------------- Listing ----------------------------- */
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
   const onlyActive =
     onlyActiveRaw === "1" ||
@@ -290,6 +357,7 @@ async function listHandler(req, res, next) {
       channel: null,
       onlyActive,
       ville,
+      onlyPromos: false,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -299,6 +367,7 @@ async function listHandler(req, res, next) {
 
 async function listFoodHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
   const onlyActive =
     onlyActiveRaw === "1" ||
@@ -318,6 +387,7 @@ async function listFoodHandler(req, res, next) {
       channel: "african-food",
       onlyActive,
       ville,
+      onlyPromos: false,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -327,6 +397,7 @@ async function listFoodHandler(req, res, next) {
 
 async function listMarketHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
+
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
   const onlyActive =
     onlyActiveRaw === "1" ||
@@ -346,6 +417,7 @@ async function listMarketHandler(req, res, next) {
       channel: "african-market",
       onlyActive,
       ville,
+      onlyPromos: false,
     });
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -356,6 +428,46 @@ async function listMarketHandler(req, res, next) {
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
+
+/* ----------------------------- Promotions list (pour carrousel + page promos) ----------------------------- */
+router.get("/promotions", async (req, res, next) => {
+  const pool = getPool();
+  const limit = toPositiveInt(req.query.limit, 12);
+
+  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
+  const onlyActive =
+    onlyActiveRaw === "1" ||
+    onlyActiveRaw === "true" ||
+    onlyActiveRaw === "yes" ||
+    onlyActiveRaw === "on";
+
+  const ville =
+    normalizeVilleFilter(req.query.ville) ||
+    normalizeVilleFilter(req.query.city);
+
+  const channel = String(req.query.channel || "all").toLowerCase();
+  const channelNorm =
+    channel === "african-food"
+      ? "african-food"
+      : channel === "african-market"
+      ? "african-market"
+      : null;
+
+  try {
+    const { rows } = await listProducts(pool, {
+      limit,
+      offset: 0,
+      channel: channelNorm,
+      onlyActive,
+      ville,
+      onlyPromos: true,
+    });
+
+    res.json(rows.slice(0, limit));
+  } catch (e) {
+    next(e);
+  }
+});
 
 /* ----------------------------- Top produits : plus commandés ----------------------------- */
 router.get("/top-ordered", async (req, res, next) => {
@@ -517,7 +629,6 @@ router.get("/:id", async (req, res, next) => {
               const parsed = JSON.parse(raw);
               if (Array.isArray(parsed)) cities = parsed;
             } catch {
-              // fallback csv
               const s = String(raw || "");
               if (s.includes(",")) cities = s.split(",").map((x) => x.trim());
               else cities = [s].filter(Boolean);
@@ -552,6 +663,9 @@ router.post(
       stock,
       is_featured,
       promo_eligible,
+      promo_discount_type,
+      promo_discount_value,
+      promo_free_delivery,
       sub_category,
       is_active,
       shop_id,
@@ -613,18 +727,41 @@ router.post(
           .toString(36)
           .slice(2, 7)}`.toLowerCase();
 
+      // ✅ promo (corrige le bug "promo partout")
+      const promoEligible = parseBoolFlag(promo_eligible, 0);
+      let promoType = null;
+      let promoValue = null;
+      let promoFree = parseBoolFlag(promo_free_delivery, 0);
+
+      if (promoEligible === 1) {
+        promoType = normalizePromoType(promo_discount_type);
+        const v = Number(promo_discount_value);
+        promoValue = Number.isFinite(v) && v > 0 ? v : null;
+        if (!promoValue) {
+          promoType = null;
+          promoValue = null;
+        }
+      } else {
+        promoType = null;
+        promoValue = null;
+      }
+
       // ✅ villes envoyées par l'admin (libre) -> stockées seulement si colonne existe
       const citiesCol = await detectCitiesColumn(conn);
       const incomingCities = parseCitiesBody(req.body); // null si pas envoyé
       const cities =
-        incomingCities == null ? null : incomingCities.map(normalizeVilleFilter).filter(Boolean);
+        incomingCities == null
+          ? null
+          : incomingCities.map(normalizeVilleFilter).filter(Boolean);
       const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       await conn.beginTransaction();
 
-      // INSERT dynamique (sans migration)
+      // INSERT dynamique (avec promo fields)
       let insertSql = `INSERT INTO products
-           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured, promo_eligible, sub_category, duumini_rate, is_active`;
+           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured,
+            promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
+            sub_category, duumini_rate, is_active`;
       const insertVals = [
         finalShopId,
         category_id ? Number(category_id) : null,
@@ -635,7 +772,12 @@ router.post(
         description || null,
         stock != null ? Number(stock) : 0,
         is_featured ? 1 : 0,
-        promo_eligible ? 1 : 0,
+
+        promoEligible,
+        promoType,
+        promoValue,
+        promoFree,
+
         sub,
         duuminiRate,
         active,
@@ -656,7 +798,10 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -694,7 +839,10 @@ router.post(
           }
         }
       } catch (e) {
-        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
+        console.error(
+          "[products] Failed to enqueue PRODUCT_CREATED notifications",
+          e
+        );
       }
 
       try {
@@ -738,6 +886,9 @@ router.put(
       stock,
       is_featured,
       promo_eligible,
+      promo_discount_type,
+      promo_discount_value,
+      promo_free_delivery,
       sub_category,
       category_id,
       replace_images,
@@ -787,26 +938,47 @@ router.put(
           );
           if (!shop) {
             conn.release();
-            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+            return res
+              .status(400)
+              .json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
         }
       }
 
+      // ✅ promo update (si promo_eligible est envoyé, on gère le reset)
+      const promo = parsePromoFields({
+        promo_eligible,
+        promo_discount_type,
+        promo_discount_value,
+        promo_free_delivery,
+      });
+
       await conn.query(
         `UPDATE products SET
-           name           = COALESCE(?, name),
-           price          = COALESCE(?, price),
-           currency       = COALESCE(?, currency),
-           description    = COALESCE(?, description),
-           stock          = COALESCE(?, stock),
-           is_featured    = COALESCE(?, is_featured),
-           promo_eligible = COALESCE(?, promo_eligible),
-           sub_category   = ?,
-           duumini_rate   = ?,
-           is_active      = COALESCE(?, is_active),
-           category_id    = COALESCE(?, category_id),
-           shop_id        = COALESCE(?, shop_id)
+           name                = COALESCE(?, name),
+           price               = COALESCE(?, price),
+           currency            = COALESCE(?, currency),
+           description         = COALESCE(?, description),
+           stock               = COALESCE(?, stock),
+           is_featured         = COALESCE(?, is_featured),
+           promo_eligible      = COALESCE(?, promo_eligible),
+           promo_discount_type = CASE
+                                  WHEN ? IS NULL THEN promo_discount_type
+                                  WHEN ? = 1 THEN ?
+                                  ELSE NULL
+                                END,
+           promo_discount_value = CASE
+                                  WHEN ? IS NULL THEN promo_discount_value
+                                  WHEN ? = 1 THEN ?
+                                  ELSE NULL
+                                END,
+           promo_free_delivery = COALESCE(?, promo_free_delivery),
+           sub_category        = ?,
+           duumini_rate        = ?,
+           is_active           = COALESCE(?, is_active),
+           category_id         = COALESCE(?, category_id),
+           shop_id             = COALESCE(?, shop_id)
          WHERE id=?`,
         [
           name ?? null,
@@ -815,7 +987,16 @@ router.put(
           description ?? null,
           stock != null ? Number(stock) : null,
           is_featured === undefined ? null : is_featured ? 1 : 0,
-          promo_eligible === undefined ? null : promo_eligible ? 1 : 0,
+
+          promo.promo_eligible,          // COALESCE -> si null, inchangé
+          promo.promo_eligible,          // CASE #1 (null ?)
+          promo.promo_eligible,          // CASE #1 (=1 ?)
+          promo.promo_discount_type,     // set type si ON
+          promo.promo_eligible,          // CASE #2 (null ?)
+          promo.promo_eligible,          // CASE #2 (=1 ?)
+          promo.promo_discount_value,    // set value si ON
+          promo.promo_free_delivery,     // COALESCE -> si null, inchangé
+
           effectiveSub,
           duuminiRate,
           active,
@@ -832,10 +1013,10 @@ router.put(
         const cities = (incomingCities || [])
           .map(normalizeVilleFilter)
           .filter(Boolean);
-        await conn.query(
-          `UPDATE products SET ${citiesCol}=? WHERE id=?`,
-          [JSON.stringify(cities), id]
-        );
+        await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
+          JSON.stringify(cities),
+          id,
+        ]);
       }
 
       const files = Array.isArray(req.files) ? req.files : [];
@@ -854,7 +1035,10 @@ router.put(
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+          const up = await uploadBufferToCloudinary(
+            f.buffer,
+            f.originalname || undefined
+          );
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -929,7 +1113,10 @@ router.put(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
