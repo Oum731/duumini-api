@@ -1,7 +1,12 @@
 // src/routes/orders.js
 const { Router } = require('express');
 const { getPool } = require('../lib/db');
-const { authRequired, requireRole, isAdmin, isVendor } = require('../middlewares/auth');
+const {
+  authRequired,
+  requireRole,
+  isAdmin,
+  isVendor,
+} = require('../middlewares/auth');
 const { getPagination, buildPageInfo } = require('../utils/pagination');
 const { sendWhatsAppOrderConfirmation } = require('../services/twilio');
 const { env } = require('../lib/env');
@@ -13,8 +18,7 @@ const router = Router();
  * =======================*/
 
 // 👉 Seul ce numéro reçoit la commande par WhatsApp
-const BACKOFFICE_WHATSAPP =
-  env.DUUMINI_BACKOFFICE_WHATSAPP || '+212623677884';
+const BACKOFFICE_WHATSAPP = env.DUUMINI_BACKOFFICE_WHATSAPP || '+212623677884';
 
 /* =========================
  * Helpers
@@ -24,7 +28,11 @@ const BACKOFFICE_WHATSAPP =
 function safeParseJSON(maybe) {
   if (!maybe) return null;
   if (typeof maybe === 'object') return maybe;
-  try { return JSON.parse(maybe); } catch { return null; }
+  try {
+    return JSON.parse(maybe);
+  } catch {
+    return null;
+  }
 }
 
 /** Normalise l'objet adresse reçu du front en un objet stockable (JSON).
@@ -35,9 +43,10 @@ function buildAddressObj(input = {}) {
   const ville = input?.ville ?? null;
   const commune = input?.commune ?? null;
   const quartier = input?.quartier ?? null;
-  const gps = input?.gps && typeof input.gps === 'object'
-    ? { lat: Number(input.gps.lat), lng: Number(input.gps.lng) }
-    : null;
+  const gps =
+    input?.gps && typeof input.gps === 'object'
+      ? { lat: Number(input.gps.lat), lng: Number(input.gps.lng) }
+      : null;
 
   return {
     city: ville,
@@ -49,7 +58,8 @@ function buildAddressObj(input = {}) {
 
 /** Construit un lien Google Maps à partir d'un gps {lat,lng} */
 function buildGeoLink(gps) {
-  if (!gps || typeof gps.lat !== 'number' || typeof gps.lng !== 'number') return null;
+  if (!gps || typeof gps.lat !== 'number' || typeof gps.lng !== 'number')
+    return null;
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
 }
 
@@ -120,16 +130,22 @@ function buildDisplayCode(id) {
  * ⚠️ NOUVELLE LOGIQUE:
  *    - Ici on passe le PRIX CLIENT (products.price en BDD).
  *    - La commission Duumini est prélevée sur ce prix client.
- *
- * Exemple:
- *    clientUnit = 50, rate=0.18 → commission = 50 * 0.18 = 9
- *    net vendeur = 50 - 9 = 41
  */
 function computeCommissionForLine(clientUnitPrice, qty, subCategory) {
   const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
   const sub = String(subCategory || '').trim().toLowerCase();
   const rate = sub === 'food' ? 0.18 : 0.11;
-  return +(totalClientLine * rate).toFixed(2);
+  return +(+totalClientLine * rate).toFixed(2);
+}
+
+/** Produit promo (market) ? → livraison gratuite partout si au moins 1 promo */
+function isPromoProductRow(p) {
+  const isFood = String(p?.sub_category || '').trim().toLowerCase() === 'food';
+  return (
+    !isFood &&
+    Number(p?.promo_eligible ?? 0) === 1 &&
+    Number(p?.promo_discount_value ?? 0) > 0
+  );
 }
 
 /** On enlève commission_duumini pour les clients (non admin / non vendeur) */
@@ -146,8 +162,6 @@ function stripCommissionFromOrderRow(row, user) {
  * - ADMIN: accès total
  * - VENDEUR: doit être propriétaire d'au moins un shop lié à la commande
  * - CLIENT: doit être l'acheteur (orders.user_id)
- * Retour:
- *   { status: 200, order, items }  ou  { status, error }
  */
 async function getOrderWithPerm(conn, id, user) {
   const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
@@ -203,9 +217,7 @@ async function getOrderWithPerm(conn, id, user) {
 
 /* ========= Helpers notifications commande ========= */
 
-/**
- * Récupère la liste des user_id admins actifs
- */
+/** Récupère la liste des user_id admins actifs */
 async function getAdminUserIds() {
   const [rows] = await getPool().query(
     `SELECT id 
@@ -216,10 +228,7 @@ async function getAdminUserIds() {
   return rows.map((r) => r.id);
 }
 
-/**
- * Récupère la liste des vendeurs concernés par une commande donnée.
- * On remonte depuis order_items -> products -> shops (owner_id).
- */
+/** Récupère la liste des vendeurs concernés par une commande */
 async function getVendorsForOrder(orderId) {
   const [rows] = await getPool().query(
     `
@@ -236,10 +245,7 @@ async function getVendorsForOrder(orderId) {
   return rows.map((r) => r.user_id);
 }
 
-/**
- * Enfile des notifications ORDER_CREATED pour vendeurs + admins
- * dans notification_queue.
- */
+/** Enfile des notifications ORDER_CREATED pour vendeurs + admins */
 async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   const [adminIds, vendorIds] = await Promise.all([
     getAdminUserIds(),
@@ -264,12 +270,7 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
 
   const payload = JSON.stringify(payloadObj);
 
-  const values = allUserIds.map((uid) => [
-    uid,
-    'ORDER_CREATED',
-    payload,
-    'queued',
-  ]);
+  const values = allUserIds.map((uid) => [uid, 'ORDER_CREATED', payload, 'queued']);
 
   await getPool().query(
     `
@@ -280,9 +281,7 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   );
 }
 
-/**
- * Enfile une notification ORDER_STATUS pour le client (si user_id non NULL)
- */
+/** Enfile une notification ORDER_STATUS pour le client (si user_id non NULL) */
 async function enqueueOrderStatusForClient(orderId, status) {
   const [[row]] = await getPool().query(
     `SELECT user_id, total, currency
@@ -292,7 +291,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
     [orderId]
   );
 
-  if (!row || !row.user_id) return; // commande invité sans compte → pas de notif user_id
+  if (!row || !row.user_id) return;
 
   const cur = (row.currency || 'MAD').toUpperCase();
   const total = Number(row.total || 0);
@@ -324,11 +323,8 @@ router.get('/', authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
 
-  // 🔍 options de filtrage
   const mine = req.query.mine === '1' || req.query.mine === 'true';
-  const rawStatus = req.query.status
-    ? String(req.query.status).toUpperCase()
-    : null;
+  const rawStatus = req.query.status ? String(req.query.status).toUpperCase() : null;
   const hasStatus = rawStatus && rawStatus !== 'ALL';
 
   try {
@@ -385,9 +381,7 @@ router.get('/', authRequired, async (req, res) => {
         const contactFromOrder = safeParseJSON(r.contact);
         const contact =
           contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
+          (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
             ? contactFromOrder
             : buildContactFromUser({
                 first_name: r.u_first,
@@ -409,7 +403,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,  // 🔥 sous-total client hors livraison
+            items_amount: itemsAmount,
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -424,7 +418,7 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     /* =========================
-     * CAS 2 : ADMIN (backoffice)
+     * CAS 2 : ADMIN
      * =======================*/
     if (isAdmin(req.user)) {
       let where = '1=1';
@@ -448,7 +442,6 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
-            -- 💰 CA hors livraison = sous-total produits (PRIX CLIENT)
             SELECT SUM(oi2.qty * oi2.unit_price)
             FROM order_items oi2
             WHERE oi2.order_id = o.id
@@ -470,7 +463,6 @@ router.get('/', authRequired, async (req, res) => {
         [...params, limit, offset]
       );
 
-      // Admin peut voir la commission → pas de strip
       const rows = rowsRaw;
 
       const items = rows.map((r) => {
@@ -478,9 +470,7 @@ router.get('/', authRequired, async (req, res) => {
         const contactFromOrder = safeParseJSON(r.contact);
         const contact =
           contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
+          (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
             ? contactFromOrder
             : buildContactFromUser({
                 first_name: r.u_first,
@@ -502,7 +492,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,  // CA client hors livraison
+            items_amount: itemsAmount,
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -517,7 +507,7 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     /* =========================
-     * CAS 3 : VENDEUR (backoffice vendeur)
+     * CAS 3 : VENDEUR
      * =======================*/
     if (isVendor(req.user)) {
       let where = 's.owner_id = ?';
@@ -528,7 +518,6 @@ router.get('/', authRequired, async (req, res) => {
         params.push(rawStatus);
       }
 
-      // Nombre de commandes qui contiennent au moins 1 produit de ce vendeur
       const [[{ total }]] = await pool.query(
         `
         SELECT COUNT(DISTINCT o.id) AS total
@@ -549,13 +538,11 @@ router.get('/', authRequired, async (req, res) => {
           u.last_name  AS u_last,
           u.phone      AS u_phone,
           (
-            -- CA hors livraison (côté client, toute la commande)
             SELECT SUM(oi_all.qty * oi_all.unit_price)
             FROM order_items oi_all
             WHERE oi_all.order_id = o.id
           ) AS items_amount,
           (
-            -- image d'un produit de CE vendeur (pour la carte)
             SELECT pi.url
             FROM order_items oi2
             JOIN products p2       ON p2.id = oi2.product_id
@@ -579,7 +566,6 @@ router.get('/', authRequired, async (req, res) => {
         [...params, limit, offset]
       );
 
-      // Vendeur peut voir la commission → pas de strip
       const rows = rowsRaw;
 
       const items = rows.map((r) => {
@@ -587,9 +573,7 @@ router.get('/', authRequired, async (req, res) => {
         const contactFromOrder = safeParseJSON(r.contact);
         const contact =
           contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
+          (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
             ? contactFromOrder
             : buildContactFromUser({
                 first_name: r.u_first,
@@ -611,7 +595,7 @@ router.get('/', authRequired, async (req, res) => {
           contact,
           geo_link,
           totals: {
-            items_amount: itemsAmount,  // CA client hors livraison
+            items_amount: itemsAmount,
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
@@ -626,7 +610,7 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     /* =========================
-     * CAS 4 : CLIENT simple (non admin / non vendeur)
+     * CAS 4 : CLIENT simple
      * =======================*/
     const params = [req.user.id];
     let where = 'o.user_id = ?';
@@ -677,9 +661,7 @@ router.get('/', authRequired, async (req, res) => {
       const contactFromOrder = safeParseJSON(r.contact);
       const contact =
         contactFromOrder &&
-        (contactFromOrder.first_name ||
-          contactFromOrder.last_name ||
-          contactFromOrder.phone)
+        (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
           ? contactFromOrder
           : buildContactFromUser({
               first_name: r.u_first,
@@ -701,7 +683,7 @@ router.get('/', authRequired, async (req, res) => {
         contact,
         geo_link,
         totals: {
-          items_amount: itemsAmount,   // CA client hors livraison
+          items_amount: itemsAmount,
           delivery_fee: deliveryFee,
           amount: totalAmount,
           currency,
@@ -718,18 +700,12 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
-
 /* =========================
  * Create order (UTILISATEUR CONNECTÉ)
  * =======================*/
 router.post('/', authRequired, async (req, res) => {
-  const {
-    contact = null,
-    address = {},
-    delivery = {},
-    items = [],
-    totals = {},
-  } = req.body || {};
+  const { contact = null, address = {}, delivery = {}, items = [], totals = {} } =
+    req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'items[] required' });
@@ -741,23 +717,29 @@ router.post('/', authRequired, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // 1) Normaliser adresse et geo_link
+    // 1) Adresse + geo link
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
     // 2) Contact snapshot: payload > user
     let contactObj = contact ? buildContactFromPayload(contact) : null;
-    if (!contactObj || (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)) {
+    if (
+      !contactObj ||
+      (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)
+    ) {
       contactObj = buildContactFromUser(req.user);
     }
 
-    // 3) Recalcule total articles côté serveur (ignore price du front)
+    // 3) Recalcule totals côté serveur
     let itemsAmount = 0;
     let totalCommission = 0;
     const cleanItems = [];
 
-    // ✅ Contrainte : pour les produits "food", un seul restaurant (shop_id)
+    // ✅ Contrainte : pour les produits "food", un seul restaurant
     let firstFoodShopId = null;
+
+    // ✅ Promo : si au moins 1 produit promo (non-food) → livraison gratuite partout
+    let hasPromo = false;
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
@@ -772,11 +754,14 @@ router.post('/', authRequired, async (req, res) => {
         throw err;
       }
 
-      // 🔒 On verrouille la ligne produit + on récupère le stock + shop_id
+      // 🔒 lock produit + stock + shop + promo flags
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock, shop_id FROM products WHERE id=? FOR UPDATE`,
+        `SELECT id, price, sub_category, stock, shop_id, promo_eligible, promo_discount_value
+         FROM products
+         WHERE id=? FOR UPDATE`,
         [product_id]
       );
+
       if (!p) {
         const err = new Error('Product not found: ' + product_id);
         err.statusCode = 400;
@@ -789,6 +774,7 @@ router.post('/', authRequired, async (req, res) => {
       }
 
       const isFood = String(p.sub_category || '').trim().toLowerCase() === 'food';
+
       if (isFood) {
         const shopId = p.shop_id != null ? Number(p.shop_id) : null;
         if (shopId != null) {
@@ -807,23 +793,27 @@ router.post('/', authRequired, async (req, res) => {
         }
       }
 
-      // ❗ NOUVELLE LOGIQUE :
-      // p.price = PRIX CLIENT final (déjà incluant la marge Duumini).
-      const unit_price = Number(p.price); // prix client
+      if (isPromoProductRow(p)) {
+        hasPromo = true;
+      }
+
+      // p.price = prix client final (snapshot dans order_items)
+      const unit_price = Number(p.price);
       const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
       cleanItems.push({
         product_id: p.id,
         qty,
-        unit_price,          // ✅ ce que paie le client
+        unit_price,
         current_stock: p.stock,
       });
 
-      itemsAmount += unit_price * qty;   // ✅ total client (hors livraison)
-      totalCommission += lineCommission; // ✅ somme des commissions (sur prix client)
+      itemsAmount += unit_price * qty;
+      totalCommission += lineCommission;
     }
 
-    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
+    // ✅ Livraison : si promo → 0 (gratuite partout)
+    const deliveryFee = hasPromo ? 0 : Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
@@ -843,10 +833,11 @@ router.post('/', authRequired, async (req, res) => {
         currency,
       ]
     );
+
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // 5) INSERT order_items (snapshots des prix client)
+    // 5) INSERT order_items
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -855,12 +846,9 @@ router.post('/', authRequired, async (req, res) => {
       );
     }
 
-    // 6) Décrémenter le stock pour chaque produit
+    // 6) Stock decrement
     for (const it of cleanItems) {
-      // Stock NULL ou undefined → stock illimité → on ne touche pas
-      if (it.current_stock === null || it.current_stock === undefined) {
-        continue;
-      }
+      if (it.current_stock === null || it.current_stock === undefined) continue;
 
       const currentStock = Number(it.current_stock || 0);
       const newStock = currentStock - Number(it.qty || 0);
@@ -879,22 +867,19 @@ router.post('/', authRequired, async (req, res) => {
         throw err;
       }
 
-      await conn.query(
-        `UPDATE products SET stock=? WHERE id=?`,
-        [newStock, it.product_id]
-      );
+      await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
     }
 
     await conn.commit();
 
-    // 🔔 7) Enfiler des notifications pour vendeurs + admins
+    // 🔔 Notifications vendeurs + admins
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch (eNot) {
       console.error('[Notify] enqueueOrderCreatedNotifications failed', eNot);
     }
 
-    // 8) Notification temps réel pour le client
+    // Notification temps réel client
     try {
       const { notifyUser } = require('../services/notify');
       await notifyUser(req.user.id, 'ORDER_CREATED', {
@@ -904,23 +889,25 @@ router.post('/', authRequired, async (req, res) => {
       });
     } catch {}
 
-    // 9) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
+    // WhatsApp backoffice
     (async () => {
       try {
-        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() || 'Client Duumini';
+        const fullName =
+          `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() ||
+          'Client Duumini';
 
-        const details = Array.isArray(items) && items.length
-          ? items
-              .map((it) => {
-                const label = it.name || `Produit #${it.product_id || ''}`.trim();
-                const qty = it.qty || 1;
-                const price = it.price != null ? `${it.price} MAD` : '';
-                return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
-              })
-              .join('\n')
-          : '';
+        const details =
+          Array.isArray(items) && items.length
+            ? items
+                .map((it) => {
+                  const label = it.name || `Produit #${it.product_id || ''}`.trim();
+                  const qty = it.qty || 1;
+                  const price = it.price != null ? `${it.price} MAD` : '';
+                  return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
+                })
+                .join('\n')
+            : '';
 
-        // 🔎 Récupérer la première image produit de cette commande
         let firstProductImage = null;
         try {
           const [[rowImg]] = await pool.query(
@@ -934,11 +921,9 @@ router.post('/', authRequired, async (req, res) => {
             `,
             [orderId]
           );
-          if (rowImg && rowImg.url) {
-            firstProductImage = rowImg.url;
-          }
+          if (rowImg && rowImg.url) firstProductImage = rowImg.url;
         } catch (imgErr) {
-          console.error(`[WhatsApp] Erreur chargement image produit commande #${orderId}`, imgErr);
+          console.error(`[WhatsApp] Erreur image commande #${orderId}`, imgErr);
         }
 
         await sendWhatsAppOrderConfirmation({
@@ -954,15 +939,8 @@ router.post('/', authRequired, async (req, res) => {
           details,
           imageUrl: firstProductImage || null,
         });
-
-        console.log(
-          `[WhatsApp] Commande #${orderId} (user connecté) envoyée au backoffice ${BACKOFFICE_WHATSAPP}`
-        );
       } catch (errWa) {
-        console.error(
-          `[WhatsApp] Erreur envoi commande #${orderId} au backoffice`,
-          errWa
-        );
+        console.error(`[WhatsApp] Erreur envoi commande #${orderId} backoffice`, errWa);
       }
     })();
 
@@ -975,7 +953,9 @@ router.post('/', authRequired, async (req, res) => {
       geo_link: geoLink || null,
     });
   } catch (e) {
-    try { await conn.rollback(); } catch {}
+    try {
+      await conn.rollback();
+    } catch {}
     if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
     }
@@ -989,19 +969,13 @@ router.post('/', authRequired, async (req, res) => {
  * Create order invité (SANS AUTH)
  * =======================*/
 router.post('/guest', async (req, res) => {
-  const {
-    contact = {},
-    address = {},
-    delivery = {},
-    items = [],
-    totals = {},
-  } = req.body || {};
+  const { contact = {}, address = {}, delivery = {}, items = [], totals = {} } =
+    req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'items[] required' });
   }
 
-  // 👇 Invité : on veut au minimum un téléphone + un nom si possible
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
     return res.status(400).json({
@@ -1016,17 +990,15 @@ router.post('/guest', async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // 1) Normaliser adresse et geo_link
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    // 2) Recalcule total articles côté serveur
     let itemsAmount = 0;
     let totalCommission = 0;
     const cleanItems = [];
 
-    // ✅ Contrainte : pour les produits "food", un seul restaurant (shop_id)
     let firstFoodShopId = null;
+    let hasPromo = false;
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
@@ -1041,11 +1013,13 @@ router.post('/guest', async (req, res) => {
         throw err;
       }
 
-      // 🔒 On verrouille la ligne produit + on récupère le stock + shop_id
       const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock, shop_id FROM products WHERE id=? FOR UPDATE`,
+        `SELECT id, price, sub_category, stock, shop_id, promo_eligible, promo_discount_value
+         FROM products
+         WHERE id=? FOR UPDATE`,
         [product_id]
       );
+
       if (!p) {
         const err = new Error('Product not found: ' + product_id);
         err.statusCode = 400;
@@ -1076,9 +1050,11 @@ router.post('/guest', async (req, res) => {
         }
       }
 
-      // ❗ NOUVELLE LOGIQUE :
-      // p.price = PRIX CLIENT final.
-      const unit_price = Number(p.price); // prix client
+      if (isPromoProductRow(p)) {
+        hasPromo = true;
+      }
+
+      const unit_price = Number(p.price);
       const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
 
       cleanItems.push({
@@ -1092,11 +1068,10 @@ router.post('/guest', async (req, res) => {
       totalCommission += lineCommission;
     }
 
-    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
+    const deliveryFee = hasPromo ? 0 : Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || 'MAD').toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // 3) INSERT order invité
     const [r] = await conn.query(
       `
       INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
@@ -1111,10 +1086,10 @@ router.post('/guest', async (req, res) => {
         currency,
       ]
     );
+
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // 4) INSERT order_items
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, qty, unit_price)
@@ -1123,11 +1098,8 @@ router.post('/guest', async (req, res) => {
       );
     }
 
-    // 5) Décrémenter le stock pour chaque produit
     for (const it of cleanItems) {
-      if (it.current_stock === null || it.current_stock === undefined) {
-        continue;
-      }
+      if (it.current_stock === null || it.current_stock === undefined) continue;
 
       const currentStock = Number(it.current_stock || 0);
       const newStock = currentStock - Number(it.qty || 0);
@@ -1146,39 +1118,35 @@ router.post('/guest', async (req, res) => {
         throw err;
       }
 
-      await conn.query(
-        `UPDATE products SET stock=? WHERE id=?`,
-        [newStock, it.product_id]
-      );
+      await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
     }
 
     await conn.commit();
 
-    // 🔔 6) Enfiler des notifications pour vendeurs + admins
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch (eNot) {
       console.error('[Notify] enqueueOrderCreatedNotifications failed (guest)', eNot);
     }
 
-    // 7) Envoi WhatsApp au BACKOFFICE UNIQUEMENT (pas au client)
     (async () => {
       try {
-        const fullName = `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim()
-          || 'Client invité Duumini';
+        const fullName =
+          `${contactObj.first_name || ''} ${contactObj.last_name || ''}`.trim() ||
+          'Client invité Duumini';
 
-        const details = Array.isArray(items) && items.length
-          ? items
-              .map((it) => {
-                const label = it.name || `Produit #${it.product_id || ''}`.trim();
-                const qty = it.qty || 1;
-                const price = it.price != null ? `${it.price} MAD` : '';
-                return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
-              })
-              .join('\n')
-          : '';
+        const details =
+          Array.isArray(items) && items.length
+            ? items
+                .map((it) => {
+                  const label = it.name || `Produit #${it.product_id || ''}`.trim();
+                  const qty = it.qty || 1;
+                  const price = it.price != null ? `${it.price} MAD` : '';
+                  return `• ${label} ×${qty}${price ? ` — ${price}` : ''}`;
+                })
+                .join('\n')
+            : '';
 
-        // 🔎 Récupérer la première image produit de cette commande
         let firstProductImage = null;
         try {
           const [[rowImg]] = await pool.query(
@@ -1192,11 +1160,9 @@ router.post('/guest', async (req, res) => {
             `,
             [orderId]
           );
-          if (rowImg && rowImg.url) {
-            firstProductImage = rowImg.url;
-          }
+          if (rowImg && rowImg.url) firstProductImage = rowImg.url;
         } catch (imgErr) {
-          console.error(`[WhatsApp] Erreur chargement image produit commande invité #${orderId}`, imgErr);
+          console.error(`[WhatsApp] Erreur image commande invité #${orderId}`, imgErr);
         }
 
         await sendWhatsAppOrderConfirmation({
@@ -1212,15 +1178,8 @@ router.post('/guest', async (req, res) => {
           details,
           imageUrl: firstProductImage || null,
         });
-
-        console.log(
-          `[WhatsApp] Commande invité #${orderId} envoyée au backoffice ${BACKOFFICE_WHATSAPP}`
-        );
       } catch (errWa) {
-        console.error(
-          `[WhatsApp] Erreur envoi commande invité #${orderId}`,
-          errWa
-        );
+        console.error(`[WhatsApp] Erreur envoi commande invité #${orderId}`, errWa);
       }
     })();
 
@@ -1233,18 +1192,20 @@ router.post('/guest', async (req, res) => {
       geo_link: geoLink || null,
     });
   } catch (e) {
-    try { await conn.rollback(); } catch {}
+    try {
+      await conn.rollback();
+    } catch {}
     if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
     }
-    res.status(500).json({ error: e.message });  
+    res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
 });
 
 /* =========================
- * Get one order (detail + items) avec permissions
+ * Get one order (detail + items)
  * =======================*/
 router.get('/:id', authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1252,27 +1213,30 @@ router.get('/:id', authRequired, async (req, res) => {
   const conn = await pool.getConnection();
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if (result.status !== 200) {
+      return res.status(result.status).json({ error: result.error });
+    }
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
 
-    // Charger user pour fallback contact
     const [[u]] = await conn.query(
       'SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1',
       [o.user_id]
     );
+
     const contactFromOrder = safeParseJSON(o.contact);
     const contact =
-      (contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone))
+      contactFromOrder &&
+      (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // ✅ Totaux pour le front (CA client hors livraison)
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0
     );
+
     const totalAmount = Number(o.total || itemsAmount);
     const deliveryFee = Math.max(0, totalAmount - itemsAmount);
     const currency = (o.currency || 'MAD').toUpperCase();
@@ -1280,9 +1244,9 @@ router.get('/:id', authRequired, async (req, res) => {
     res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
-      contact,               
+      contact,
       address: addr,
-      items: result.items,   // contient product_cover
+      items: result.items,
       totals: {
         items_amount: itemsAmount,
         delivery_fee: deliveryFee,
@@ -1291,8 +1255,11 @@ router.get('/:id', authRequired, async (req, res) => {
       },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-  finally { conn.release(); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
 });
 
 /* =========================
@@ -1301,7 +1268,7 @@ router.get('/:id', authRequired, async (req, res) => {
 router.put('/:id/status', authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const { status } = req.body || {};
-  const allowed = ['OPEN','PREPARATION','DELIVERY','DONE','CANCELLED'];
+  const allowed = ['OPEN', 'PREPARATION', 'DELIVERY', 'DONE', 'CANCELLED'];
   if (!allowed.includes(status)) {
     return res.status(400).json({ error: 'invalid status' });
   }
@@ -1328,11 +1295,13 @@ router.put('/:id/status', authRequired, async (req, res) => {
       }
     }
 
-    await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [status, id]);
+    await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [
+      status,
+      id,
+    ]);
 
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
     if (order && order.user_id) {
-      // 🔔 file d'attente pour push + WS temps réel
       try {
         await enqueueOrderStatusForClient(id, status);
       } catch (eQueue) {
@@ -1350,7 +1319,9 @@ router.put('/:id/status', authRequired, async (req, res) => {
     }
 
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* =========================
@@ -1363,7 +1334,9 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
 
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if (result.status !== 200) {
+      return res.status(result.status).json({ error: result.error });
+    }
 
     const order = result.order;
     const blocked = ['DONE', 'CANCELLED'].includes(order.status || '');
@@ -1371,7 +1344,9 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
       return res.status(409).json({ error: 'Cannot cancel at this stage' });
     }
 
-    await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
+    await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [
+      id,
+    ]);
 
     try {
       if (order.user_id) {
@@ -1389,8 +1364,11 @@ router.post('/:id/cancel', authRequired, async (req, res) => {
     }
 
     res.json({ ok: true, status: 'CANCELLED' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-  finally { conn.release(); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
 });
 
 module.exports = router;
