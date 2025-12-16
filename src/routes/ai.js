@@ -22,7 +22,7 @@ function ensureAiOn(res) {
   return true;
 }
 
-// ✅ POST /api/ai/duumini
+// ✅ POST /api/ai/duumini (ADMIN)
 router.post("/duumini", authRequired, isAdmin, async (req, res, next) => {
   if (!ensureAiOn(res)) return;
   try {
@@ -34,7 +34,7 @@ router.post("/duumini", authRequired, isAdmin, async (req, res, next) => {
   }
 });
 
-// POST /api/ai/weekly-plan
+// POST /api/ai/weekly-plan (ADMIN)
 router.post("/weekly-plan", authRequired, isAdmin, async (req, res) => {
   if (!ensureAiOn(res)) return;
   try {
@@ -48,7 +48,7 @@ router.post("/weekly-plan", authRequired, isAdmin, async (req, res) => {
   }
 });
 
-// POST /api/ai/social-posts
+// POST /api/ai/social-posts (ADMIN)
 router.post("/social-posts", authRequired, isAdmin, async (req, res) => {
   if (!ensureAiOn(res)) return;
   try {
@@ -62,7 +62,7 @@ router.post("/social-posts", authRequired, isAdmin, async (req, res) => {
   }
 });
 
-// POST /api/ai/whatsapp-reply
+// POST /api/ai/whatsapp-reply (ADMIN)
 router.post("/whatsapp-reply", authRequired, isAdmin, async (req, res) => {
   if (!ensureAiOn(res)) return;
 
