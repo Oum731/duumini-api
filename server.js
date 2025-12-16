@@ -30,8 +30,10 @@ const devices = require("./src/routes/devices");
 const otpRoutes = require("./src/routes/otp");
 const events = require("./src/routes/events");
 const productRatingsRouter = require("./src/routes/productRatings");
+const aiRoutes = require("./src/routes/ai");
 
 // ✅ AI Ads routes
+app.use("/api/ai", aiRoutes);
 const metaCampaignRoutes = require("./src/routes/meta_campaign");
 const googleCampaignRoutes = require("./src/routes/google_campaign");
 const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
