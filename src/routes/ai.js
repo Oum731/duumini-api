@@ -21,7 +21,10 @@ function ensureAiOn(res) {
   }
   return true;
 }
-router.post("/duumini", async (req, res, next) => {
+
+// ✅ POST /api/ai/duumini
+router.post("/duumini", authRequired, isAdmin, async (req, res, next) => {
+  if (!ensureAiOn(res)) return;
   try {
     const { taskType, payload } = req.body || {};
     const out = await runDuuminiAgent(taskType, payload || {});
@@ -30,6 +33,7 @@ router.post("/duumini", async (req, res, next) => {
     next(e);
   }
 });
+
 // POST /api/ai/weekly-plan
 router.post("/weekly-plan", authRequired, isAdmin, async (req, res) => {
   if (!ensureAiOn(res)) return;
