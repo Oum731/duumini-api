@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -8,10 +9,9 @@ const path = require("path");
 /**
  * ✅ dotenv uniquement en local/dev
  * Render injecte déjà les variables d'env en production.
- * (et ça évite les logs "[dotenv] Injection..." en prod)
  */
 if (process.env.NODE_ENV !== "production") {
-  require("dotenv").config(); // pas de "quiet" ici
+  require("dotenv").config();
 }
 
 const { env } = require("./src/lib/env");
@@ -33,7 +33,6 @@ const productRatingsRouter = require("./src/routes/productRatings");
 const aiRoutes = require("./src/routes/ai");
 
 // ✅ AI Ads routes
-app.use("/api/ai", aiRoutes);
 const metaCampaignRoutes = require("./src/routes/meta_campaign");
 const googleCampaignRoutes = require("./src/routes/google_campaign");
 const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
@@ -74,6 +73,9 @@ console.log("[ENV] META_AD_ACCESS_TOKEN =", yn(env.META_AD_ACCESS_TOKEN));
 console.log("[ENV] META_PAGE_ID =", yn(env.META_PAGE_ID));
 console.log("[ENV] META_DEFAULT_ADSET_ID =", yn(env.META_DEFAULT_ADSET_ID));
 
+/* =========================
+ * ✅ APP INIT (AVANT app.use)
+ * ========================= */
 const app = express();
 app.set("trust proxy", 1);
 
@@ -226,12 +228,21 @@ app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
 /* =========================
+ * ✅ AI (page copy + agent)
+ * ========================= */
+app.use("/api/page-copy", require("./src/routes/pageCopy"));
+const { startAutoCopyCron } = require("./src/ai/autoCopyJob");
+startAutoCopyCron();
+app.use("/api/ai", aiRoutes);
+
+/* =========================
  * ✅ AI ADS ROUTES
  * ========================= */
 app.use("/api/ads", googleAiAdsRoutes);
 if (metaAiAdsRoutes) app.use("/api/ads", metaAiAdsRoutes);
 app.use("/api/ads", metaCampaignRoutes);
 app.use("/api/ads", googleCampaignRoutes);
+
 /* =========================
  * 404 + Error handler
  * ========================= */
