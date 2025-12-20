@@ -32,6 +32,7 @@ const events = require("./src/routes/events");
 const productRatingsRouter = require("./src/routes/productRatings");
 const aiRoutes = require("./src/routes/ai");
 
+
 // ✅ AI Ads routes
 const metaCampaignRoutes = require("./src/routes/meta_campaign");
 const googleCampaignRoutes = require("./src/routes/google_campaign");
@@ -179,6 +180,7 @@ app.get("/api/health", (_req, res) =>
  * ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
 app.head("/", (_req, res) => res.status(200).end());
+app.use("/api/sub-categories", require("./routes/subCategories"));
 
 /* =========================
  * ✅ Admin env-check (optionnel)

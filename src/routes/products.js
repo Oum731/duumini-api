@@ -55,33 +55,29 @@ const router = express.Router();
  * Upload (Cloudinary via mémoire)
  * ========================= */
 
-// On garde ces constantes pour compat, même si on ne sert plus de local
+// compat: plus de local, mais on garde le dossier
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(UPLOAD_DIR);
 
-// ⚠️ On passe en mémoire : les fichiers ne sont plus écrits sur disque
 const upload = multer({ storage: multer.memoryStorage() });
 
 /* ----------------------------- Helpers ----------------------------- */
 
-// Sécurise un param numérique (évite NaN, négatifs, etc.)
 function toPositiveInt(value, defaultValue) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return defaultValue;
   return Math.floor(n);
 }
 
-// parse un param ID; renvoie null si non numérique
 function parseIdParam(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.floor(n);
 }
 
-// Helper pour parser un booléen / flag (0/1, true/false, yes/no, on/off)
 function parseBoolFlag(value, defaultValue = null) {
   if (value === undefined || value === null) return defaultValue;
   const v = String(value).trim().toLowerCase();
@@ -90,7 +86,6 @@ function parseBoolFlag(value, defaultValue = null) {
   return defaultValue;
 }
 
-// Normalise la ville envoyée en query (?ville= / ?city=)
 function normalizeVilleFilter(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -101,24 +96,15 @@ function normalizeVilleFilter(value) {
   return raw;
 }
 
-/**
- * ✅ Affichage “Casa ↔ Marrakech”
- * Si l'utilisateur filtre sur Casablanca OU Marrakech, on affiche les 2 villes.
- * Sinon on filtre sur la ville fournie.
- */
 function expandCasaMarr(ville) {
   const v = normalizeVilleFilter(ville);
   if (!v) return null;
-  if (v === "Casablanca" || v === "Marrakech")
-    return ["Casablanca", "Marrakech"];
+  if (v === "Casablanca" || v === "Marrakech") return ["Casablanca", "Marrakech"];
   return [v];
 }
 
 /* ============================
- *  Villes dispo par produit
- *  (sans créer de table)
- *  -> on stocke si une colonne existe dans products:
- *     available_cities | cities | villes
+ *  Villes dispo (colonne optionnelle)
  * ============================ */
 
 async function detectCitiesColumn(conn) {
@@ -143,7 +129,7 @@ function parseCitiesBody(body) {
     body?.["villes[]"] ??
     null;
 
-  if (raw == null) return null; // null => pas envoyé
+  if (raw == null) return null;
 
   let arr = [];
   if (Array.isArray(raw)) arr = raw;
@@ -178,7 +164,7 @@ function parseCitiesBody(body) {
 }
 
 /* ============================
- *  Promotions (type/valeur)
+ * Promotions
  * ============================ */
 
 function normalizePromoType(value) {
@@ -189,15 +175,13 @@ function normalizePromoType(value) {
 }
 
 function parsePromoFields(body) {
-  const eligible = parseBoolFlag(body?.promo_eligible, null); // null => pas envoyé
+  const eligible = parseBoolFlag(body?.promo_eligible, null);
 
-  // Valeurs par défaut si non envoyées
   const freeDelivery =
     body?.promo_free_delivery === undefined
       ? null
       : parseBoolFlag(body?.promo_free_delivery, 0);
 
-  // Si promo_eligible non envoyé -> on ne touche pas promo_discount_*
   if (eligible === null) {
     return {
       promo_eligible: null,
@@ -208,7 +192,6 @@ function parsePromoFields(body) {
     };
   }
 
-  // Promo OFF => purge
   if (eligible === 0) {
     return {
       promo_eligible: 0,
@@ -219,12 +202,10 @@ function parsePromoFields(body) {
     };
   }
 
-  // Promo ON => on valide
   const type = normalizePromoType(body?.promo_discount_type);
   const v = Number(body?.promo_discount_value);
   const value = Number.isFinite(v) && v > 0 ? v : null;
 
-  // Si promo ON mais pas de valeur -> on garde promo ON mais sans discount (ou tu peux refuser)
   return {
     promo_eligible: 1,
     promo_discount_type: value ? type : null,
@@ -234,19 +215,24 @@ function parsePromoFields(body) {
   };
 }
 
-// Taux de commission Duumini en fonction de la sous-catégorie
-function computeDuuminiRateFromSubCategory(subCategory) {
-  const sub = String(subCategory || "").trim().toLowerCase();
+/* ============================
+ * SubCategory (table)
+ * ============================ */
+
+// ✅ commission selon slug sous-catégorie
+function computeDuuminiRateFromSubCategorySlug(subSlug) {
+  const sub = String(subSlug || "").trim().toLowerCase();
   if (sub === "food") return 0.18;
   return 0.11;
 }
 
+// ✅ “vendor_price” calculé à partir de duumini_rate + price
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
 
   const { duumini_rate, price, ...rest } = row;
 
-  let rate = computeDuuminiRateFromSubCategory(row.sub_category);
+  let rate = computeDuuminiRateFromSubCategorySlug(row.sub_category_slug || row.sub_category);
   if (duumini_rate != null) {
     const r = Number(duumini_rate);
     if (Number.isFinite(r) && r >= 0 && r <= 1) rate = r;
@@ -264,31 +250,60 @@ function stripDuuminiRateFromProduct(row) {
 }
 
 /**
+ * Récupère la sous-catégorie (id/slug/name) à partir de sub_category_id.
+ * Optionnel: vérifie aussi que la sous-catégorie appartient à category_id (si fourni).
+ */
+async function resolveSubCategory(conn, { sub_category_id, category_id }) {
+  const sid = Number(sub_category_id) || 0;
+  if (!sid) return null;
+
+  if (category_id) {
+    const cid = Number(category_id) || 0;
+    const [rows] = await conn.query(
+      `SELECT id, category_id, name, slug
+         FROM sub_categories
+        WHERE id=? AND category_id=?
+        LIMIT 1`,
+      [sid, cid]
+    );
+    return rows[0] || null;
+  }
+
+  const [rows] = await conn.query(
+    `SELECT id, category_id, name, slug
+       FROM sub_categories
+      WHERE id=?
+      LIMIT 1`,
+    [sid]
+  );
+  return rows[0] || null;
+}
+
+/**
  * Liste des produits avec filtres :
  * - channel: null | 'african-food' | 'african-market'
  * - onlyActive: bool
- * - ville: 'Casablanca' | 'Marrakech' | null
+ * - ville: Casablanca | Marrakech | autre
  * - onlyPromos: bool
  */
 async function listProducts(pool, { limit, offset, channel, onlyActive, ville, onlyPromos }) {
-  const normSub = "LOWER(TRIM(COALESCE(p.sub_category, '')))";
   const whereParts = [];
   const params = [];
 
-  if (channel === "african-food") whereParts.push(`${normSub} = 'food'`);
-  else if (channel === "african-market") whereParts.push(`${normSub} <> 'food'`);
+  // ✅ channel via sub_categories.slug
+  // sc.slug='food' => african-food
+  // market => sc.slug <> 'food' OR sc.slug IS NULL
+  if (channel === "african-food") whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
+  else if (channel === "african-market")
+    whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food')`);
   else whereParts.push("1=1");
 
   if (onlyActive) whereParts.push("p.is_active = 1");
 
-  // ✅ promos réelles
   if (onlyPromos) {
-    whereParts.push(
-      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
-    );
+    whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
   }
 
-  // ✅ Filtre ville (Casa ↔ Marrakech : on prend les deux)
   const villes = ville ? expandCasaMarr(ville) : null;
   if (villes && villes.length) {
     const placeholders = villes.map(() => "?").join(",");
@@ -303,6 +318,7 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville, o
     SELECT COUNT(*) AS total
       FROM products p
       LEFT JOIN shops s ON s.id = p.shop_id
+      LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
      WHERE ${whereSql}
     `,
     params
@@ -316,6 +332,11 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville, o
       s.logo AS shop_logo,
       s.cover AS shop_cover,
       s.city AS shop_city,
+
+      sc.id   AS sub_category_id,
+      sc.name AS sub_category_name,
+      sc.slug AS sub_category_slug,
+
       (SELECT url
          FROM product_images pi
         WHERE pi.product_id = p.id
@@ -323,6 +344,7 @@ async function listProducts(pool, { limit, offset, channel, onlyActive, ville, o
         LIMIT 1) AS cover
      FROM products p
      LEFT JOIN shops s ON s.id = p.shop_id
+     LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
      WHERE ${whereSql}
      ORDER BY p.created_at DESC
      LIMIT ? OFFSET ?
@@ -429,7 +451,7 @@ router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
 
-/* ----------------------------- Promotions list (pour carrousel + page promos) ----------------------------- */
+/* ----------------------------- Promotions list ----------------------------- */
 router.get("/promotions", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
@@ -480,9 +502,7 @@ router.get("/top-ordered", async (req, res, next) => {
   try {
     const villes = ville ? expandCasaMarr(ville) : null;
     const whereVille = villes?.length
-      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes
-          .map(() => "?")
-          .join(",")})`
+      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
       : "";
 
     const params = [];
@@ -497,6 +517,11 @@ router.get("/top-ordered", async (req, res, next) => {
         s.logo AS shop_logo,
         s.cover AS shop_cover,
         s.city AS shop_city,
+
+        sc.id   AS sub_category_id,
+        sc.name AS sub_category_name,
+        sc.slug AS sub_category_slug,
+
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -507,6 +532,7 @@ router.get("/top-ordered", async (req, res, next) => {
       JOIN orders o   ON o.id = oi.order_id
       JOIN products p ON p.id = oi.product_id
       LEFT JOIN shops s ON s.id = p.shop_id
+      LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       WHERE o.status = 'DONE'
         AND p.is_active = 1
         ${whereVille}
@@ -534,12 +560,8 @@ router.get("/top-rated", async (req, res, next) => {
 
   try {
     const villes = ville ? expandCasaMarr(ville) : null;
-
-    // ⚠️ HAVING vient avant le filtre ville ici (pour garder la structure existante)
     const whereVille = villes?.length
-      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes
-          .map(() => "?")
-          .join(",")})`
+      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
       : "";
 
     const params = [minCount];
@@ -554,6 +576,11 @@ router.get("/top-rated", async (req, res, next) => {
         s.logo AS shop_logo,
         s.cover AS shop_cover,
         s.city AS shop_city,
+
+        sc.id   AS sub_category_id,
+        sc.name AS sub_category_name,
+        sc.slug AS sub_category_slug,
+
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -562,9 +589,9 @@ router.get("/top-rated", async (req, res, next) => {
         AVG(r.rating)     AS avg_rating,
         COUNT(r.id)       AS rating_count
       FROM product_ratings r
-      JOIN products p ON p.id = r.product_id
-                     AND p.is_active = 1
+      JOIN products p ON p.id = r.product_id AND p.is_active = 1
       LEFT JOIN shops s ON s.id = p.shop_id
+      LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       GROUP BY p.id
       HAVING rating_count >= ?
       ${whereVille}
@@ -593,12 +620,18 @@ router.get("/:id", async (req, res, next) => {
          s.name AS shop_name,
          s.logo AS shop_logo,
          s.cover AS shop_cover,
-         s.city AS shop_city
+         s.city AS shop_city,
+
+         sc.id   AS sub_category_id,
+         sc.name AS sub_category_name,
+         sc.slug AS sub_category_slug
        FROM products p
        LEFT JOIN shops s ON s.id = p.shop_id
+       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
        WHERE p.id=?`,
       [id]
     );
+
     const rawProduct = rows[0];
     if (!rawProduct) return res.status(404).json({ error: "Not found" });
 
@@ -612,7 +645,6 @@ router.get("/:id", async (req, res, next) => {
       [id]
     );
 
-    // ✅ si une colonne existe, on renvoie aussi cities (pour prefill du form)
     let cities = undefined;
     try {
       const conn = await pool.getConnection();
@@ -662,11 +694,15 @@ router.post(
       description,
       stock,
       is_featured,
+
       promo_eligible,
       promo_discount_type,
       promo_discount_value,
       promo_free_delivery,
-      sub_category,
+
+      // ✅ NEW
+      sub_category_id,
+
       is_active,
       shop_id,
     } = req.body || {};
@@ -716,9 +752,21 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      const rawSub = String(sub_category || "").trim().toLowerCase();
-      const sub = rawSub === "food" || rawSub === "product" ? rawSub : "product";
-      const duuminiRate = computeDuuminiRateFromSubCategory(sub);
+      // ✅ resolve sub-category (table)
+      const resolvedSub = await resolveSubCategory(conn, {
+        sub_category_id,
+        category_id,
+      });
+
+      // tu peux choisir: rendre obligatoire
+      if (!resolvedSub) {
+        conn.release();
+        return res.status(400).json({
+          error: "sub_category_id invalide (ou ne correspond pas à category_id)",
+        });
+      }
+
+      const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
       const active = parseBoolFlag(is_active, 1);
 
       const makeSlug = () =>
@@ -727,7 +775,7 @@ router.post(
           .toString(36)
           .slice(2, 7)}`.toLowerCase();
 
-      // ✅ promo (corrige le bug "promo partout")
+      // ✅ promo
       const promoEligible = parseBoolFlag(promo_eligible, 0);
       let promoType = null;
       let promoValue = null;
@@ -746,25 +794,28 @@ router.post(
         promoValue = null;
       }
 
-      // ✅ villes envoyées par l'admin (libre) -> stockées seulement si colonne existe
+      // ✅ villes (colonne optionnelle)
       const citiesCol = await detectCitiesColumn(conn);
-      const incomingCities = parseCitiesBody(req.body); // null si pas envoyé
+      const incomingCities = parseCitiesBody(req.body);
       const cities =
         incomingCities == null
           ? null
           : incomingCities.map(normalizeVilleFilter).filter(Boolean);
-      const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
+      const citiesJson =
+        citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       await conn.beginTransaction();
 
-      // INSERT dynamique (avec promo fields)
       let insertSql = `INSERT INTO products
-           (shop_id, category_id, name, slug, price, currency, description, stock, is_featured,
-            promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
-            sub_category, duumini_rate, is_active`;
+        (shop_id, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
+         promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
+         duumini_rate, is_active`;
+
       const insertVals = [
         finalShopId,
         category_id ? Number(category_id) : null,
+        resolvedSub.id,
+
         name,
         makeSlug(),
         Number(price),
@@ -778,7 +829,6 @@ router.post(
         promoValue,
         promoFree,
 
-        sub,
         duuminiRate,
         active,
       ];
@@ -812,8 +862,11 @@ router.post(
 
       await conn.commit();
 
-      const channel = sub === "food" ? "african-food" : "african-market";
+      const channel = String(resolvedSub.slug || "").toLowerCase() === "food"
+        ? "african-food"
+        : "african-market";
 
+      // notifications (inchangé)
       try {
         const [userRows] = await pool.query(
           `SELECT DISTINCT user_id
@@ -839,10 +892,7 @@ router.post(
           }
         }
       } catch (e) {
-        console.error(
-          "[products] Failed to enqueue PRODUCT_CREATED notifications",
-          e
-        );
+        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
       }
 
       try {
@@ -885,11 +935,15 @@ router.put(
       description,
       stock,
       is_featured,
+
       promo_eligible,
       promo_discount_type,
       promo_discount_value,
       promo_free_delivery,
-      sub_category,
+
+      // ✅ NEW
+      sub_category_id,
+
       category_id,
       replace_images,
       is_active,
@@ -915,19 +969,6 @@ router.put(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const rawSub =
-        sub_category != null ? String(sub_category).trim().toLowerCase() : null;
-      let sub = null;
-      if (rawSub === "food" || rawSub === "product") sub = rawSub;
-
-      const effectiveSub =
-        sub != null
-          ? sub
-          : String(prod.sub_category || "").trim().toLowerCase() || "product";
-
-      const duuminiRate = computeDuuminiRateFromSubCategory(effectiveSub);
-      const active = parseBoolFlag(is_active, null);
-
       let newShopIdParam = null;
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
@@ -938,15 +979,37 @@ router.put(
           );
           if (!shop) {
             conn.release();
-            return res
-              .status(400)
-              .json({ error: "Boutique invalide (shop_id)" });
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
         }
       }
 
-      // ✅ promo update (si promo_eligible est envoyé, on gère le reset)
+      // ✅ resolve sub-cat si envoyé
+      let resolvedSub = null;
+      if (sub_category_id != null && sub_category_id !== "") {
+        resolvedSub = await resolveSubCategory(conn, {
+          sub_category_id,
+          category_id: category_id ?? prod.category_id,
+        });
+        if (!resolvedSub) {
+          conn.release();
+          return res.status(400).json({
+            error: "sub_category_id invalide (ou ne correspond pas à category_id)",
+          });
+        }
+      } else {
+        // on garde l’actuel
+        resolvedSub = null;
+      }
+
+      // ✅ rate: dépend du slug final
+      let duuminiRate = null;
+      if (resolvedSub) duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
+
+      const active = parseBoolFlag(is_active, null);
+
+      // ✅ promo update
       const promo = parsePromoFields({
         promo_eligible,
         promo_discount_type,
@@ -954,6 +1017,7 @@ router.put(
         promo_free_delivery,
       });
 
+      // Update principal
       await conn.query(
         `UPDATE products SET
            name                = COALESCE(?, name),
@@ -962,6 +1026,7 @@ router.put(
            description         = COALESCE(?, description),
            stock               = COALESCE(?, stock),
            is_featured         = COALESCE(?, is_featured),
+
            promo_eligible      = COALESCE(?, promo_eligible),
            promo_discount_type = CASE
                                   WHEN ? IS NULL THEN promo_discount_type
@@ -974,8 +1039,10 @@ router.put(
                                   ELSE NULL
                                 END,
            promo_free_delivery = COALESCE(?, promo_free_delivery),
-           sub_category        = ?,
-           duumini_rate        = ?,
+
+           sub_category_id     = COALESCE(?, sub_category_id),
+           duumini_rate        = COALESCE(?, duumini_rate),
+
            is_active           = COALESCE(?, is_active),
            category_id         = COALESCE(?, category_id),
            shop_id             = COALESCE(?, shop_id)
@@ -988,17 +1055,18 @@ router.put(
           stock != null ? Number(stock) : null,
           is_featured === undefined ? null : is_featured ? 1 : 0,
 
-          promo.promo_eligible,          // COALESCE -> si null, inchangé
-          promo.promo_eligible,          // CASE #1 (null ?)
-          promo.promo_eligible,          // CASE #1 (=1 ?)
-          promo.promo_discount_type,     // set type si ON
-          promo.promo_eligible,          // CASE #2 (null ?)
-          promo.promo_eligible,          // CASE #2 (=1 ?)
-          promo.promo_discount_value,    // set value si ON
-          promo.promo_free_delivery,     // COALESCE -> si null, inchangé
+          promo.promo_eligible,
+          promo.promo_eligible,
+          promo.promo_eligible,
+          promo.promo_discount_type,
+          promo.promo_eligible,
+          promo.promo_eligible,
+          promo.promo_discount_value,
+          promo.promo_free_delivery,
 
-          effectiveSub,
+          resolvedSub ? resolvedSub.id : null,
           duuminiRate,
+
           active,
           category_id != null ? Number(category_id) : null,
           newShopIdParam,
@@ -1006,9 +1074,9 @@ router.put(
         ]
       );
 
-      // ✅ update villes si envoyées (admin libre) et colonne existe
+      // ✅ update villes si envoyées
       const citiesCol = await detectCitiesColumn(conn);
-      const incomingCities = parseCitiesBody(req.body); // null si pas envoyé
+      const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
         const cities = (incomingCities || [])
           .map(normalizeVilleFilter)
@@ -1019,6 +1087,7 @@ router.put(
         ]);
       }
 
+      // Images
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
         const doReplace = String(replace_images || "").toLowerCase() === "true";
@@ -1207,7 +1276,7 @@ router.delete(
 );
 
 /* =======================================================================
- *  Route de partage avec meta OG
+ *  Route de partage avec meta OG (inchangée chez toi)
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1235,12 +1304,12 @@ shareRouter.get("/product/:id", async (req, res, next) => {
         p.description,
         p.price,
         p.currency,
-        p.sub_category,
         p.is_active,
         s.name AS shop_name,
         s.city AS shop_city,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
+        sc.slug AS sub_category_slug,
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -1248,6 +1317,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
           LIMIT 1) AS cover
       FROM products p
       LEFT JOIN shops s ON s.id = p.shop_id
+      LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       WHERE p.id = ?
       `,
       [id]
@@ -1264,7 +1334,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const slugOrId = product.slug || product.id;
     const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
 
-    const sub = String(product.sub_category || "").trim().toLowerCase();
+    const sub = String(product.sub_category_slug || "").trim().toLowerCase();
     const channelPath = sub === "food" ? "/african-food" : "/african-market";
 
     const ogTitle = escapeHtml(
@@ -1283,7 +1353,6 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       if (ogImage.startsWith("/")) ogImage = `${baseWeb}${ogImage}`;
       else ogImage = `${baseWeb}/${ogImage}`;
     }
-
     if (!ogImage) ogImage = `${baseWeb}/images/share-default-product.jpg`;
 
     const priceAmount = Number(product.price || 0);
@@ -1314,9 +1383,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <title>${ogTitle}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow, noarchive" />
-
     <link rel="canonical" href="${finalUrl}" />
-
     <meta property="og:type" content="product" />
     <meta property="og:site_name" content="Duumini" />
     <meta property="og:locale" content="fr_FR" />
@@ -1328,16 +1395,13 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <meta property="product:price:currency" content="${escapeHtml(priceCurrency)}" />
     <meta property="product:retailer_item_id" content="${product.id}" />
     <meta property="product:category" content="${escapeHtml(channelPath)}" />
-
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="${ogTitle}" />
     <meta name="twitter:description" content="${ogDescription}" />
     <meta name="twitter:image" content="${ogImage}" />
-
     <script type="application/ld+json">
 ${JSON.stringify(jsonLd)}
     </script>
-
     <meta http-equiv="refresh" content="0;url=${finalUrl}" />
     <script>
       window.location.replace(${JSON.stringify(finalUrl)});

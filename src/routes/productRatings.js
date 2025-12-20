@@ -12,6 +12,54 @@ function parseProductId(raw) {
 }
 
 /**
+ * GET /api/products/pending-rating
+ * → retourne UN produit que l'utilisateur doit noter
+ *   (commande DONE depuis ≥ 24h, pas encore notée par cet utilisateur).
+ */
+router.get("/pending-rating", authRequired, async (req, res) => {
+  const userId = req.user.id;
+  const pool = getPool();
+
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        (
+          SELECT pi.url
+          FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY pi.sort_order ASC, pi.id ASC
+          LIMIT 1
+        ) AS product_image,
+        o.id AS order_id,
+        COALESCE(o.updated_at, o.created_at) AS delivered_at
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN products p ON p.id = oi.product_id
+      LEFT JOIN product_ratings pr
+        ON pr.product_id = p.id
+       AND pr.user_id   = o.user_id
+      WHERE o.user_id IS NOT NULL
+        AND o.user_id = ?
+        AND o.status = 'DONE'
+        AND pr.id IS NULL
+        AND COALESCE(o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
+      ORDER BY delivered_at DESC
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    res.json(rows[0] || null);
+  } catch (e) {
+    console.error("GET /products/pending-rating error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
  * GET /api/products/:id/ratings
  * → moyenne + nombre de notes pour un produit
  */
@@ -32,14 +80,16 @@ router.get("/:id/ratings", async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT AVG(rating) AS average, COUNT(*) AS count
-       FROM product_ratings
-       WHERE product_id = ?`,
+      `
+      SELECT AVG(rating) AS average, COUNT(*) AS count
+      FROM product_ratings
+      WHERE product_id = ?
+      `,
       [productId]
     );
 
-    const average = rows[0]?.average ? Number(rows[0].average) : 0;
-    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+    const average = rows[0]?.average != null ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count != null ? Number(rows[0].count) : 0;
 
     res.json({ average, count });
   } catch (e) {
@@ -69,87 +119,33 @@ router.get("/:id/ratings/list", async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT
-         pr.id,
-         pr.rating,
-         pr.comment,
-         pr.created_at,
-         pr.user_id,
-         CASE
-           WHEN TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> '' THEN
-             TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, '')))
-           WHEN u.phone IS NOT NULL AND u.phone <> '' THEN
-             u.phone
-           ELSE
-             'Client Duumini'
-         END AS user_name
-       FROM product_ratings pr
-       JOIN users u ON u.id = pr.user_id
-       WHERE pr.product_id = ?
-       ORDER BY pr.created_at DESC`,
+      `
+      SELECT
+        pr.id,
+        pr.rating,
+        pr.comment,
+        pr.created_at,
+        pr.updated_at,
+        pr.user_id,
+        CASE
+          WHEN TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> '' THEN
+            TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, '')))
+          WHEN u.phone IS NOT NULL AND u.phone <> '' THEN
+            u.phone
+          ELSE
+            'Client Duumini'
+        END AS user_name
+      FROM product_ratings pr
+      LEFT JOIN users u ON u.id = pr.user_id
+      WHERE pr.product_id = ?
+      ORDER BY pr.created_at DESC
+      `,
       [productId]
     );
 
     res.json(rows || []);
   } catch (e) {
     console.error("GET /products/:id/ratings/list error:", e);
-    res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-/**
- * GET /api/products/pending-rating
- * → retourne UN produit que l'utilisateur doit noter
- *   (commande livrée depuis ≥ 24h, pas encore notée par cet utilisateur).
- */
-router.get("/pending-rating", authRequired, async (req, res) => {
-  const userId = req.user.id;
-  const pool = getPool();
-
-  try {
-    /**
-     * Schéma utilisé (adapté à ta DB) :
-     * - orders(id, user_id, status, created_at, updated_at, ...)
-     * - order_items(id, order_id, product_id, qty, unit_price, ...)
-     * - products(id, name, ...)
-     * - product_images(id, product_id, url, sort_order, ...)
-     * - product_ratings(id, product_id, user_id, rating, comment, created_at, ...)
-     *
-     * Date de "livraison" :
-     *   COALESCE(o.updated_at, o.created_at)
-     */
-    const [rows] = await pool.query(
-      `SELECT
-         p.id AS product_id,
-         p.name AS product_name,
-         (
-           SELECT pi.url
-           FROM product_images pi
-           WHERE pi.product_id = p.id
-           ORDER BY pi.sort_order ASC, pi.id ASC
-           LIMIT 1
-         ) AS product_image,
-         o.id AS order_id,
-         COALESCE(o.updated_at, o.created_at) AS delivered_at
-       FROM orders o
-       JOIN order_items oi ON oi.order_id = o.id
-       JOIN products p ON p.id = oi.product_id
-       LEFT JOIN product_ratings pr
-         ON pr.product_id = p.id
-        AND pr.user_id   = o.user_id
-       WHERE o.user_id = ?
-         AND o.status = 'DONE'
-         AND pr.id IS NULL
-         AND COALESCE(o.updated_at, o.created_at) <= (NOW() - INTERVAL 24 HOUR)
-       ORDER BY delivered_at DESC
-       LIMIT 1`,
-      [userId]
-    );
-
-    const pending = rows[0] || null;
-    res.json(pending);
-  } catch (e) {
-    console.error("GET /products/pending-rating error:", e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -193,24 +189,28 @@ router.post("/:id/rate", authRequired, async (req, res) => {
     }
 
     await pool.query(
-      `INSERT INTO product_ratings (product_id, user_id, rating, comment)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         rating = VALUES(rating),
-         comment = VALUES(comment),
-         updated_at = CURRENT_TIMESTAMP`,
+      `
+      INSERT INTO product_ratings (product_id, user_id, rating, comment, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NOW(), NOW())
+      ON DUPLICATE KEY UPDATE
+        rating = VALUES(rating),
+        comment = VALUES(comment),
+        updated_at = NOW()
+      `,
       [productId, userId, rating, comment]
     );
 
     const [rows] = await pool.query(
-      `SELECT AVG(rating) AS average, COUNT(*) AS count
-       FROM product_ratings
-       WHERE product_id = ?`,
+      `
+      SELECT AVG(rating) AS average, COUNT(*) AS count
+      FROM product_ratings
+      WHERE product_id = ?
+      `,
       [productId]
     );
 
-    const average = rows[0]?.average ? Number(rows[0].average) : 0;
-    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+    const average = rows[0]?.average != null ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count != null ? Number(rows[0].count) : 0;
 
     res.json({
       ok: true,
@@ -248,22 +248,26 @@ router.delete("/:id/rate", authRequired, async (req, res) => {
     }
 
     const [result] = await pool.query(
-      `DELETE FROM product_ratings
-       WHERE product_id = ? AND user_id = ?`,
+      `
+      DELETE FROM product_ratings
+      WHERE product_id = ? AND user_id = ?
+      `,
       [productId, userId]
     );
 
     const deleted = result.affectedRows > 0;
 
     const [rows] = await pool.query(
-      `SELECT AVG(rating) AS average, COUNT(*) AS count
-       FROM product_ratings
-       WHERE product_id = ?`,
+      `
+      SELECT AVG(rating) AS average, COUNT(*) AS count
+      FROM product_ratings
+      WHERE product_id = ?
+      `,
       [productId]
     );
 
-    const average = rows[0]?.average ? Number(rows[0].average) : 0;
-    const count = rows[0]?.count ? Number(rows[0].count) : 0;
+    const average = rows[0]?.average != null ? Number(rows[0].average) : 0;
+    const count = rows[0]?.count != null ? Number(rows[0].count) : 0;
 
     res.json({
       ok: true,
