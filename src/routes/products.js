@@ -6,7 +6,12 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
+const {
+  authRequired,
+  requireRole,
+  isVendor,
+  isAdmin,
+} = require("../middlewares/auth");
 
 // --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
@@ -22,7 +27,9 @@ cloudinary.config({
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
-    const folder = `products/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const folder = `products/${now.getFullYear()}/${String(
+      now.getMonth() + 1
+    ).padStart(2, "0")}`;
 
     const upload = cloudinary.uploader.upload_stream(
       {
@@ -156,6 +163,71 @@ function parseCitiesBody(body) {
   return out;
 }
 
+/** ✅ NEW (du jour): normaliser une valeur DB en array de villes */
+function normalizeCitiesValue(raw) {
+  if (raw == null || raw === "") return null;
+
+  if (Array.isArray(raw)) {
+    const out = raw
+      .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
+      .filter(Boolean);
+    return out.length ? out : null;
+  }
+
+  const s = String(raw || "").trim();
+  if (!s) return null;
+
+  if (s.startsWith("[") && s.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(s);
+      if (Array.isArray(parsed)) {
+        const out = parsed
+          .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
+          .filter(Boolean);
+        return out.length ? out : null;
+      }
+    } catch {}
+  }
+
+  if (s.includes(",")) {
+    const out = s
+      .split(",")
+      .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
+      .filter(Boolean);
+    return out.length ? out : null;
+  }
+
+  const one = normalizeVilleFilter(s) || s;
+  return one ? [one] : null;
+}
+
+/** ✅ NEW (du jour): cache du nom de colonne villes */
+let _citiesCol = null;
+let _citiesColLoaded = false;
+
+async function getCitiesColCached(pool) {
+  if (_citiesColLoaded) return _citiesCol;
+  const conn = await pool.getConnection();
+  try {
+    _citiesCol = await detectCitiesColumn(conn);
+    _citiesColLoaded = true;
+    return _citiesCol;
+  } finally {
+    conn.release();
+  }
+}
+
+/** ✅ NEW (du jour): injecter cities normalisé dans chaque row */
+function withCities(rows, citiesCol) {
+  if (!citiesCol) return rows;
+  return (rows || []).map((r) => {
+    const raw = r?.[citiesCol];
+    const cities = normalizeCitiesValue(raw);
+    if (!cities) return r;
+    return { ...r, cities };
+  });
+}
+
 /* ============================
  * Promotions
  * ============================ */
@@ -171,7 +243,9 @@ function parsePromoFields(body) {
   const eligible = parseBoolFlag(body?.promo_eligible, null);
 
   const freeDelivery =
-    body?.promo_free_delivery === undefined ? null : parseBoolFlag(body?.promo_free_delivery, 0);
+    body?.promo_free_delivery === undefined
+      ? null
+      : parseBoolFlag(body?.promo_free_delivery, 0);
 
   if (eligible === null) {
     return {
@@ -221,7 +295,9 @@ function stripDuuminiRateFromProduct(row) {
 
   const { duumini_rate, price, ...rest } = row;
 
-  let rate = computeDuuminiRateFromSubCategorySlug(row.sub_category_slug || row.sub_category);
+  let rate = computeDuuminiRateFromSubCategorySlug(
+    row.sub_category_slug || row.sub_category
+  );
   if (duumini_rate != null) {
     const r = Number(duumini_rate);
     if (Number.isFinite(r) && r >= 0 && r <= 1) rate = r;
@@ -358,6 +434,7 @@ async function listHandler(req, res, next) {
 
   const pool = getPool();
   try {
+    const citiesCol = await getCitiesColCached(pool);
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
@@ -366,7 +443,8 @@ async function listHandler(req, res, next) {
       ville,
       onlyPromos: false,
     });
-    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+
+    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
   }
@@ -386,6 +464,7 @@ async function listFoodHandler(req, res, next) {
 
   const pool = getPool();
   try {
+    const citiesCol = await getCitiesColCached(pool);
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
@@ -394,7 +473,8 @@ async function listFoodHandler(req, res, next) {
       ville,
       onlyPromos: false,
     });
-    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+
+    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
   }
@@ -414,6 +494,7 @@ async function listMarketHandler(req, res, next) {
 
   const pool = getPool();
   try {
+    const citiesCol = await getCitiesColCached(pool);
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
@@ -422,7 +503,8 @@ async function listMarketHandler(req, res, next) {
       ville,
       onlyPromos: false,
     });
-    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+
+    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     next(e);
   }
@@ -448,9 +530,15 @@ router.get("/promotions", async (req, res, next) => {
 
   const channel = String(req.query.channel || "all").toLowerCase();
   const channelNorm =
-    channel === "african-food" ? "african-food" : channel === "african-market" ? "african-market" : null;
+    channel === "african-food"
+      ? "african-food"
+      : channel === "african-market"
+      ? "african-market"
+      : null;
 
   try {
+    const citiesCol = await getCitiesColCached(pool);
+
     const { rows } = await listProducts(pool, {
       limit,
       offset: 0,
@@ -460,7 +548,7 @@ router.get("/promotions", async (req, res, next) => {
       onlyPromos: true,
     });
 
-    res.json(rows.slice(0, limit));
+    res.json(withCities(rows, citiesCol).slice(0, limit));
   } catch (e) {
     next(e);
   }
@@ -473,6 +561,8 @@ router.get("/top-ordered", async (req, res, next) => {
   const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
+    const citiesCol = await getCitiesColCached(pool);
+
     const villes = ville ? expandCasaMarr(ville) : null;
     const whereVille = villes?.length
       ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
@@ -520,7 +610,7 @@ router.get("/top-ordered", async (req, res, next) => {
       params
     );
 
-    res.json(rowsRaw.map(stripDuuminiRateFromProduct));
+    res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
   } catch (e) {
     next(e);
   }
@@ -534,6 +624,8 @@ router.get("/top-rated", async (req, res, next) => {
   const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
+    const citiesCol = await getCitiesColCached(pool);
+
     const villes = ville ? expandCasaMarr(ville) : null;
     const whereVille = villes?.length
       ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
@@ -580,7 +672,7 @@ router.get("/top-rated", async (req, res, next) => {
       params
     );
 
-    res.json(rowsRaw.map(stripDuuminiRateFromProduct));
+    res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
   } catch (e) {
     next(e);
   }
@@ -593,6 +685,8 @@ router.get("/:id", async (req, res, next) => {
 
   const pool = getPool();
   try {
+    const citiesCol = await getCitiesColCached(pool);
+
     const [rows] = await pool.query(
       `SELECT 
          p.*,
@@ -628,31 +722,8 @@ router.get("/:id", async (req, res, next) => {
       [id]
     );
 
-    let cities = undefined;
-    try {
-      const conn = await pool.getConnection();
-      try {
-        const col = await detectCitiesColumn(conn);
-        if (col) {
-          const [r2] = await conn.query(`SELECT ${col} AS cities_json FROM products WHERE id=? LIMIT 1`, [
-            id,
-          ]);
-          const raw = r2?.[0]?.cities_json;
-          if (raw != null && raw !== "") {
-            try {
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) cities = parsed;
-            } catch {
-              const s = String(raw || "");
-              if (s.includes(",")) cities = s.split(",").map((x) => x.trim());
-              else cities = [s].filter(Boolean);
-            }
-          }
-        }
-      } finally {
-        conn.release();
-      }
-    } catch {}
+    let cities = null;
+    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
 
     res.json({ ...product, images, ...(cities ? { cities } : {}) });
   } catch (e) {
@@ -691,43 +762,43 @@ router.post(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
+      // ✅ NEW (du jour): colonne cities en cache
+      const citiesCol = await getCitiesColCached(pool);
+
       let finalShopId = null;
       const role = String(req.user?.role || "").toUpperCase();
 
       if (role === "VENDEUR") {
-        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`, [
-          req.user.id,
-        ]);
+        // ✅ NEW: owner_id peut être différent selon tes schémas -> on garde l'existant ici (owner_id)
+        const [[shop]] = await conn.query(
+          `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
+          [req.user.id]
+        );
         if (!shop) {
-          conn.release();
           return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
         const sid = Number(shop_id) || 0;
         if (!sid) {
-          conn.release();
           return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
         }
         const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
         if (!shop) {
-          conn.release();
           return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         }
         finalShopId = sid;
       } else {
-        conn.release();
         return res.status(403).json({ error: "Forbidden" });
       }
 
       if (!name || price == null) {
-        conn.release();
         return res.status(400).json({ error: "name et price requis" });
       }
 
+      // ✅ NEW: validation sub_category_id avec table sub_categories + lien category_id
       const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
       if (!resolvedSub) {
-        conn.release();
         return res.status(400).json({
           error: "sub_category_id invalide (ou ne correspond pas à category_id)",
         });
@@ -740,25 +811,14 @@ router.post(
         (slug && String(slug).trim()) ||
         `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
 
-      const promoEligible = parseBoolFlag(promo_eligible, 0);
-      let promoType = null;
-      let promoValue = null;
-      let promoFree = parseBoolFlag(promo_free_delivery, 0);
+      // ✅ NEW: promo parsing centralisé
+      const promo = parsePromoFields({
+        promo_eligible,
+        promo_discount_type,
+        promo_discount_value,
+        promo_free_delivery,
+      });
 
-      if (promoEligible === 1) {
-        promoType = normalizePromoType(promo_discount_type);
-        const v = Number(promo_discount_value);
-        promoValue = Number.isFinite(v) && v > 0 ? v : null;
-        if (!promoValue) {
-          promoType = null;
-          promoValue = null;
-        }
-      } else {
-        promoType = null;
-        promoValue = null;
-      }
-
-      const citiesCol = await detectCitiesColumn(conn);
       const incomingCities = parseCitiesBody(req.body);
       const cities =
         incomingCities == null ? null : incomingCities.map(normalizeVilleFilter).filter(Boolean);
@@ -770,6 +830,9 @@ router.post(
         (shop_id, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active`;
+
+      const promoEligibleFinal =
+        promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
 
       const insertVals = [
         finalShopId,
@@ -784,10 +847,10 @@ router.post(
         stock != null ? Number(stock) : 0,
         is_featured ? 1 : 0,
 
-        promoEligible,
-        promoType,
-        promoValue,
-        promoFree,
+        promoEligibleFinal,
+        promo.promo_mode === "ON" ? promo.promo_discount_type : null,
+        promo.promo_mode === "ON" ? promo.promo_discount_value : null,
+        promo.promo_free_delivery ?? 0,
 
         duuminiRate,
         active,
@@ -810,17 +873,18 @@ router.post(
         const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
-        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
-          productId,
-          webUrl,
-          i,
-        ]);
+        await conn.query(
+          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
+          [productId, webUrl, i]
+        );
       }
 
       await conn.commit();
 
-      const channel = String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
+      const channel =
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
 
+      // ✅ garder tes notifs et ws inchangés
       try {
         const [userRows] = await pool.query(
           `SELECT DISTINCT user_id
@@ -906,6 +970,9 @@ router.put(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
+      // ✅ NEW (du jour): colonne cities en cache
+      const citiesCol = await getCitiesColCached(pool);
+
       const [[prod]] = await conn.query(
         `SELECT p.*, s.owner_id
            FROM products p
@@ -914,11 +981,9 @@ router.put(
         [id]
       );
       if (!prod) {
-        conn.release();
         return res.status(404).json({ error: "Not found" });
       }
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
-        conn.release();
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -928,7 +993,6 @@ router.put(
         if (sid > 0 && isAdmin(req.user)) {
           const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
           if (!shop) {
-            conn.release();
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
@@ -942,7 +1006,6 @@ router.put(
           category_id: category_id ?? prod.category_id,
         });
         if (!resolvedSub) {
-          conn.release();
           return res.status(400).json({
             error: "sub_category_id invalide (ou ne correspond pas à category_id)",
           });
@@ -1019,7 +1082,7 @@ router.put(
         ]
       );
 
-      const citiesCol = await detectCitiesColumn(conn);
+      // ✅ NEW: update cities avec colonne détectée (cache)
       const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
         const cities = (incomingCities || []).map(normalizeVilleFilter).filter(Boolean);
@@ -1028,7 +1091,11 @@ router.put(
 
       const files = Array.isArray(req.files) ? req.files : [];
       if (files.length) {
-        const doReplace = String(replace_images || "").toLowerCase() === "true";
+        const doReplace =
+          String(replace_images || "").toLowerCase() === "true" ||
+          String(replace_images || "").toLowerCase() === "1" ||
+          String(replace_images || "").toLowerCase() === "yes";
+
         if (doReplace) {
           await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
         }
@@ -1045,11 +1112,10 @@ router.put(
           const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
-          await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
-            id,
-            webUrl,
-            start + i,
-          ]);
+          await conn.query(
+            `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
+            [id, webUrl, start + i]
+          );
         }
       }
 
@@ -1091,11 +1157,9 @@ router.put(
         [id]
       );
       if (!prod) {
-        conn.release();
         return res.status(404).json({ error: "Not found" });
       }
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
-        conn.release();
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1162,11 +1226,9 @@ router.delete(
         [id]
       );
       if (!prod) {
-        conn.release();
         return res.status(404).json({ error: "Not found" });
       }
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
-        conn.release();
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1180,6 +1242,8 @@ router.delete(
       await conn.query(`DELETE FROM products WHERE id=?`, [id]);
       await conn.commit();
 
+      // plus de suppression locale (Cloudinary)
+      // on garde par compat si tu avais encore des vieux chemins
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
@@ -1208,7 +1272,8 @@ router.delete(
 );
 
 /* =======================================================================
- *  Route de partage avec meta OG (inchangée chez toi)
+ *  Route de partage avec meta OG
+ *  ✅ NEW: ajoute JOIN categories + retourne cities normalisés si dispo
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1227,6 +1292,8 @@ shareRouter.get("/product/:id", async (req, res, next) => {
 
   const pool = getPool();
   try {
+    const citiesCol = await getCitiesColCached(pool);
+
     const [rows] = await pool.query(
       `
       SELECT 
@@ -1237,11 +1304,19 @@ shareRouter.get("/product/:id", async (req, res, next) => {
         p.price,
         p.currency,
         p.is_active,
+
         s.name AS shop_name,
         s.city AS shop_city,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
+
+        c.name AS category_name,
+        c.slug AS category_slug,
+
         sc.slug AS sub_category_slug,
+
+        ${citiesCol ? `p.${citiesCol} AS cities_raw,` : ""}
+
         (SELECT url
            FROM product_images pi
           WHERE pi.product_id = p.id
@@ -1249,6 +1324,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
           LIMIT 1) AS cover
       FROM products p
       LEFT JOIN shops s ON s.id = p.shop_id
+      LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       WHERE p.id = ?
       `,
@@ -1286,6 +1362,10 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const priceAmount = Number(product.price || 0);
     const priceCurrency = product.currency || "MAD";
 
+    // NEW: cities jsonld (optionnel)
+    let cities = null;
+    if (citiesCol) cities = normalizeCitiesValue(product?.cities_raw);
+
     const jsonLd = {
       "@context": "https://schema.org",
       "@type": "Product",
@@ -1302,6 +1382,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
         url: finalUrl,
       },
       category: sub === "food" ? "African Food" : "African Market",
+      ...(cities?.length ? { areaServed: cities } : {}),
     };
 
     const html = `<!doctype html>
