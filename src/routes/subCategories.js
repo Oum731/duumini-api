@@ -85,19 +85,16 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   }
 
   try {
-    const [[cat]] = await pool.query(
-      `SELECT id FROM categories WHERE id=? LIMIT 1`,
-      [categoryId]
-    );
+    const [[cat]] = await pool.query(`SELECT id FROM categories WHERE id=? LIMIT 1`, [
+      categoryId,
+    ]);
     if (!cat) return res.status(400).json({ error: "category_id invalide" });
 
-    const baseSlug =
-      slug && String(slug).trim() ? String(slug).trim() : slugify(name);
+    const baseSlug = slug && String(slug).trim() ? String(slug).trim() : slugify(name);
 
     let finalSlug = baseSlug;
     let suffix = 1;
 
-    // Unicité par category_id + slug
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const [[{ count }]] = await pool.query(
@@ -143,18 +140,14 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
   const newCategoryId = category_id != null ? toPositiveInt(category_id, null) : null;
 
   try {
-    const [[row]] = await pool.query(
-      `SELECT * FROM sub_categories WHERE id=? LIMIT 1`,
-      [id]
-    );
+    const [[row]] = await pool.query(`SELECT * FROM sub_categories WHERE id=? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: "Not found" });
 
     let targetCategoryId = row.category_id;
     if (newCategoryId) {
-      const [[cat]] = await pool.query(
-        `SELECT id FROM categories WHERE id=? LIMIT 1`,
-        [newCategoryId]
-      );
+      const [[cat]] = await pool.query(`SELECT id FROM categories WHERE id=? LIMIT 1`, [
+        newCategoryId,
+      ]);
       if (!cat) return res.status(400).json({ error: "category_id invalide" });
       targetCategoryId = newCategoryId;
     }
@@ -166,12 +159,9 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
       const s = String(slug).trim();
       nextSlug = s ? s : slugify(nextName);
     } else if (name != null) {
-      // si on change le name mais pas le slug => on garde slug existant (comportement stable)
-      // si tu veux auto-regénérer, dis-moi.
       nextSlug = row.slug;
     }
 
-    // Si slug/category change -> on s'assure de l'unicité (category_id, slug)
     const needsUniqCheck =
       String(targetCategoryId) !== String(row.category_id) || nextSlug !== row.slug;
 
