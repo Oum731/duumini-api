@@ -55,7 +55,6 @@ const router = express.Router();
  * Upload (Cloudinary via mémoire)
  * ========================= */
 
-// compat: plus de local, mais on garde le dossier
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -86,26 +85,9 @@ function parseBoolFlag(value, defaultValue = null) {
   return defaultValue;
 }
 
-function normalizeVilleFilter(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-
-  const low = raw.toLowerCase();
-  if (low.startsWith("cas")) return "Casablanca";
-  if (low.startsWith("mar")) return "Marrakech";
-  return raw;
-}
-
-function expandCasaMarr(ville) {
-  const v = normalizeVilleFilter(ville);
-  if (!v) return null;
-  if (v === "Casablanca" || v === "Marrakech")
-    return ["Casablanca", "Marrakech"];
-  return [v];
-}
-
 /* ============================
- *  Villes dispo (colonne optionnelle)
+ *  Colonne cities (optionnelle)
+ *  ⚠️ On ne filtre PLUS dessus, on la renvoie juste si elle existe.
  * ============================ */
 
 async function detectCitiesColumn(conn) {
@@ -154,7 +136,7 @@ function parseCitiesBody(body) {
   const out = [];
   const seen = new Set();
   for (const it of arr) {
-    const c = normalizeVilleFilter(it) || String(it || "").trim();
+    const c = String(it || "").trim();
     if (!c) continue;
     const k = c.toLowerCase();
     if (seen.has(k)) continue;
@@ -168,9 +150,7 @@ function normalizeCitiesValue(raw) {
   if (raw == null || raw === "") return null;
 
   if (Array.isArray(raw)) {
-    const out = raw
-      .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
-      .filter(Boolean);
+    const out = raw.map((x) => String(x || "").trim()).filter(Boolean);
     return out.length ? out : null;
   }
 
@@ -181,24 +161,18 @@ function normalizeCitiesValue(raw) {
     try {
       const parsed = JSON.parse(s);
       if (Array.isArray(parsed)) {
-        const out = parsed
-          .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
-          .filter(Boolean);
+        const out = parsed.map((x) => String(x || "").trim()).filter(Boolean);
         return out.length ? out : null;
       }
     } catch {}
   }
 
   if (s.includes(",")) {
-    const out = s
-      .split(",")
-      .map((x) => normalizeVilleFilter(x) || String(x || "").trim())
-      .filter(Boolean);
+    const out = s.split(",").map((x) => x.trim()).filter(Boolean);
     return out.length ? out : null;
   }
 
-  const one = normalizeVilleFilter(s) || s;
-  return one ? [one] : null;
+  return [s];
 }
 
 let _citiesCol = null;
@@ -305,11 +279,7 @@ function stripDuuminiRateFromProduct(row) {
   const duuminiAmount = +(clientPrice * rate).toFixed(2);
   const vendorNet = +(clientPrice - duuminiAmount).toFixed(2);
 
-  return {
-    ...rest,
-    price: clientPrice,
-    vendor_price: vendorNet,
-  };
+  return { ...rest, price: clientPrice, vendor_price: vendorNet };
 }
 
 async function resolveSubCategory(conn, { sub_category_id, category_id }) {
@@ -339,12 +309,11 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
 }
 
 /**
- * Liste des produits avec filtres :
+ * Liste des produits (sans filtre ville)
  * - channel: null | 'african-food' | 'african-market'
  * - onlyActive: bool
- * - ville: Casablanca | Marrakech | autre
  * - onlyPromos: bool
- * ✅ NEW: categoryId, subCategoryId, q
+ * - categoryId, subCategoryId, q
  */
 async function listProducts(pool, opts) {
   const {
@@ -352,7 +321,6 @@ async function listProducts(pool, opts) {
     offset,
     channel,
     onlyActive,
-    ville,
     onlyPromos,
     categoryId,
     subCategoryId,
@@ -378,21 +346,18 @@ async function listProducts(pool, opts) {
     );
   }
 
-  // ✅ NEW: category filter
   const catId = Number(categoryId) || 0;
   if (catId) {
     whereParts.push("p.category_id = ?");
     params.push(catId);
   }
 
-  // ✅ NEW: subcategory filter
   const subId = Number(subCategoryId) || 0;
   if (subId) {
     whereParts.push("p.sub_category_id = ?");
     params.push(subId);
   }
 
-  // ✅ NEW: search filter
   const qq = String(q || "").trim().toLowerCase();
   if (qq) {
     whereParts.push(`
@@ -404,13 +369,6 @@ async function listProducts(pool, opts) {
     `);
     const like = `%${qq}%`;
     params.push(like, like, like);
-  }
-
-  const villes = ville ? expandCasaMarr(ville) : null;
-  if (villes && villes.length) {
-    const placeholders = villes.map(() => "?").join(",");
-    whereParts.push(`LOWER(TRIM(COALESCE(s.city,''))) IN (${placeholders})`);
-    params.push(...villes.map((x) => String(x).toLowerCase()));
   }
 
   const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
@@ -464,6 +422,7 @@ async function listProducts(pool, opts) {
 }
 
 /* ----------------------------- Listing ----------------------------- */
+
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
 
@@ -474,10 +433,6 @@ async function listHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
-
-  // ✅ NEW: filters
   const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
   const subCategoryId =
     req.query.subCategoryId ?? req.query.sub_category_id ?? null;
@@ -491,7 +446,6 @@ async function listHandler(req, res, next) {
       offset,
       channel: null,
       onlyActive,
-      ville,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -517,10 +471,6 @@ async function listFoodHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
-
-  // ✅ NEW: filters
   const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
   const subCategoryId =
     req.query.subCategoryId ?? req.query.sub_category_id ?? null;
@@ -534,7 +484,6 @@ async function listFoodHandler(req, res, next) {
       offset,
       channel: "african-food",
       onlyActive,
-      ville,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -560,10 +509,6 @@ async function listMarketHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
-
-  // ✅ NEW: filters
   const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
   const subCategoryId =
     req.query.subCategoryId ?? req.query.sub_category_id ?? null;
@@ -577,7 +522,6 @@ async function listMarketHandler(req, res, next) {
       offset,
       channel: "african-market",
       onlyActive,
-      ville,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -609,9 +553,6 @@ router.get("/promotions", async (req, res, next) => {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
-
   const channel = String(req.query.channel || "all").toLowerCase();
   const channelNorm =
     channel === "african-food"
@@ -620,7 +561,6 @@ router.get("/promotions", async (req, res, next) => {
       ? "african-market"
       : null;
 
-  // ✅ NEW: filters for promos too (optional)
   const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
   const subCategoryId =
     req.query.subCategoryId ?? req.query.sub_category_id ?? null;
@@ -634,7 +574,6 @@ router.get("/promotions", async (req, res, next) => {
       offset: 0,
       channel: channelNorm,
       onlyActive,
-      ville,
       onlyPromos: true,
       categoryId,
       subCategoryId,
@@ -651,20 +590,9 @@ router.get("/promotions", async (req, res, next) => {
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
-
-    const villes = ville ? expandCasaMarr(ville) : null;
-    const whereVille = villes?.length
-      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
-      : "";
-
-    const params = [];
-    if (villes?.length) params.push(...villes.map((x) => String(x).toLowerCase()));
-    params.push(limit);
 
     const [rowsRaw] = await pool.query(
       `
@@ -696,12 +624,11 @@ router.get("/top-ordered", async (req, res, next) => {
       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       WHERE o.status = 'DONE'
         AND p.is_active = 1
-        ${whereVille}
       GROUP BY p.id
       ORDER BY total_qty DESC
       LIMIT ?
       `,
-      params
+      [limit]
     );
 
     res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
@@ -715,20 +642,9 @@ router.get("/top-rated", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
   const minCount = toPositiveInt(req.query.minCount, 2);
-  const ville =
-    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
-
-    const villes = ville ? expandCasaMarr(ville) : null;
-    const whereVille = villes?.length
-      ? `AND LOWER(TRIM(COALESCE(s.city,''))) IN (${villes.map(() => "?").join(",")})`
-      : "";
-
-    const params = [minCount];
-    if (villes?.length) params.push(...villes.map((x) => String(x).toLowerCase()));
-    params.push(limit);
 
     const [rowsRaw] = await pool.query(
       `
@@ -760,11 +676,10 @@ router.get("/top-rated", async (req, res, next) => {
       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       GROUP BY p.id
       HAVING rating_count >= ?
-      ${whereVille}
       ORDER BY avg_rating DESC, rating_count DESC
       LIMIT ?
       `,
-      params
+      [minCount, limit]
     );
 
     res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
@@ -921,10 +836,7 @@ router.post(
       });
 
       const incomingCities = parseCitiesBody(req.body);
-      const cities =
-        incomingCities == null
-          ? null
-          : incomingCities.map(normalizeVilleFilter).filter(Boolean);
+      const cities = incomingCities == null ? null : incomingCities;
       const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       await conn.beginTransaction();
@@ -1017,10 +929,7 @@ router.post(
           }
         }
       } catch (e) {
-        console.error(
-          "[products] Failed to enqueue PRODUCT_CREATED notifications",
-          e
-        );
+        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
       }
 
       try {
@@ -1107,7 +1016,9 @@ router.put(
             [sid]
           );
           if (!shop) {
-            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+            return res
+              .status(400)
+              .json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
         }
@@ -1121,7 +1032,8 @@ router.put(
         });
         if (!resolvedSub) {
           return res.status(400).json({
-            error: "sub_category_id invalide (ou ne correspond pas à category_id)",
+            error:
+              "sub_category_id invalide (ou ne correspond pas à category_id)",
           });
         }
       } else {
@@ -1129,7 +1041,8 @@ router.put(
       }
 
       let duuminiRate = null;
-      if (resolvedSub) duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
+      if (resolvedSub)
+        duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
 
       const active = parseBoolFlag(is_active, null);
 
@@ -1198,7 +1111,7 @@ router.put(
 
       const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
-        const cities = (incomingCities || []).map(normalizeVilleFilter).filter(Boolean);
+        const cities = (incomingCities || []).map((x) => String(x || "").trim()).filter(Boolean);
         await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
           JSON.stringify(cities),
           id,
@@ -1215,17 +1128,22 @@ router.put(
         if (doReplace) {
           await conn.query(`DELETE FROM product_images WHERE product_id=?`, [id]);
         }
+
         const [[{ maxOrder }]] = await conn.query(
           `SELECT COALESCE(MAX(sort_order), -1) AS maxOrder
              FROM product_images
             WHERE product_id=?`,
           [id]
         );
+
         let start = (maxOrder ?? -1) + 1;
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+          const up = await uploadBufferToCloudinary(
+            f.buffer,
+            f.originalname || undefined
+          );
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -1298,7 +1216,10 @@ router.put(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -1359,7 +1280,8 @@ router.delete(
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
-        const abs = path.join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
+        const abs = path
+          .join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
         fs.promises.unlink(abs).catch(() => {});
       }
 
@@ -1446,7 +1368,9 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     if (!product || !product.is_active) return res.status(404).send("Not found");
 
     const baseWeb =
-      env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com";
+      env.FRONT_WEB_BASE_URL ||
+      process.env.FRONT_WEB_BASE_URL ||
+      "https://www.duumini.com";
 
     const slugOrId = product.slug || product.id;
     const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
