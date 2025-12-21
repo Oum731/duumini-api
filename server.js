@@ -33,6 +33,8 @@ const productRatingsRouter = require("./src/routes/productRatings");
 const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 
+// ✅ NEW: locations routes (villes/communes/quartiers suggestions)
+const locations = require("./src/routes/locations");
 
 // ✅ AI Ads routes
 const metaCampaignRoutes = require("./src/routes/meta_campaign");
@@ -181,7 +183,36 @@ app.get("/api/health", (_req, res) =>
  * ========================= */
 app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
 app.head("/", (_req, res) => res.status(200).end());
+
+/* =========================
+ * API routes
+ * ========================= */
+app.use("/api/auth", auth);
+app.use("/api/auth", otpRoutes);
+
+app.use("/api/user", users);
+
+app.use("/api/shops", shops);
+app.use("/api/categories", categories);
+app.use("/api/shop-categories", shopCategories);
+
 app.use("/api/sub-categories", subCategories);
+
+app.use("/api/products", products);
+app.use("/api/orders", orders);
+
+app.use("/api/uploads", uploads);
+app.use("/api/devices", devices);
+app.use("/api/events", events);
+app.use("/api/products", productRatingsRouter);
+
+/* ✅ NEW: locations API (liste + ajout auto ville/commune/quartier) */
+app.use("/api/locations", locations);
+
+// ✅ Route de partage avec meta OG
+if (products.shareRouter) {
+  app.use("/share", products.shareRouter);
+}
 
 /* =========================
  * ✅ Admin env-check (optionnel)
@@ -207,28 +238,6 @@ if (authRequired && isAdmin) {
     });
   });
 }
-
-/* =========================
- * API routes
- * ========================= */
-app.use("/api/auth", auth);
-app.use("/api/auth", otpRoutes);
-app.use("/api/user", users);
-app.use("/api/shops", shops);
-app.use("/api/categories", categories);
-app.use("/api/shop-categories", shopCategories);
-app.use("/api/products", products);
-app.use("/api/orders", orders);
-
-// ✅ Route de partage avec meta OG
-if (products.shareRouter) {
-  app.use("/share", products.shareRouter);
-}
-
-app.use("/api/uploads", uploads);
-app.use("/api/devices", devices);
-app.use("/api/events", events);
-app.use("/api/products", productRatingsRouter);
 
 /* =========================
  * ✅ AI (page copy + agent)
@@ -258,6 +267,7 @@ app.use(errorHandler);
 const server = http.createServer(app);
 const { attachSocket } = require("./src/ws");
 const io = attachSocket(server);
+
 const { startNotificationWorker } = require("./src/workers/notificationWorker");
 startNotificationWorker(io);
 
