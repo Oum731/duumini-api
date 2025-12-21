@@ -6,12 +6,7 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const {
-  authRequired,
-  requireRole,
-  isVendor,
-  isAdmin,
-} = require("../middlewares/auth");
+const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
 
 // --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
@@ -27,9 +22,7 @@ cloudinary.config({
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
-    const folder = `products/${now.getFullYear()}/${String(
-      now.getMonth() + 1
-    ).padStart(2, "0")}`;
+    const folder = `products/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
 
     const upload = cloudinary.uploader.upload_stream(
       {
@@ -104,6 +97,20 @@ async function detectCitiesColumn(conn) {
   return candidates.find((c) => found.has(c)) || null;
 }
 
+function allowTrimList(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const it of arr || []) {
+    const c = String(it || "").trim();
+    if (!c) continue;
+    const k = c.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+  }
+  return out;
+}
+
 function parseCitiesBody(body) {
   const raw =
     body?.cities ??
@@ -133,16 +140,7 @@ function parseCitiesBody(body) {
     }
   }
 
-  const out = [];
-  const seen = new Set();
-  for (const it of arr) {
-    const c = String(it || "").trim();
-    if (!c) continue;
-    const k = c.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(c);
-  }
+  const out = allowTrimList(arr);
   return out;
 }
 
@@ -150,7 +148,7 @@ function normalizeCitiesValue(raw) {
   if (raw == null || raw === "") return null;
 
   if (Array.isArray(raw)) {
-    const out = raw.map((x) => String(x || "").trim()).filter(Boolean);
+    const out = allowTrimList(raw);
     return out.length ? out : null;
   }
 
@@ -161,14 +159,14 @@ function normalizeCitiesValue(raw) {
     try {
       const parsed = JSON.parse(s);
       if (Array.isArray(parsed)) {
-        const out = parsed.map((x) => String(x || "").trim()).filter(Boolean);
+        const out = allowTrimList(parsed);
         return out.length ? out : null;
       }
     } catch {}
   }
 
   if (s.includes(",")) {
-    const out = s.split(",").map((x) => x.trim()).filter(Boolean);
+    const out = allowTrimList(s.split(",").map((x) => x.trim()));
     return out.length ? out : null;
   }
 
@@ -265,11 +263,12 @@ function computeDuuminiRateFromSubCategorySlug(subSlug) {
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
 
+  // on ne renvoie pas duumini_rate au front; on calcule vendor_price
   const { duumini_rate, price, ...rest } = row;
 
-  let rate = computeDuuminiRateFromSubCategorySlug(
-    row.sub_category_slug || row.sub_category
-  );
+  // ✅ ne dépend plus d'un champ legacy sub_category
+  let rate = computeDuuminiRateFromSubCategorySlug(row.sub_category_slug);
+
   if (duumini_rate != null) {
     const r = Number(duumini_rate);
     if (Number.isFinite(r) && r >= 0 && r <= 1) rate = r;
@@ -313,7 +312,7 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
  * - channel: null | 'african-food' | 'african-market'
  * - onlyActive: bool
  * - onlyPromos: bool
- * - categoryId, subCategoryId, q
+ * - categoryId, subCategoryId, shopId, q
  */
 async function listProducts(pool, opts) {
   const {
@@ -324,26 +323,26 @@ async function listProducts(pool, opts) {
     onlyPromos,
     categoryId,
     subCategoryId,
+    shopId,
     q,
   } = opts || {};
 
   const whereParts = [];
   const params = [];
 
-  if (channel === "african-food")
+  if (channel === "african-food") {
     whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
-  else if (channel === "african-market")
-    whereParts.push(
-      `(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`
-    );
-  else whereParts.push("1=1");
+  } else if (channel === "african-market") {
+    whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+  } else {
+    whereParts.push("1=1");
+  }
 
+  // ✅ IMPORTANT: un produit désactivé ne doit jamais s'afficher quand onlyActive = true
   if (onlyActive) whereParts.push("p.is_active = 1");
 
   if (onlyPromos) {
-    whereParts.push(
-      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
-    );
+    whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
   }
 
   const catId = Number(categoryId) || 0;
@@ -356,6 +355,13 @@ async function listProducts(pool, opts) {
   if (subId) {
     whereParts.push("p.sub_category_id = ?");
     params.push(subId);
+  }
+
+  // ✅ NEW: filtre boutique (tri/filtre par boutique)
+  const shId = Number(shopId) || 0;
+  if (shId) {
+    whereParts.push("p.shop_id = ?");
+    params.push(shId);
   }
 
   const qq = String(q || "").trim().toLowerCase();
@@ -387,7 +393,7 @@ async function listProducts(pool, opts) {
 
   const [rowsRaw] = await pool.query(
     `
-    SELECT 
+    SELECT
       p.*,
       s.name AS shop_name,
       s.logo AS shop_logo,
@@ -423,20 +429,30 @@ async function listProducts(pool, opts) {
 
 /* ----------------------------- Listing ----------------------------- */
 
-async function listHandler(req, res, next) {
-  const { page, pageSize, offset, limit } = getPagination(req);
-
+function parseOnlyActive(req) {
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  const onlyActive =
+  return (
     onlyActiveRaw === "1" ||
     onlyActiveRaw === "true" ||
     onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on";
+    onlyActiveRaw === "on"
+  );
+}
 
-  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
-  const subCategoryId =
-    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
-  const q = req.query.q ?? "";
+function pickFilters(req) {
+  return {
+    categoryId: req.query.categoryId ?? req.query.category_id ?? null,
+    subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
+    // ✅ NEW: accepte shopId / shop_id
+    shopId: req.query.shopId ?? req.query.shop_id ?? null,
+    q: req.query.q ?? "",
+  };
+}
+
+async function listHandler(req, res, next) {
+  const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActive = parseOnlyActive(req);
+  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -449,6 +465,7 @@ async function listHandler(req, res, next) {
       onlyPromos: false,
       categoryId,
       subCategoryId,
+      shopId,
       q,
     });
 
@@ -463,18 +480,8 @@ async function listHandler(req, res, next) {
 
 async function listFoodHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
-
-  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  const onlyActive =
-    onlyActiveRaw === "1" ||
-    onlyActiveRaw === "true" ||
-    onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on";
-
-  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
-  const subCategoryId =
-    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
-  const q = req.query.q ?? "";
+  const onlyActive = parseOnlyActive(req);
+  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -487,6 +494,7 @@ async function listFoodHandler(req, res, next) {
       onlyPromos: false,
       categoryId,
       subCategoryId,
+      shopId,
       q,
     });
 
@@ -501,18 +509,8 @@ async function listFoodHandler(req, res, next) {
 
 async function listMarketHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
-
-  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  const onlyActive =
-    onlyActiveRaw === "1" ||
-    onlyActiveRaw === "true" ||
-    onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on";
-
-  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
-  const subCategoryId =
-    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
-  const q = req.query.q ?? "";
+  const onlyActive = parseOnlyActive(req);
+  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -525,6 +523,7 @@ async function listMarketHandler(req, res, next) {
       onlyPromos: false,
       categoryId,
       subCategoryId,
+      shopId,
       q,
     });
 
@@ -546,12 +545,7 @@ router.get("/promotions", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
 
-  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  const onlyActive =
-    onlyActiveRaw === "1" ||
-    onlyActiveRaw === "true" ||
-    onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on";
+  const onlyActive = parseOnlyActive(req);
 
   const channel = String(req.query.channel || "all").toLowerCase();
   const channelNorm =
@@ -561,10 +555,7 @@ router.get("/promotions", async (req, res, next) => {
       ? "african-market"
       : null;
 
-  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
-  const subCategoryId =
-    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
-  const q = req.query.q ?? "";
+  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -573,10 +564,11 @@ router.get("/promotions", async (req, res, next) => {
       limit,
       offset: 0,
       channel: channelNorm,
-      onlyActive,
+      onlyActive, // ✅ inactifs exclus si onlyActive=1
       onlyPromos: true,
       categoryId,
       subCategoryId,
+      shopId, // ✅ NEW: promos par boutique
       q,
     });
 
@@ -596,7 +588,7 @@ router.get("/top-ordered", async (req, res, next) => {
 
     const [rowsRaw] = await pool.query(
       `
-      SELECT 
+      SELECT
         p.*,
         s.name AS shop_name,
         s.logo AS shop_logo,
@@ -648,7 +640,7 @@ router.get("/top-rated", async (req, res, next) => {
 
     const [rowsRaw] = await pool.query(
       `
-      SELECT 
+      SELECT
         p.*,
         s.name AS shop_name,
         s.logo AS shop_logo,
@@ -667,8 +659,8 @@ router.get("/top-rated", async (req, res, next) => {
           WHERE pi.product_id = p.id
           ORDER BY sort_order ASC, id ASC
           LIMIT 1) AS cover,
-        AVG(r.rating)     AS avg_rating,
-        COUNT(r.id)       AS rating_count
+        AVG(r.rating) AS avg_rating,
+        COUNT(r.id)   AS rating_count
       FROM product_ratings r
       JOIN products p ON p.id = r.product_id AND p.is_active = 1
       LEFT JOIN shops s ON s.id = p.shop_id
@@ -698,7 +690,7 @@ router.get("/:id", async (req, res, next) => {
     const citiesCol = await getCitiesColCached(pool);
 
     const [rows] = await pool.query(
-      `SELECT 
+      `SELECT
          p.*,
          s.name AS shop_name,
          s.logo AS shop_logo,
@@ -783,22 +775,15 @@ router.post(
           [req.user.id]
         );
         if (!shop) {
-          return res
-            .status(400)
-            .json({ error: "Aucune boutique associée à ce vendeur" });
+          return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
         const sid = Number(shop_id) || 0;
         if (!sid) {
-          return res
-            .status(400)
-            .json({ error: "shop_id requis pour la création par un admin" });
+          return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
         }
-        const [[shop]] = await conn.query(
-          `SELECT id FROM shops WHERE id=? LIMIT 1`,
-          [sid]
-        );
+        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
         if (!shop) {
           return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         }
@@ -811,10 +796,7 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      const resolvedSub = await resolveSubCategory(conn, {
-        sub_category_id,
-        category_id,
-      });
+      const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
       if (!resolvedSub) {
         return res.status(400).json({
           error: "sub_category_id invalide (ou ne correspond pas à category_id)",
@@ -846,8 +828,7 @@ router.post(
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active`;
 
-      const promoEligibleFinal =
-        promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
+      const promoEligibleFinal = promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
 
       const insertVals = [
         finalShopId,
@@ -885,10 +866,7 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -900,15 +878,11 @@ router.post(
       await conn.commit();
 
       const channel =
-        String(resolvedSub.slug || "").toLowerCase() === "food"
-          ? "african-food"
-          : "african-market";
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
 
       try {
         const [userRows] = await pool.query(
-          `SELECT DISTINCT user_id
-             FROM user_devices
-            WHERE provider = 'pushy'`
+          `SELECT DISTINCT user_id FROM user_devices WHERE provider = 'pushy'`
         );
 
         if (userRows.length) {
@@ -936,9 +910,7 @@ router.post(
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
         if (io && emitToShops && finalShopId != null) {
-          emitToShops([finalShopId], "product:created", {
-            product_id: productId,
-          });
+          emitToShops([finalShopId], "product:created", { product_id: productId });
         }
       } catch {}
 
@@ -1000,9 +972,8 @@ router.put(
           WHERE p.id=?`,
         [id]
       );
-      if (!prod) {
-        return res.status(404).json({ error: "Not found" });
-      }
+      if (!prod) return res.status(404).json({ error: "Not found" });
+
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
         return res.status(403).json({ error: "Forbidden" });
       }
@@ -1011,15 +982,8 @@ router.put(
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
         if (sid > 0 && isAdmin(req.user)) {
-          const [[shop]] = await conn.query(
-            `SELECT id FROM shops WHERE id=? LIMIT 1`,
-            [sid]
-          );
-          if (!shop) {
-            return res
-              .status(400)
-              .json({ error: "Boutique invalide (shop_id)" });
-          }
+          const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
+          if (!shop) return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           newShopIdParam = sid;
         }
       }
@@ -1032,17 +996,13 @@ router.put(
         });
         if (!resolvedSub) {
           return res.status(400).json({
-            error:
-              "sub_category_id invalide (ou ne correspond pas à category_id)",
+            error: "sub_category_id invalide (ou ne correspond pas à category_id)",
           });
         }
-      } else {
-        resolvedSub = null;
       }
 
       let duuminiRate = null;
-      if (resolvedSub)
-        duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
+      if (resolvedSub) duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
 
       const active = parseBoolFlag(is_active, null);
 
@@ -1062,18 +1022,18 @@ router.put(
            stock               = COALESCE(?, stock),
            is_featured         = COALESCE(?, is_featured),
 
-           promo_eligible      = COALESCE(?, promo_eligible),
-           promo_discount_type = CASE
-                                  WHEN ? IS NULL THEN promo_discount_type
-                                  WHEN ? = 1 THEN ?
-                                  ELSE NULL
-                                END,
+           promo_eligible       = COALESCE(?, promo_eligible),
+           promo_discount_type  = CASE
+                                   WHEN ? IS NULL THEN promo_discount_type
+                                   WHEN ? = 1 THEN ?
+                                   ELSE NULL
+                                 END,
            promo_discount_value = CASE
-                                  WHEN ? IS NULL THEN promo_discount_value
-                                  WHEN ? = 1 THEN ?
-                                  ELSE NULL
-                                END,
-           promo_free_delivery = COALESCE(?, promo_free_delivery),
+                                   WHEN ? IS NULL THEN promo_discount_value
+                                   WHEN ? = 1 THEN ?
+                                   ELSE NULL
+                                 END,
+           promo_free_delivery  = COALESCE(?, promo_free_delivery),
 
            sub_category_id     = COALESCE(?, sub_category_id),
            duumini_rate        = COALESCE(?, duumini_rate),
@@ -1111,7 +1071,7 @@ router.put(
 
       const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
-        const cities = (incomingCities || []).map((x) => String(x || "").trim()).filter(Boolean);
+        const cities = allowTrimList(incomingCities || []);
         await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
           JSON.stringify(cities),
           id,
@@ -1140,10 +1100,7 @@ router.put(
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(
-            f.buffer,
-            f.originalname || undefined
-          );
+          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -1190,9 +1147,8 @@ router.put(
           WHERE p.id=?`,
         [id]
       );
-      if (!prod) {
-        return res.status(404).json({ error: "Not found" });
-      }
+      if (!prod) return res.status(404).json({ error: "Not found" });
+
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
         return res.status(403).json({ error: "Forbidden" });
       }
@@ -1216,10 +1172,7 @@ router.put(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -1260,9 +1213,8 @@ router.delete(
           WHERE p.id=?`,
         [id]
       );
-      if (!prod) {
-        return res.status(404).json({ error: "Not found" });
-      }
+      if (!prod) return res.status(404).json({ error: "Not found" });
+
       if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
         return res.status(403).json({ error: "Forbidden" });
       }
@@ -1280,8 +1232,7 @@ router.delete(
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
-        const abs = path
-          .join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
+        const abs = path.join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
         fs.promises.unlink(abs).catch(() => {});
       }
 
@@ -1306,7 +1257,7 @@ router.delete(
 );
 
 /* =======================================================================
- *  Route de partage avec meta OG (inchangée)
+ *  Route de partage avec meta OG
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1329,7 +1280,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
 
     const [rows] = await pool.query(
       `
-      SELECT 
+      SELECT
         p.id,
         p.slug,
         p.name,
@@ -1368,9 +1319,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     if (!product || !product.is_active) return res.status(404).send("Not found");
 
     const baseWeb =
-      env.FRONT_WEB_BASE_URL ||
-      process.env.FRONT_WEB_BASE_URL ||
-      "https://www.duumini.com";
+      env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com";
 
     const slugOrId = product.slug || product.id;
     const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
@@ -1389,7 +1338,6 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const ogDescription = escapeHtml(shortDesc);
 
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
-
     if (ogImage && !/^https?:\/\//i.test(ogImage)) {
       if (ogImage.startsWith("/")) ogImage = `${baseWeb}${ogImage}`;
       else ogImage = `${baseWeb}/${ogImage}`;
