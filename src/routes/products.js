@@ -99,7 +99,8 @@ function normalizeVilleFilter(value) {
 function expandCasaMarr(ville) {
   const v = normalizeVilleFilter(ville);
   if (!v) return null;
-  if (v === "Casablanca" || v === "Marrakech") return ["Casablanca", "Marrakech"];
+  if (v === "Casablanca" || v === "Marrakech")
+    return ["Casablanca", "Marrakech"];
   return [v];
 }
 
@@ -163,7 +164,6 @@ function parseCitiesBody(body) {
   return out;
 }
 
-/** ✅ NEW (du jour): normaliser une valeur DB en array de villes */
 function normalizeCitiesValue(raw) {
   if (raw == null || raw === "") return null;
 
@@ -201,7 +201,6 @@ function normalizeCitiesValue(raw) {
   return one ? [one] : null;
 }
 
-/** ✅ NEW (du jour): cache du nom de colonne villes */
 let _citiesCol = null;
 let _citiesColLoaded = false;
 
@@ -217,7 +216,6 @@ async function getCitiesColCached(pool) {
   }
 }
 
-/** ✅ NEW (du jour): injecter cities normalisé dans chaque row */
 function withCities(rows, citiesCol) {
   if (!citiesCol) return rows;
   return (rows || []).map((r) => {
@@ -346,27 +344,73 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
  * - onlyActive: bool
  * - ville: Casablanca | Marrakech | autre
  * - onlyPromos: bool
+ * ✅ NEW: categoryId, subCategoryId, q
  */
-async function listProducts(pool, { limit, offset, channel, onlyActive, ville, onlyPromos }) {
+async function listProducts(pool, opts) {
+  const {
+    limit,
+    offset,
+    channel,
+    onlyActive,
+    ville,
+    onlyPromos,
+    categoryId,
+    subCategoryId,
+    q,
+  } = opts || {};
+
   const whereParts = [];
   const params = [];
 
-  if (channel === "african-food") whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
+  if (channel === "african-food")
+    whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
   else if (channel === "african-market")
-    whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+    whereParts.push(
+      `(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`
+    );
   else whereParts.push("1=1");
 
   if (onlyActive) whereParts.push("p.is_active = 1");
 
   if (onlyPromos) {
-    whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
+    whereParts.push(
+      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
+    );
+  }
+
+  // ✅ NEW: category filter
+  const catId = Number(categoryId) || 0;
+  if (catId) {
+    whereParts.push("p.category_id = ?");
+    params.push(catId);
+  }
+
+  // ✅ NEW: subcategory filter
+  const subId = Number(subCategoryId) || 0;
+  if (subId) {
+    whereParts.push("p.sub_category_id = ?");
+    params.push(subId);
+  }
+
+  // ✅ NEW: search filter
+  const qq = String(q || "").trim().toLowerCase();
+  if (qq) {
+    whereParts.push(`
+      (
+        LOWER(p.name) LIKE ?
+        OR LOWER(COALESCE(p.description,'')) LIKE ?
+        OR LOWER(COALESCE(s.name,'')) LIKE ?
+      )
+    `);
+    const like = `%${qq}%`;
+    params.push(like, like, like);
   }
 
   const villes = ville ? expandCasaMarr(ville) : null;
   if (villes && villes.length) {
     const placeholders = villes.map(() => "?").join(",");
     whereParts.push(`LOWER(TRIM(COALESCE(s.city,''))) IN (${placeholders})`);
-    params.push(...villes);
+    params.push(...villes.map((x) => String(x).toLowerCase()));
   }
 
   const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
@@ -430,7 +474,14 @@ async function listHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+
+  // ✅ NEW: filters
+  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
+  const subCategoryId =
+    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
+  const q = req.query.q ?? "";
 
   const pool = getPool();
   try {
@@ -442,9 +493,15 @@ async function listHandler(req, res, next) {
       onlyActive,
       ville,
       onlyPromos: false,
+      categoryId,
+      subCategoryId,
+      q,
     });
 
-    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
+    res.json({
+      items: withCities(rows, citiesCol),
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
   } catch (e) {
     next(e);
   }
@@ -460,7 +517,14 @@ async function listFoodHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+
+  // ✅ NEW: filters
+  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
+  const subCategoryId =
+    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
+  const q = req.query.q ?? "";
 
   const pool = getPool();
   try {
@@ -472,9 +536,15 @@ async function listFoodHandler(req, res, next) {
       onlyActive,
       ville,
       onlyPromos: false,
+      categoryId,
+      subCategoryId,
+      q,
     });
 
-    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
+    res.json({
+      items: withCities(rows, citiesCol),
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
   } catch (e) {
     next(e);
   }
@@ -490,7 +560,14 @@ async function listMarketHandler(req, res, next) {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+
+  // ✅ NEW: filters
+  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
+  const subCategoryId =
+    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
+  const q = req.query.q ?? "";
 
   const pool = getPool();
   try {
@@ -502,9 +579,15 @@ async function listMarketHandler(req, res, next) {
       onlyActive,
       ville,
       onlyPromos: false,
+      categoryId,
+      subCategoryId,
+      q,
     });
 
-    res.json({ items: withCities(rows, citiesCol), pageInfo: buildPageInfo(total, page, pageSize) });
+    res.json({
+      items: withCities(rows, citiesCol),
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
   } catch (e) {
     next(e);
   }
@@ -526,7 +609,8 @@ router.get("/promotions", async (req, res, next) => {
     onlyActiveRaw === "yes" ||
     onlyActiveRaw === "on";
 
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   const channel = String(req.query.channel || "all").toLowerCase();
   const channelNorm =
@@ -535,6 +619,12 @@ router.get("/promotions", async (req, res, next) => {
       : channel === "african-market"
       ? "african-market"
       : null;
+
+  // ✅ NEW: filters for promos too (optional)
+  const categoryId = req.query.categoryId ?? req.query.category_id ?? null;
+  const subCategoryId =
+    req.query.subCategoryId ?? req.query.sub_category_id ?? null;
+  const q = req.query.q ?? "";
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -546,6 +636,9 @@ router.get("/promotions", async (req, res, next) => {
       onlyActive,
       ville,
       onlyPromos: true,
+      categoryId,
+      subCategoryId,
+      q,
     });
 
     res.json(withCities(rows, citiesCol).slice(0, limit));
@@ -558,7 +651,8 @@ router.get("/promotions", async (req, res, next) => {
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -569,7 +663,7 @@ router.get("/top-ordered", async (req, res, next) => {
       : "";
 
     const params = [];
-    if (villes?.length) params.push(...villes);
+    if (villes?.length) params.push(...villes.map((x) => String(x).toLowerCase()));
     params.push(limit);
 
     const [rowsRaw] = await pool.query(
@@ -621,7 +715,8 @@ router.get("/top-rated", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
   const minCount = toPositiveInt(req.query.minCount, 2);
-  const ville = normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
+  const ville =
+    normalizeVilleFilter(req.query.ville) || normalizeVilleFilter(req.query.city);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -632,7 +727,7 @@ router.get("/top-rated", async (req, res, next) => {
       : "";
 
     const params = [minCount];
-    if (villes?.length) params.push(...villes);
+    if (villes?.length) params.push(...villes.map((x) => String(x).toLowerCase()));
     params.push(limit);
 
     const [rowsRaw] = await pool.query(
@@ -762,28 +857,33 @@ router.post(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
-      // ✅ NEW (du jour): colonne cities en cache
       const citiesCol = await getCitiesColCached(pool);
 
       let finalShopId = null;
       const role = String(req.user?.role || "").toUpperCase();
 
       if (role === "VENDEUR") {
-        // ✅ NEW: owner_id peut être différent selon tes schémas -> on garde l'existant ici (owner_id)
         const [[shop]] = await conn.query(
           `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
           [req.user.id]
         );
         if (!shop) {
-          return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
+          return res
+            .status(400)
+            .json({ error: "Aucune boutique associée à ce vendeur" });
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
         const sid = Number(shop_id) || 0;
         if (!sid) {
-          return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
+          return res
+            .status(400)
+            .json({ error: "shop_id requis pour la création par un admin" });
         }
-        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
+        const [[shop]] = await conn.query(
+          `SELECT id FROM shops WHERE id=? LIMIT 1`,
+          [sid]
+        );
         if (!shop) {
           return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         }
@@ -796,8 +896,10 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      // ✅ NEW: validation sub_category_id avec table sub_categories + lien category_id
-      const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
+      const resolvedSub = await resolveSubCategory(conn, {
+        sub_category_id,
+        category_id,
+      });
       if (!resolvedSub) {
         return res.status(400).json({
           error: "sub_category_id invalide (ou ne correspond pas à category_id)",
@@ -811,7 +913,6 @@ router.post(
         (slug && String(slug).trim()) ||
         `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
 
-      // ✅ NEW: promo parsing centralisé
       const promo = parsePromoFields({
         promo_eligible,
         promo_discount_type,
@@ -821,7 +922,9 @@ router.post(
 
       const incomingCities = parseCitiesBody(req.body);
       const cities =
-        incomingCities == null ? null : incomingCities.map(normalizeVilleFilter).filter(Boolean);
+        incomingCities == null
+          ? null
+          : incomingCities.map(normalizeVilleFilter).filter(Boolean);
       const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       await conn.beginTransaction();
@@ -870,7 +973,10 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
+        const up = await uploadBufferToCloudinary(
+          f.buffer,
+          f.originalname || undefined
+        );
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -882,9 +988,10 @@ router.post(
       await conn.commit();
 
       const channel =
-        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
+        String(resolvedSub.slug || "").toLowerCase() === "food"
+          ? "african-food"
+          : "african-market";
 
-      // ✅ garder tes notifs et ws inchangés
       try {
         const [userRows] = await pool.query(
           `SELECT DISTINCT user_id
@@ -910,14 +1017,19 @@ router.post(
           }
         }
       } catch (e) {
-        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
+        console.error(
+          "[products] Failed to enqueue PRODUCT_CREATED notifications",
+          e
+        );
       }
 
       try {
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
         if (io && emitToShops && finalShopId != null) {
-          emitToShops([finalShopId], "product:created", { product_id: productId });
+          emitToShops([finalShopId], "product:created", {
+            product_id: productId,
+          });
         }
       } catch {}
 
@@ -970,7 +1082,6 @@ router.put(
     const pool = getPool();
     const conn = await pool.getConnection();
     try {
-      // ✅ NEW (du jour): colonne cities en cache
       const citiesCol = await getCitiesColCached(pool);
 
       const [[prod]] = await conn.query(
@@ -991,7 +1102,10 @@ router.put(
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
         if (sid > 0 && isAdmin(req.user)) {
-          const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
+          const [[shop]] = await conn.query(
+            `SELECT id FROM shops WHERE id=? LIMIT 1`,
+            [sid]
+          );
           if (!shop) {
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
@@ -1082,11 +1196,13 @@ router.put(
         ]
       );
 
-      // ✅ NEW: update cities avec colonne détectée (cache)
       const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
         const cities = (incomingCities || []).map(normalizeVilleFilter).filter(Boolean);
-        await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [JSON.stringify(cities), id]);
+        await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
+          JSON.stringify(cities),
+          id,
+        ]);
       }
 
       const files = Array.isArray(req.files) ? req.files : [];
@@ -1173,11 +1289,10 @@ router.put(
       for (const url of bodyImages) {
         const u = String(url || "").trim();
         if (!u) continue;
-        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
-          id,
-          u,
-          order++,
-        ]);
+        await conn.query(
+          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
+          [id, u, order++]
+        );
       }
 
       for (let i = 0; i < files.length; i++) {
@@ -1186,11 +1301,10 @@ router.put(
         const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
-        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
-          id,
-          webUrl,
-          order++,
-        ]);
+        await conn.query(
+          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
+          [id, webUrl, order++]
+        );
       }
 
       await conn.commit();
@@ -1242,8 +1356,6 @@ router.delete(
       await conn.query(`DELETE FROM products WHERE id=?`, [id]);
       await conn.commit();
 
-      // plus de suppression locale (Cloudinary)
-      // on garde par compat si tu avais encore des vieux chemins
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
@@ -1272,8 +1384,7 @@ router.delete(
 );
 
 /* =======================================================================
- *  Route de partage avec meta OG
- *  ✅ NEW: ajoute JOIN categories + retourne cities normalisés si dispo
+ *  Route de partage avec meta OG (inchangée)
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1347,8 +1458,10 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       `${product.name} — Duumini${product.shop_name ? ` (${product.shop_name})` : ""}`
     );
 
-    const descriptionRaw = product.description || "Découvrez ce produit africain disponible sur Duumini.";
-    const shortDesc = descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
+    const descriptionRaw =
+      product.description || "Découvrez ce produit africain disponible sur Duumini.";
+    const shortDesc =
+      descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
     const ogDescription = escapeHtml(shortDesc);
 
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
@@ -1362,7 +1475,6 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const priceAmount = Number(product.price || 0);
     const priceCurrency = product.currency || "MAD";
 
-    // NEW: cities jsonld (optionnel)
     let cities = null;
     if (citiesCol) cities = normalizeCitiesValue(product?.cities_raw);
 
