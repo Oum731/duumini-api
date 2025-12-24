@@ -78,6 +78,23 @@ function parseBoolFlag(value, defaultValue = null) {
   return defaultValue;
 }
 
+function safeJsonParse(x, fallback = null) {
+  if (x == null) return fallback;
+  if (typeof x === "object") return x;
+  try {
+    return JSON.parse(String(x));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeVertical(value, fallback = null) {
+  if (value == null) return fallback;
+  const v = String(value || "").trim().toUpperCase();
+  if (v === "FOOD" || v === "MARKET" || v === "FASHION") return v;
+  return fallback;
+}
+
 /* ============================
  *  Colonne cities (optionnelle)
  *  ⚠️ On ne filtre PLUS dessus, on la renvoie juste si elle existe.
@@ -112,13 +129,7 @@ function allowTrimList(arr) {
 }
 
 function parseCitiesBody(body) {
-  const raw =
-    body?.cities ??
-    body?.["cities[]"] ??
-    body?.villes ??
-    body?.["villes[]"] ??
-    null;
-
+  const raw = body?.cities ?? body?.["cities[]"] ?? body?.villes ?? body?.["villes[]"] ?? null;
   if (raw == null) return null;
 
   let arr = [];
@@ -213,9 +224,7 @@ function parsePromoFields(body) {
   const eligible = parseBoolFlag(body?.promo_eligible, null);
 
   const freeDelivery =
-    body?.promo_free_delivery === undefined
-      ? null
-      : parseBoolFlag(body?.promo_free_delivery, 0);
+    body?.promo_free_delivery === undefined ? null : parseBoolFlag(body?.promo_free_delivery, 0);
 
   if (eligible === null) {
     return {
@@ -263,10 +272,8 @@ function computeDuuminiRateFromSubCategorySlug(subSlug) {
 function stripDuuminiRateFromProduct(row) {
   if (!row) return row;
 
-  // on ne renvoie pas duumini_rate au front; on calcule vendor_price
   const { duumini_rate, price, ...rest } = row;
 
-  // ✅ ne dépend plus d'un champ legacy sub_category
   let rate = computeDuuminiRateFromSubCategorySlug(row.sub_category_slug);
 
   if (duumini_rate != null) {
@@ -288,7 +295,7 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   if (category_id) {
     const cid = Number(category_id) || 0;
     const [rows] = await conn.query(
-      `SELECT id, category_id, name, slug
+      `SELECT id, category_id, name, slug, vertical
          FROM sub_categories
         WHERE id=? AND category_id=?
         LIMIT 1`,
@@ -298,7 +305,7 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   }
 
   const [rows] = await conn.query(
-    `SELECT id, category_id, name, slug
+    `SELECT id, category_id, name, slug, vertical
        FROM sub_categories
       WHERE id=?
       LIMIT 1`,
@@ -307,12 +314,90 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   return rows[0] || null;
 }
 
+/* ============================
+ * Variants helpers
+ * ============================ */
+
+function normalizeSize(x) {
+  const s = String(x ?? "").trim();
+  return s ? s.slice(0, 20) : null;
+}
+function normalizeColor(x) {
+  const s = String(x ?? "").trim();
+  return s ? s.slice(0, 40) : null;
+}
+function normalizeSku(x) {
+  const s = String(x ?? "").trim();
+  return s ? s.slice(0, 80) : null;
+}
+
+function parseVariantsBody(body) {
+  // Accepte:
+  // - body.variants = [{size,color,sku,stock,price_override,is_active}, ...]
+  // - body.variantsJson = '[]'
+  // - body.variants = '[]'
+  const raw =
+    body?.variants ??
+    body?.variantsJson ??
+    body?.product_variants ??
+    body?.productVariants ??
+    null;
+
+  const parsed = safeJsonParse(raw, null);
+  if (!parsed || !Array.isArray(parsed)) return [];
+
+  const out = [];
+  for (const v of parsed) {
+    if (!v || typeof v !== "object") continue;
+    const size = normalizeSize(v.size);
+    const color = normalizeColor(v.color);
+    const sku = normalizeSku(v.sku);
+
+    // au moins size ou color pour une variante
+    if (!size && !color) continue;
+
+    const stockN = Number(v.stock);
+    const stock = Number.isFinite(stockN) && stockN >= 0 ? Math.floor(stockN) : 0;
+
+    const po = v.price_override == null || v.price_override === "" ? null : Number(v.price_override);
+    const price_override = Number.isFinite(po) && po >= 0 ? po : null;
+
+    const active = v.is_active === undefined ? 1 : parseBoolFlag(v.is_active, 1);
+    out.push({
+      size,
+      color,
+      sku,
+      stock,
+      price_override,
+      is_active: active ?? 1,
+    });
+  }
+  return out;
+}
+
+async function assertCanMutateProduct(conn, reqUser, productId) {
+  const [[prod]] = await conn.query(
+    `SELECT p.id, p.shop_id, p.vertical, s.owner_id
+       FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
+      WHERE p.id=? LIMIT 1`,
+    [productId]
+  );
+  if (!prod) return { ok: false, status: 404, error: "Not found" };
+
+  if (isVendor(reqUser) && String(prod.owner_id) !== String(reqUser.id)) {
+    return { ok: false, status: 403, error: "Forbidden" };
+  }
+  return { ok: true, prod };
+}
+
 /**
  * Liste des produits (sans filtre ville)
  * - channel: null | 'african-food' | 'african-market'
  * - onlyActive: bool
  * - onlyPromos: bool
  * - categoryId, subCategoryId, shopId, q
+ * - vertical: null | 'FOOD' | 'MARKET' | 'FASHION'
  */
 async function listProducts(pool, opts) {
   const {
@@ -325,20 +410,28 @@ async function listProducts(pool, opts) {
     subCategoryId,
     shopId,
     q,
+    vertical,
   } = opts || {};
 
   const whereParts = [];
   const params = [];
 
-  if (channel === "african-food") {
-    whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
-  } else if (channel === "african-market") {
-    whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+  // ✅ Nouveau filtre vertical (prioritaire si fourni)
+  const v = normalizeVertical(vertical, null);
+  if (v) {
+    whereParts.push("p.vertical = ?");
+    params.push(v);
   } else {
-    whereParts.push("1=1");
+    // compat: ancien filtrage par sub_category slug food / non-food
+    if (channel === "african-food") {
+      whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
+    } else if (channel === "african-market") {
+      whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+    } else {
+      whereParts.push("1=1");
+    }
   }
 
-  // ✅ IMPORTANT: un produit désactivé ne doit jamais s'afficher quand onlyActive = true
   if (onlyActive) whereParts.push("p.is_active = 1");
 
   if (onlyPromos) {
@@ -357,7 +450,6 @@ async function listProducts(pool, opts) {
     params.push(subId);
   }
 
-  // ✅ NEW: filtre boutique (tri/filtre par boutique)
   const shId = Number(shopId) || 0;
   if (shId) {
     whereParts.push("p.shop_id = ?");
@@ -411,7 +503,16 @@ async function listProducts(pool, opts) {
          FROM product_images pi
         WHERE pi.product_id = p.id
         ORDER BY sort_order ASC, id ASC
-        LIMIT 1) AS cover
+        LIMIT 1) AS cover,
+
+      (SELECT COUNT(*)
+         FROM product_variants pv
+        WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+
+      (SELECT MIN(COALESCE(pv.price_override, p.price))
+         FROM product_variants pv
+        WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+
      FROM products p
      LEFT JOIN shops s ON s.id = p.shop_id
      LEFT JOIN categories c ON c.id = p.category_id
@@ -423,7 +524,19 @@ async function listProducts(pool, opts) {
     [...params, Number(limit), Number(offset)]
   );
 
-  const rows = rowsRaw.map(stripDuuminiRateFromProduct);
+  // expose a boolean has_variants + min_price normalized
+  const rows = rowsRaw.map((r) => {
+    const base = stripDuuminiRateFromProduct(r);
+    const variants_count = Number(r.variants_count || 0);
+    const min_price =
+      r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
+    return {
+      ...base,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+    };
+  });
+
   return { rows, total };
 }
 
@@ -443,16 +556,16 @@ function pickFilters(req) {
   return {
     categoryId: req.query.categoryId ?? req.query.category_id ?? null,
     subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
-    // ✅ NEW: accepte shopId / shop_id
     shopId: req.query.shopId ?? req.query.shop_id ?? null,
     q: req.query.q ?? "",
+    vertical: req.query.vertical ?? req.query.v ?? null, // ✅ NEW
   };
 }
 
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActive = parseOnlyActive(req);
-  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, vertical } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -467,6 +580,7 @@ async function listHandler(req, res, next) {
       subCategoryId,
       shopId,
       q,
+      vertical,
     });
 
     res.json({
@@ -496,6 +610,7 @@ async function listFoodHandler(req, res, next) {
       subCategoryId,
       shopId,
       q,
+      vertical: null,
     });
 
     res.json({
@@ -525,6 +640,7 @@ async function listMarketHandler(req, res, next) {
       subCategoryId,
       shopId,
       q,
+      vertical: null,
     });
 
     res.json({
@@ -535,6 +651,12 @@ async function listMarketHandler(req, res, next) {
     next(e);
   }
 }
+
+// ✅ NEW: listing fashion (alias pratique)
+router.get("/fashion", async (req, res, next) => {
+  req.query.vertical = "FASHION";
+  return listHandler(req, res, next);
+});
 
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
@@ -555,7 +677,7 @@ router.get("/promotions", async (req, res, next) => {
       ? "african-market"
       : null;
 
-  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, vertical } = pickFilters(req);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -564,12 +686,14 @@ router.get("/promotions", async (req, res, next) => {
       limit,
       offset: 0,
       channel: channelNorm,
-      onlyActive, // ✅ inactifs exclus si onlyActive=1
+      onlyActive,
       onlyPromos: true,
       categoryId,
       subCategoryId,
-      shopId, // ✅ NEW: promos par boutique
+      shopId,
       q,
+      // ✅ si vertical fourni, il prime sur channel
+      vertical,
     });
 
     res.json(withCities(rows, citiesCol).slice(0, limit));
@@ -680,6 +804,224 @@ router.get("/top-rated", async (req, res, next) => {
   }
 });
 
+/* =======================================================================
+ * VARIANTS API
+ * ======================================================================= */
+
+// ✅ GET variants for a product
+router.get("/:id/variants", async (req, res, next) => {
+  const productId = parseIdParam(req.params.id);
+  if (!productId) return next();
+
+  const pool = getPool();
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, product_id, size, color, sku, stock, price_override, is_active, created_at, updated_at
+         FROM product_variants
+        WHERE product_id=?
+        ORDER BY is_active DESC, id ASC`,
+      [productId]
+    );
+    res.json(rows || []);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ✅ PUT one variant
+router.put(
+  "/variants/:variantId",
+  authRequired,
+  requireRole("VENDEUR", "ADMIN"),
+  express.json(),
+  async (req, res, next) => {
+    const variantId = parseIdParam(req.params.variantId);
+    if (!variantId) return next();
+
+    const pool = getPool();
+    const conn = await pool.getConnection();
+    try {
+      const [[v]] = await conn.query(
+        `SELECT pv.*, p.shop_id, s.owner_id
+           FROM product_variants pv
+           JOIN products p ON p.id = pv.product_id
+           LEFT JOIN shops s ON s.id = p.shop_id
+          WHERE pv.id=? LIMIT 1`,
+        [variantId]
+      );
+      if (!v) return res.status(404).json({ error: "Not found" });
+      if (isVendor(req.user) && String(v.owner_id) !== String(req.user.id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const size = req.body?.size === undefined ? null : normalizeSize(req.body.size);
+      const color = req.body?.color === undefined ? null : normalizeColor(req.body.color);
+      const sku = req.body?.sku === undefined ? null : normalizeSku(req.body.sku);
+
+      const stock =
+        req.body?.stock === undefined
+          ? null
+          : Number.isFinite(Number(req.body.stock)) && Number(req.body.stock) >= 0
+          ? Math.floor(Number(req.body.stock))
+          : 0;
+
+      const po =
+        req.body?.price_override === undefined
+          ? null
+          : req.body.price_override == null || req.body.price_override === ""
+          ? null
+          : Number(req.body.price_override);
+      const price_override = po == null ? null : Number.isFinite(po) && po >= 0 ? po : null;
+
+      const active = req.body?.is_active === undefined ? null : parseBoolFlag(req.body.is_active, 1);
+
+      await conn.query(
+        `UPDATE product_variants SET
+           size = COALESCE(?, size),
+           color = COALESCE(?, color),
+           sku = COALESCE(?, sku),
+           stock = COALESCE(?, stock),
+           price_override = CASE WHEN ? IS NULL THEN price_override ELSE ? END,
+           is_active = COALESCE(?, is_active)
+         WHERE id=?`,
+        [
+          size,
+          color,
+          sku,
+          stock,
+          po === undefined ? null : 1, // sentinel
+          price_override,
+          active,
+          variantId,
+        ]
+      );
+
+      res.json({ ok: true });
+    } catch (e) {
+      if (e && e.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ error: "Duplicate variant (size+color)" });
+      }
+      next(e);
+    } finally {
+      conn.release();
+    }
+  }
+);
+
+// ✅ DELETE one variant
+router.delete(
+  "/variants/:variantId",
+  authRequired,
+  requireRole("VENDEUR", "ADMIN"),
+  async (req, res, next) => {
+    const variantId = parseIdParam(req.params.variantId);
+    if (!variantId) return next();
+
+    const pool = getPool();
+    const conn = await pool.getConnection();
+    try {
+      const [[v]] = await conn.query(
+        `SELECT pv.id, pv.product_id, s.owner_id
+           FROM product_variants pv
+           JOIN products p ON p.id = pv.product_id
+           LEFT JOIN shops s ON s.id = p.shop_id
+          WHERE pv.id=? LIMIT 1`,
+        [variantId]
+      );
+      if (!v) return res.status(404).json({ error: "Not found" });
+      if (isVendor(req.user) && String(v.owner_id) !== String(req.user.id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      await conn.query(`DELETE FROM product_variants WHERE id=?`, [variantId]);
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    } finally {
+      conn.release();
+    }
+  }
+);
+
+// ✅ POST bulk variants for a product (replace or upsert)
+router.post(
+  "/:id/variants",
+  authRequired,
+  requireRole("VENDEUR", "ADMIN"),
+  express.json(),
+  async (req, res, next) => {
+    const productId = parseIdParam(req.params.id);
+    if (!productId) return next();
+
+    const pool = getPool();
+    const conn = await pool.getConnection();
+    try {
+      const auth = await assertCanMutateProduct(conn, req.user, productId);
+      if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+      // Option: replace=true -> supprime toutes les variantes et recrée
+      const replace = parseBoolFlag(req.query.replace ?? req.body?.replace, 0) === 1;
+
+      const variants = parseVariantsBody(req.body);
+      if (!variants.length) {
+        return res.status(400).json({ error: "variants requis (array JSON)" });
+      }
+
+      await conn.beginTransaction();
+
+      if (replace) {
+        await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [productId]);
+      }
+
+      for (const v of variants) {
+        // upsert par (product_id, size, color) via l'index unique
+        await conn.query(
+          `
+          INSERT INTO product_variants (product_id, size, color, sku, stock, price_override, is_active)
+          VALUES (?,?,?,?,?,?,?)
+          ON DUPLICATE KEY UPDATE
+            sku = VALUES(sku),
+            stock = VALUES(stock),
+            price_override = VALUES(price_override),
+            is_active = VALUES(is_active)
+          `,
+          [
+            productId,
+            v.size,
+            v.color,
+            v.sku,
+            v.stock,
+            v.price_override,
+            v.is_active ?? 1,
+          ]
+        );
+      }
+
+      await conn.commit();
+
+      const [rows] = await conn.query(
+        `SELECT id, product_id, size, color, sku, stock, price_override, is_active, created_at, updated_at
+           FROM product_variants
+          WHERE product_id=?
+          ORDER BY is_active DESC, id ASC`,
+        [productId]
+      );
+
+      res.status(201).json({ ok: true, items: rows || [] });
+    } catch (e) {
+      try {
+        await conn.rollback();
+      } catch {}
+      if (e && e.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ error: "Duplicate variant (size+color)" });
+      }
+      next(e);
+    } finally {
+      conn.release();
+    }
+  }
+);
+
 /* ----------------------------- Read one ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
@@ -702,7 +1044,13 @@ router.get("/:id", async (req, res, next) => {
 
          sc.id   AS sub_category_id,
          sc.name AS sub_category_name,
-         sc.slug AS sub_category_slug
+         sc.slug AS sub_category_slug,
+
+         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+         (SELECT MIN(COALESCE(pv.price_override, p.price))
+            FROM product_variants pv
+           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+
        FROM products p
        LEFT JOIN shops s ON s.id = p.shop_id
        LEFT JOIN categories c ON c.id = p.category_id
@@ -724,10 +1072,40 @@ router.get("/:id", async (req, res, next) => {
       [id]
     );
 
+    // ✅ inclure variantes seulement si demandées ?variants=1 (sinon léger)
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    let variants = undefined;
+    if (wantVariants) {
+      const [vrows] = await pool.query(
+        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
+           FROM product_variants
+          WHERE product_id=?
+          ORDER BY is_active DESC, id ASC`,
+        [id]
+      );
+      variants = vrows || [];
+    }
+
     let cities = null;
     if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
 
-    res.json({ ...product, images, ...(cities ? { cities } : {}) });
+    const variants_count = Number(rawProduct.variants_count || 0);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
+
+    res.json({
+      ...product,
+      images,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      ...(variants ? { variants } : {}),
+      ...(cities ? { cities } : {}),
+    });
   } catch (e) {
     next(e);
   }
@@ -759,6 +1137,11 @@ router.post(
 
       is_active,
       shop_id,
+
+      // ✅ NEW
+      vertical,
+      variants, // JSON string or array (optionnel)
+      replace_variants, // 1/true => replace
     } = req.body || {};
 
     const pool = getPool();
@@ -803,6 +1186,12 @@ router.post(
         });
       }
 
+      const incomingVertical = normalizeVertical(vertical, null);
+      // fallback: si sub_category slug == food => FOOD, sinon MARKET
+      const fallbackVertical =
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
+      const finalVertical = incomingVertical || fallbackVertical;
+
       const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
       const active = parseBoolFlag(is_active, 1);
 
@@ -821,12 +1210,15 @@ router.post(
       const cities = incomingCities == null ? null : incomingCities;
       const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
 
+      const variantsList = parseVariantsBody({ variants });
+      const replace = parseBoolFlag(replace_variants, 0) === 1;
+
       await conn.beginTransaction();
 
       let insertSql = `INSERT INTO products
         (shop_id, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
-         duumini_rate, is_active`;
+         duumini_rate, is_active, vertical`;
 
       const promoEligibleFinal = promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
 
@@ -850,6 +1242,7 @@ router.post(
 
         duuminiRate,
         active,
+        finalVertical,
       ];
 
       if (citiesCol && cities != null) {
@@ -862,6 +1255,7 @@ router.post(
       const [r] = await conn.query(insertSql, insertVals);
       const productId = r.insertId;
 
+      // ✅ Images
       const files = Array.isArray(req.files) ? req.files : [];
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
@@ -869,10 +1263,32 @@ router.post(
         const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
-        await conn.query(
-          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
-          [productId, webUrl, i]
-        );
+        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
+          productId,
+          webUrl,
+          i,
+        ]);
+      }
+
+      // ✅ Variantes (optionnel)
+      if (variantsList.length) {
+        if (replace) {
+          await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [productId]);
+        }
+        for (const v of variantsList) {
+          await conn.query(
+            `
+            INSERT INTO product_variants (product_id, size, color, sku, stock, price_override, is_active)
+            VALUES (?,?,?,?,?,?,?)
+            ON DUPLICATE KEY UPDATE
+              sku = VALUES(sku),
+              stock = VALUES(stock),
+              price_override = VALUES(price_override),
+              is_active = VALUES(is_active)
+            `,
+            [productId, v.size, v.color, v.sku, v.stock, v.price_override, v.is_active ?? 1]
+          );
+        }
       }
 
       await conn.commit();
@@ -914,13 +1330,16 @@ router.post(
         }
       } catch {}
 
-      res.status(201).json({ id: productId, channel });
+      res.status(201).json({ id: productId, channel, vertical: finalVertical });
     } catch (e) {
       try {
         await conn.rollback();
       } catch {}
       if (e && e.code === "ER_DUP_ENTRY") {
         return res.status(409).json({ error: "Duplicate slug" });
+      }
+      if (e && e.code === "ER_NO_REFERENCED_ROW_2") {
+        return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
       }
       next(e);
     } finally {
@@ -958,6 +1377,9 @@ router.put(
       replace_images,
       is_active,
       shop_id,
+
+      // ✅ NEW
+      vertical,
     } = req.body || {};
 
     const pool = getPool();
@@ -1013,6 +1435,8 @@ router.put(
         promo_free_delivery,
       });
 
+      const vert = normalizeVertical(vertical, null);
+
       await conn.query(
         `UPDATE products SET
            name                = COALESCE(?, name),
@@ -1040,7 +1464,9 @@ router.put(
 
            is_active           = COALESCE(?, is_active),
            category_id         = COALESCE(?, category_id),
-           shop_id             = COALESCE(?, shop_id)
+           shop_id             = COALESCE(?, shop_id),
+           vertical            = COALESCE(?, vertical)
+
          WHERE id=?`,
         [
           name ?? null,
@@ -1065,6 +1491,8 @@ router.put(
           active,
           category_id != null ? Number(category_id) : null,
           newShopIdParam,
+          vert,
+
           id,
         ]
       );
@@ -1103,10 +1531,11 @@ router.put(
           const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
-          await conn.query(
-            `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
-            [id, webUrl, start + i]
-          );
+          await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
+            id,
+            webUrl,
+            start + i,
+          ]);
         }
       }
 
@@ -1163,10 +1592,11 @@ router.put(
       for (const url of bodyImages) {
         const u = String(url || "").trim();
         if (!u) continue;
-        await conn.query(
-          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
-          [id, u, order++]
-        );
+        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
+          id,
+          u,
+          order++,
+        ]);
       }
 
       for (let i = 0; i < files.length; i++) {
@@ -1175,10 +1605,11 @@ router.put(
         const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
-        await conn.query(
-          `INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`,
-          [id, webUrl, order++]
-        );
+        await conn.query(`INSERT INTO product_images (product_id, url, sort_order) VALUES (?,?,?)`, [
+          id,
+          webUrl,
+          order++,
+        ]);
       }
 
       await conn.commit();
@@ -1288,6 +1719,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
         p.price,
         p.currency,
         p.is_active,
+        p.vertical,
 
         s.name AS shop_name,
         s.city AS shop_city,
@@ -1318,8 +1750,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     const product = rows[0];
     if (!product || !product.is_active) return res.status(404).send("Not found");
 
-    const baseWeb =
-      env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com";
+    const baseWeb = env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com";
 
     const slugOrId = product.slug || product.id;
     const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
@@ -1331,10 +1762,8 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       `${product.name} — Duumini${product.shop_name ? ` (${product.shop_name})` : ""}`
     );
 
-    const descriptionRaw =
-      product.description || "Découvrez ce produit africain disponible sur Duumini.";
-    const shortDesc =
-      descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
+    const descriptionRaw = product.description || "Découvrez ce produit africain disponible sur Duumini.";
+    const shortDesc = descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
     const ogDescription = escapeHtml(shortDesc);
 
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
@@ -1365,7 +1794,7 @@ shareRouter.get("/product/:id", async (req, res, next) => {
         availability: "https://schema.org/InStock",
         url: finalUrl,
       },
-      category: sub === "food" ? "African Food" : "African Market",
+      category: product.vertical === "FASHION" ? "Fashion & Style" : sub === "food" ? "African Food" : "African Market",
       ...(cities?.length ? { areaServed: cities } : {}),
     };
 

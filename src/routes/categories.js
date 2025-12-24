@@ -1,79 +1,352 @@
 // src/routes/categories.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, isAdmin } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 
 const router = Router();
 
-/**
- * Petit helper pour slugifier un nom
- */
+/* =========================
+ * Helpers
+ * =======================*/
+
+/** slugify robuste (utf8 -> ascii, espaces -> -, fallback unique) */
 function slugify(str) {
-  return (
+  const out =
     String(str || "")
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || Date.now().toString(36)
-  );
+      .replace(/^-+|-+$/g, "");
+
+  return out || Date.now().toString(36);
 }
 
-/**
+function toPositiveInt(value, defaultValue) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return defaultValue;
+  return Math.floor(n);
+}
+
+function parseBoolFlag(value, defaultValue = null) {
+  if (value === undefined || value === null) return defaultValue;
+  const v = String(value).trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return 1;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
+  return defaultValue;
+}
+
+async function detectColumn(conn, tableName, candidates) {
+  const [rows] = await conn.query(
+    `
+    SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    [tableName, ...candidates]
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return candidates.find((c) => found.has(c)) || null;
+}
+
+let _catsColumns = null;
+let _catsColumnsLoaded = false;
+
+async function getCategoriesColumns(pool) {
+  if (_catsColumnsLoaded) return _catsColumns;
+
+  const conn = await pool.getConnection();
+  try {
+    const verticalCol = await detectColumn(conn, "categories", ["vertical"]);
+    const isActiveCol = await detectColumn(conn, "categories", ["is_active", "active", "enabled"]);
+
+    _catsColumns = {
+      verticalCol, // optional
+      isActiveCol, // optional
+    };
+    _catsColumnsLoaded = true;
+    return _catsColumns;
+  } finally {
+    conn.release();
+  }
+}
+
+function normalizeVertical(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (!s) return null;
+
+  // Quelques alias utiles
+  if (s === "food" || s === "african-food") return "african-food";
+  if (s === "market" || s === "african-market") return "african-market";
+  if (s === "fashion" || s === "fashionstyle") return "fashionstyle";
+
+  return s; // on accepte toute valeur custom
+}
+
+function pickRequestedVertical(req) {
+  const v = req.query.vertical ?? req.query.channel ?? req.query.type ?? null;
+  const norm = normalizeVertical(v);
+  return norm;
+}
+
+async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
+  let finalSlug = baseSlug;
+  let suffix = 1;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const params = ignoreId ? [finalSlug, Number(ignoreId)] : [finalSlug];
+    const where = ignoreId ? "slug=? AND id<>?" : "slug=?";
+    const [[{ count }]] = await pool.query(`SELECT COUNT(*) AS count FROM categories WHERE ${where}`, params);
+    if (count === 0) break;
+    finalSlug = `${baseSlug}-${suffix++}`;
+  }
+  return finalSlug;
+}
+
+/* =========================
  * GET /api/categories
- */
+ * - pagination
+ * - filtres optionnels :
+ *    ?q=...              (recherche)
+ *    ?vertical=...       (si la colonne existe)
+ *    ?onlyActive=1       (si colonne is_active/active/enabled existe)
+ * - un non-admin ne voit pas les inactives si colonne existe
+ * =======================*/
 router.get("/", async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
+
+  const q = String(req.query.q || "").trim().toLowerCase();
+  const reqVertical = pickRequestedVertical(req);
+  const onlyActive = parseBoolFlag(req.query.onlyActive, null);
+
   try {
-    const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM categories`);
-    const [rows] = await pool.query(
-      `SELECT * FROM categories ORDER BY name ASC LIMIT ? OFFSET ?`,
-      [limit, offset]
+    const cols = await getCategoriesColumns(pool);
+
+    const whereParts = ["1=1"];
+    const params = [];
+
+    // Filtre vertical si colonne existe
+    if (cols.verticalCol && reqVertical) {
+      whereParts.push(`LOWER(TRIM(COALESCE(${cols.verticalCol},''))) = ?`);
+      params.push(reqVertical);
+    }
+
+    // Filtre recherche
+    if (q) {
+      whereParts.push(`(LOWER(name) LIKE ? OR LOWER(slug) LIKE ?)`);
+      const like = `%${q}%`;
+      params.push(like, like);
+    }
+
+    // Gestion "actif" (si colonne existe)
+    const isAdminUser = isAdmin && isAdmin(req.user);
+    const hasActiveCol = !!cols.isActiveCol;
+
+    if (hasActiveCol) {
+      // si non connecté, on suppose non-admin
+      const enforceActiveForPublic = !isAdminUser;
+      const wantOnlyActive =
+        onlyActive === null ? enforceActiveForPublic : onlyActive === 1;
+
+      if (wantOnlyActive) whereParts.push(`${cols.isActiveCol} = 1`);
+    }
+
+    const whereSql = whereParts.join(" AND ");
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM categories WHERE ${whereSql}`,
+      params
     );
+
+    const [rows] = await pool.query(
+      `SELECT * FROM categories WHERE ${whereSql} ORDER BY name ASC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
+    );
+
     res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-/**
- * POST /api/categories
- * Body attendu:
+/* =========================
+ * POST /api/categories (ADMIN)
+ * Body:
  *  - name: string (obligatoire)
- *  - slug?: string (optionnel → généré automatiquement à partir du name)
- */
+ *  - slug?: string (optionnel)
+ *  - vertical?: string (optionnel si colonne existe)
+ *  - is_active?: 0|1 (optionnel si colonne existe)
+ * =======================*/
 router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
-  const { name, slug } = req.body || {};
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ error: "name required" });
-  }
-
   const pool = getPool();
-  try {
-    const baseSlug = slug && String(slug).trim() ? String(slug).trim() : slugify(name);
+  const conn = await pool.getConnection();
 
-    let finalSlug = baseSlug;
-    let suffix = 1;
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const [[{ count }]] = await pool.query(
-        `SELECT COUNT(*) AS count FROM categories WHERE slug=?`,
-        [finalSlug]
-      );
-      if (count === 0) break;
-      finalSlug = `${baseSlug}-${suffix++}`;
+  try {
+    const cols = await getCategoriesColumns(pool);
+
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ error: "name required" });
+
+    const rawSlug = String(req.body?.slug || "").trim();
+    const baseSlug = rawSlug ? slugify(rawSlug) : slugify(name);
+    const finalSlug = await ensureUniqueSlug(pool, baseSlug);
+
+    const vertical = cols.verticalCol ? normalizeVertical(req.body?.vertical) : null;
+    const active = cols.isActiveCol ? parseBoolFlag(req.body?.is_active, 1) : null;
+
+    const fields = ["name", "slug"];
+    const values = [name, finalSlug];
+
+    if (cols.verticalCol) {
+      fields.push(cols.verticalCol);
+      values.push(vertical);
     }
 
-    const [r] = await pool.query(`INSERT INTO categories (name, slug) VALUES (?,?)`, [
-      name,
-      finalSlug,
-    ]);
+    if (cols.isActiveCol) {
+      fields.push(cols.isActiveCol);
+      values.push(active == null ? 1 : active);
+    }
 
-    res.status(201).json({ id: r.insertId, name, slug: finalSlug });
+    const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields.map(() => "?").join(", ")})`;
+
+    const [r] = await conn.query(sql, values);
+
+    res.status(201).json({
+      id: r.insertId,
+      name,
+      slug: finalSlug,
+      ...(cols.verticalCol ? { vertical } : {}),
+      ...(cols.isActiveCol ? { is_active: values[fields.indexOf(cols.isActiveCol)] } : {}),
+    });
+  } catch (e) {
+    if (e && e.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "Duplicate slug" });
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * PUT /api/categories/:id (ADMIN)
+ * Body (tous optionnels):
+ *  - name
+ *  - slug
+ *  - vertical (si colonne existe)
+ *  - is_active (si colonne existe)
+ * =======================*/
+router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+
+  try {
+    const cols = await getCategoriesColumns(pool);
+
+    const [[row]] = await conn.query(`SELECT * FROM categories WHERE id=? LIMIT 1`, [id]);
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    const patch = {};
+
+    if (req.body?.name !== undefined) {
+      const name = String(req.body?.name || "").trim();
+      if (!name) return res.status(400).json({ error: "name cannot be empty" });
+      patch.name = name;
+    }
+
+    if (req.body?.slug !== undefined) {
+      const rawSlug = String(req.body?.slug || "").trim();
+      const baseSlug = rawSlug ? slugify(rawSlug) : slugify(patch.name || row.name);
+      patch.slug = await ensureUniqueSlug(pool, baseSlug, id);
+    }
+
+    if (cols.verticalCol && req.body?.vertical !== undefined) {
+      patch[cols.verticalCol] = normalizeVertical(req.body?.vertical);
+    }
+
+    if (cols.isActiveCol && req.body?.is_active !== undefined) {
+      const active = parseBoolFlag(req.body?.is_active, null);
+      if (active === null) return res.status(400).json({ error: "is_active invalid" });
+      patch[cols.isActiveCol] = active;
+    }
+
+    const keys = Object.keys(patch);
+    if (!keys.length) return res.json({ ok: true }); // nothing to update
+
+    const setSql = keys.map((k) => `${k}=?`).join(", ");
+    const params = keys.map((k) => patch[k]);
+    params.push(id);
+
+    await conn.query(`UPDATE categories SET ${setSql} WHERE id=?`, params);
+
+    res.json({ ok: true });
+  } catch (e) {
+    if (e && e.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "Duplicate slug" });
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * DELETE /api/categories/:id (ADMIN)
+ * - bloque la suppression si utilisée par products/sub_categories
+ * =======================*/
+router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+
+  try {
+    const [[row]] = await conn.query(`SELECT id FROM categories WHERE id=? LIMIT 1`, [id]);
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    // Empêche suppression si des sous-catégories existent
+    try {
+      const [[{ scCount }]] = await conn.query(
+        `SELECT COUNT(*) AS scCount FROM sub_categories WHERE category_id=?`,
+        [id]
+      );
+      if (Number(scCount || 0) > 0) {
+        return res.status(409).json({
+          error: "CATEGORY_IN_USE",
+          message: "Impossible de supprimer: des sous-catégories existent pour cette catégorie.",
+        });
+      }
+    } catch {
+      // si table sub_categories n'existe pas dans un env, ignore
+    }
+
+    // Empêche suppression si des produits existent
+    try {
+      const [[{ pCount }]] = await conn.query(
+        `SELECT COUNT(*) AS pCount FROM products WHERE category_id=?`,
+        [id]
+      );
+      if (Number(pCount || 0) > 0) {
+        return res.status(409).json({
+          error: "CATEGORY_IN_USE",
+          message: "Impossible de supprimer: des produits utilisent cette catégorie.",
+        });
+      }
+    } catch {
+      // si table products n'existe pas dans un env, ignore
+    }
+
+    await conn.query(`DELETE FROM categories WHERE id=?`, [id]);
+
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
   }
 });
 

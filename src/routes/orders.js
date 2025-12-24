@@ -33,9 +33,9 @@ function safeParseJSON(maybe) {
 }
 
 function buildAddressObj(input = {}) {
-  const ville = input?.ville ?? null;
+  const ville = input?.ville ?? input?.city ?? null;
   const commune = input?.commune ?? null;
-  const quartier = input?.quartier ?? null;
+  const quartier = input?.quartier ?? input?.district ?? null;
   const gps =
     input?.gps && typeof input.gps === "object"
       ? { lat: Number(input.gps.lat), lng: Number(input.gps.lng) }
@@ -105,15 +105,21 @@ function buildDisplayCode(id) {
   return n.toString(36).toUpperCase();
 }
 
-function computeCommissionForLine(clientUnitPrice, qty, subCategory) {
+/**
+ * ✅ Commission: on se base sur p.sub_category_slug (nouveau) ou fallback food/non-food
+ */
+function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
-  const sub = String(subCategory || "").trim().toLowerCase();
+  const sub = String(subSlug || "").trim().toLowerCase();
   const rate = sub === "food" ? 0.18 : 0.11;
   return +(+totalClientLine * rate).toFixed(2);
 }
 
+/**
+ * ✅ Promo: même logique, mais sur slug (nouveau)
+ */
 function isPromoProductRow(p) {
-  const isFood = String(p?.sub_category || "").trim().toLowerCase() === "food";
+  const isFood = String(p?.sub_category_slug || "").trim().toLowerCase() === "food";
   return (
     !isFood &&
     Number(p?.promo_eligible ?? 0) === 1 &&
@@ -138,8 +144,8 @@ async function getOrderWithPerm(conn, id, user) {
         `
         SELECT 1
         FROM order_items oi
-        JOIN products p ON p.id = oi.product_id
-        JOIN shops s    ON s.id = p.shop_id
+        LEFT JOIN products p ON p.id = oi.product_id
+        LEFT JOIN shops s    ON s.id = p.shop_id
         WHERE oi.order_id = ? AND s.owner_id = ?
         LIMIT 1
         `,
@@ -158,6 +164,9 @@ async function getOrderWithPerm(conn, id, user) {
     SELECT 
       oi.*,
       p.name AS product_name,
+      pv.size  AS variant_size,
+      pv.color AS variant_color,
+      pv.sku   AS variant_sku,
       (
         SELECT pi.url
         FROM product_images pi
@@ -167,6 +176,7 @@ async function getOrderWithPerm(conn, id, user) {
       ) AS product_cover
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
+    LEFT JOIN product_variants pv ON pv.id = oi.variant_id
     WHERE oi.order_id = ?
     ORDER BY oi.id ASC
     `,
@@ -272,8 +282,16 @@ async function enqueueOrderStatusForClient(orderId, status) {
  * WhatsApp helper (réutilisé connecté + invité)
  * =======================*/
 
-async function sendBackofficeWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }) {
-  // Si pas configuré, on log et on sort (pas bloquant)
+async function sendBackofficeWhatsAppForOrder({
+  pool,
+  orderId,
+  displayCode,
+  orderTotal,
+  currency,
+  addressObj,
+  contactObj,
+  items,
+}) {
   const hasFrom = !!(env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM);
   const isProd = String(env.NODE_ENV || process.env.NODE_ENV || "").toLowerCase() === "production";
 
@@ -282,15 +300,13 @@ async function sendBackofficeWhatsAppForOrder({ pool, orderId, displayCode, orde
     return;
   }
   if (!isProd) {
-    // Ton twilio.js simule l'envoi en DEV_MODE, donc on prévient juste
     console.warn("[WhatsApp] NODE_ENV != production -> Twilio DEV_MODE (no real send)");
   }
 
   const fullName =
-    `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() ||
-    "Client Duumini";
+    `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() || "Client Duumini";
 
-  // ✅ Détails plus fiables: on recharge les noms depuis la BDD (pas depuis req.body)
+  // ✅ Détails: inclut variante si présente
   let details = "";
   try {
     const [rows] = await pool.query(
@@ -298,9 +314,12 @@ async function sendBackofficeWhatsAppForOrder({ pool, orderId, displayCode, orde
       SELECT 
         oi.qty,
         oi.unit_price,
-        p.name AS product_name
+        p.name AS product_name,
+        pv.size AS v_size,
+        pv.color AS v_color
       FROM order_items oi
       JOIN products p ON p.id = oi.product_id
+      LEFT JOIN product_variants pv ON pv.id = oi.variant_id
       WHERE oi.order_id = ?
       ORDER BY oi.id ASC
       `,
@@ -311,21 +330,23 @@ async function sendBackofficeWhatsAppForOrder({ pool, orderId, displayCode, orde
       details = rows
         .map((r) => {
           const label = r.product_name || "Produit";
+          const vtxt = [r.v_size, r.v_color].filter(Boolean).join(" / ");
+          const suffix = vtxt ? ` (${vtxt})` : "";
           const qty = Number(r.qty || 1);
           const price = Number(r.unit_price || 0);
-          return `• ${label} ×${qty} — ${price} ${currency || "MAD"}`;
+          return `• ${label}${suffix} ×${qty} — ${price} ${currency || "MAD"}`;
         })
         .join("\n");
     }
   } catch (e) {
     console.error("[WhatsApp] details query failed", e?.message || e);
-    // fallback (payload items)
     if (Array.isArray(items) && items.length) {
       details = items
         .map((it) => {
           const label = it?.name || `Produit #${it?.product_id || ""}`.trim();
           const qty = it?.qty || 1;
-          const price = it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
+          const price =
+            it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
           return `• ${label} ×${qty}${price ? ` — ${price}` : ""}`;
         })
         .join("\n");
@@ -380,6 +401,62 @@ async function sendBackofficeWhatsAppForOrder({ pool, orderId, displayCode, orde
 }
 
 /* =========================
+ * STOCK helpers (produit vs variante)
+ * =======================*/
+
+function normQty(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+function parseVariantId(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+async function lockProductForItem(conn, productId) {
+  const [[p]] = await conn.query(
+    `
+    SELECT
+      p.id,
+      p.price,
+      p.stock,
+      p.shop_id,
+      p.promo_eligible,
+      p.promo_discount_value,
+      sc.slug AS sub_category_slug
+    FROM products p
+    LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
+    WHERE p.id=? FOR UPDATE
+    `,
+    [productId]
+  );
+  return p || null;
+}
+
+async function lockVariantForItem(conn, productId, variantId) {
+  const [[v]] = await conn.query(
+    `
+    SELECT
+      pv.id,
+      pv.product_id,
+      pv.stock,
+      pv.price_override,
+      pv.is_active,
+      pv.size,
+      pv.color,
+      pv.sku
+    FROM product_variants pv
+    WHERE pv.id=? AND pv.product_id=? FOR UPDATE
+    `,
+    [variantId, productId]
+  );
+  return v || null;
+}
+
+/* =========================
  * List (admin : tout / client : ses commandes)
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
@@ -400,7 +477,10 @@ router.get("/", authRequired, async (req, res) => {
         params.push(rawStatus);
       }
 
-      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+        params
+      );
 
       const [rowsRaw] = await pool.query(
         `
@@ -455,7 +535,12 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -524,7 +609,12 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -610,7 +700,12 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
+          totals: {
+            items_amount: itemsAmount,
+            delivery_fee: deliveryFee,
+            amount: totalAmount,
+            currency,
+          },
         };
       });
 
@@ -680,7 +775,12 @@ router.get("/", authRequired, async (req, res) => {
         address,
         contact,
         geo_link,
-        totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
+        totals: {
+          items_amount: itemsAmount,
+          delivery_fee: deliveryFee,
+          amount: totalAmount,
+          currency,
+        },
       };
     });
 
@@ -692,11 +792,16 @@ router.get("/", authRequired, async (req, res) => {
 
 /* =========================
  * Create order (UTILISATEUR CONNECTÉ)
+ * ✅ support variantes: items[].variant_id (optionnel)
+ * - Si variant_id: stock décrémenté sur product_variants.stock
+ * - Sinon: stock décrémenté sur products.stock
+ * ✅ unit_price: price_override si présent, sinon p.price
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
   const { contact = null, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: "items[] required" });
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -720,7 +825,8 @@ router.post("/", authRequired, async (req, res) => {
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
-      const qty = Number(it?.qty);
+      const qty = normQty(it?.qty);
+      const variant_id = parseVariantId(it?.variant_id);
 
       if (!product_id || !qty) {
         const err = new Error("product_id & qty required");
@@ -732,13 +838,7 @@ router.post("/", authRequired, async (req, res) => {
         throw err;
       }
 
-      const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock, shop_id, promo_eligible, promo_discount_value
-         FROM products
-         WHERE id=? FOR UPDATE`,
-        [product_id]
-      );
-
+      const p = await lockProductForItem(conn, product_id);
       if (!p) {
         const err = new Error("Product not found: " + product_id);
         err.statusCode = 400;
@@ -750,7 +850,8 @@ router.post("/", authRequired, async (req, res) => {
         throw err;
       }
 
-      const isFood = String(p.sub_category || "").trim().toLowerCase() === "food";
+      // ✅ Multi-restaurant FOOD: basé sur sub_category_slug
+      const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
       if (isFood) {
         const shopId = p.shop_id != null ? Number(p.shop_id) : null;
         if (shopId != null) {
@@ -770,10 +871,47 @@ router.post("/", authRequired, async (req, res) => {
 
       if (isPromoProductRow(p)) hasPromo = true;
 
-      const unit_price = Number(p.price);
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+      // ✅ Variante (optionnel)
+      let unit_price = Number(p.price || 0);
+      let stockSource = "PRODUCT";
+      let current_stock = p.stock;
+      let variant_meta = null;
 
-      cleanItems.push({ product_id: p.id, qty, unit_price, current_stock: p.stock });
+      if (variant_id) {
+        const v = await lockVariantForItem(conn, product_id, variant_id);
+        if (!v || Number(v.is_active || 0) !== 1) {
+          const err = new Error("VARIANT_NOT_FOUND");
+          err.statusCode = 400;
+          err.payload = {
+            code: "VARIANT_NOT_FOUND",
+            message: "Une variante choisie n'est plus disponible.",
+            product_id,
+            variant_id,
+          };
+          throw err;
+        }
+
+        unit_price =
+          v.price_override != null && v.price_override !== ""
+            ? Number(v.price_override)
+            : Number(p.price || 0);
+
+        stockSource = "VARIANT";
+        current_stock = v.stock;
+        variant_meta = { variant_id: v.id, size: v.size || null, color: v.color || null, sku: v.sku || null };
+      }
+
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
+
+      cleanItems.push({
+        product_id: p.id,
+        qty,
+        unit_price,
+        stockSource,
+        current_stock,
+        variant_id: variant_id || null,
+        variant_meta,
+      });
 
       itemsAmount += unit_price * qty;
       totalCommission += lineCommission;
@@ -802,15 +940,15 @@ router.post("/", authRequired, async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
+    // ✅ insert items (variant_id support)
     for (const it of cleanItems) {
-      await conn.query(`INSERT INTO order_items (order_id, product_id, qty, unit_price) VALUES (?,?,?,?)`, [
-        orderId,
-        it.product_id,
-        it.qty,
-        it.unit_price,
-      ]);
+      await conn.query(
+        `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
+        [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+      );
     }
 
+    // ✅ decrement stock: variant first, else product
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -824,13 +962,18 @@ router.post("/", authRequired, async (req, res) => {
           code: "STOCK_INSUFFICIENT",
           message: "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
+          variant_id: it.variant_id || null,
           requested: Number(it.qty || 0),
           available: currentStock,
         };
         throw err;
       }
 
-      await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
+      if (it.stockSource === "VARIANT" && it.variant_id) {
+        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [newStock, it.variant_id]);
+      } else {
+        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
+      }
     }
 
     await conn.commit();
@@ -843,7 +986,11 @@ router.post("/", authRequired, async (req, res) => {
 
     try {
       const { notifyUser } = require("../services/notify");
-      await notifyUser(req.user.id, "ORDER_CREATED", { order_id: orderId, display_code: displayCode, total: orderTotal });
+      await notifyUser(req.user.id, "ORDER_CREATED", {
+        order_id: orderId,
+        display_code: displayCode,
+        total: orderTotal,
+      });
     } catch {}
 
     // ✅ WhatsApp backoffice (après commit, non bloquant)
@@ -880,11 +1027,13 @@ router.post("/", authRequired, async (req, res) => {
 
 /* =========================
  * Create order invité (SANS AUTH)
+ * ✅ support variantes: items[].variant_id (optionnel)
  * =======================*/
 router.post("/guest", async (req, res) => {
   const { contact = {}, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ error: "items[] required" });
 
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
@@ -911,7 +1060,8 @@ router.post("/guest", async (req, res) => {
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
-      const qty = Number(it?.qty);
+      const qty = normQty(it?.qty);
+      const variant_id = parseVariantId(it?.variant_id);
 
       if (!product_id || !qty) {
         const err = new Error("product_id & qty required");
@@ -923,13 +1073,7 @@ router.post("/guest", async (req, res) => {
         throw err;
       }
 
-      const [[p]] = await conn.query(
-        `SELECT id, price, sub_category, stock, shop_id, promo_eligible, promo_discount_value
-         FROM products
-         WHERE id=? FOR UPDATE`,
-        [product_id]
-      );
-
+      const p = await lockProductForItem(conn, product_id);
       if (!p) {
         const err = new Error("Product not found: " + product_id);
         err.statusCode = 400;
@@ -941,7 +1085,7 @@ router.post("/guest", async (req, res) => {
         throw err;
       }
 
-      const isFood = String(p.sub_category || "").trim().toLowerCase() === "food";
+      const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
       if (isFood) {
         const shopId = p.shop_id != null ? Number(p.shop_id) : null;
         if (shopId != null) {
@@ -961,10 +1105,43 @@ router.post("/guest", async (req, res) => {
 
       if (isPromoProductRow(p)) hasPromo = true;
 
-      const unit_price = Number(p.price);
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category);
+      let unit_price = Number(p.price || 0);
+      let stockSource = "PRODUCT";
+      let current_stock = p.stock;
 
-      cleanItems.push({ product_id: p.id, qty, unit_price, current_stock: p.stock });
+      if (variant_id) {
+        const v = await lockVariantForItem(conn, product_id, variant_id);
+        if (!v || Number(v.is_active || 0) !== 1) {
+          const err = new Error("VARIANT_NOT_FOUND");
+          err.statusCode = 400;
+          err.payload = {
+            code: "VARIANT_NOT_FOUND",
+            message: "Une variante choisie n'est plus disponible.",
+            product_id,
+            variant_id,
+          };
+          throw err;
+        }
+
+        unit_price =
+          v.price_override != null && v.price_override !== ""
+            ? Number(v.price_override)
+            : Number(p.price || 0);
+
+        stockSource = "VARIANT";
+        current_stock = v.stock;
+      }
+
+      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
+
+      cleanItems.push({
+        product_id: p.id,
+        qty,
+        unit_price,
+        stockSource,
+        current_stock,
+        variant_id: variant_id || null,
+      });
 
       itemsAmount += unit_price * qty;
       totalCommission += lineCommission;
@@ -979,19 +1156,24 @@ router.post("/guest", async (req, res) => {
       INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
       VALUES (NULL, 'OPEN', ?, ?, ?, ?, ?, ?, NOW(), NOW())
       `,
-      [JSON.stringify(addressObj), JSON.stringify(contactObj), geoLink, orderTotal, +totalCommission.toFixed(2), currency]
+      [
+        JSON.stringify(addressObj),
+        JSON.stringify(contactObj),
+        geoLink,
+        orderTotal,
+        +totalCommission.toFixed(2),
+        currency,
+      ]
     );
 
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      await conn.query(`INSERT INTO order_items (order_id, product_id, qty, unit_price) VALUES (?,?,?,?)`, [
-        orderId,
-        it.product_id,
-        it.qty,
-        it.unit_price,
-      ]);
+      await conn.query(
+        `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
+        [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+      );
     }
 
     for (const it of cleanItems) {
@@ -1007,13 +1189,18 @@ router.post("/guest", async (req, res) => {
           code: "STOCK_INSUFFICIENT",
           message: "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
+          variant_id: it.variant_id || null,
           requested: Number(it.qty || 0),
           available: currentStock,
         };
         throw err;
       }
 
-      await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
+      if (it.stockSource === "VARIANT" && it.variant_id) {
+        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [newStock, it.variant_id]);
+      } else {
+        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
+      }
     }
 
     await conn.commit();
@@ -1060,8 +1247,7 @@ router.post("/guest", async (req, res) => {
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  const pool = getPool();
-  const conn = await pool.getConnection();
+  const conn = await getPool().getConnection();
 
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
@@ -1070,7 +1256,10 @@ router.get("/:id", authRequired, async (req, res) => {
     const o = result.order;
     const addr = safeParseJSON(o.address);
 
-    const [[u]] = await conn.query("SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1", [o.user_id]);
+    const [[u]] = await conn.query(
+      "SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1",
+      [o.user_id]
+    );
 
     const contactFromOrder = safeParseJSON(o.contact);
     const contact =
@@ -1164,6 +1353,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
 /* =========================
  * Annulation par l’acheteur (ou admin)
+ * ✅ RESTOCK: on remet le stock sur variante/produit
  * =======================*/
 router.post("/:id/cancel", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1171,14 +1361,47 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
   const conn = await pool.getConnection();
 
   try {
+    await conn.beginTransaction();
+
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    if (result.status !== 200) {
+      await conn.rollback();
+      return res.status(result.status).json({ error: result.error });
+    }
 
     const order = result.order;
     const blocked = ["DONE", "CANCELLED"].includes(order.status || "");
-    if (blocked && !isAdmin(req.user)) return res.status(409).json({ error: "Cannot cancel at this stage" });
+    if (blocked && !isAdmin(req.user)) {
+      await conn.rollback();
+      return res.status(409).json({ error: "Cannot cancel at this stage" });
+    }
+
+    // ✅ restock items
+    const [items] = await conn.query(
+      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
+      [id]
+    );
+
+    for (const it of items) {
+      const qty = Number(it.qty || 0);
+      if (!qty) continue;
+
+      if (it.variant_id) {
+        await conn.query(`UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id=?`, [
+          qty,
+          it.variant_id,
+        ]);
+      } else if (it.product_id) {
+        await conn.query(`UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id=?`, [
+          qty,
+          it.product_id,
+        ]);
+      }
+    }
 
     await conn.query(`UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE id=?`, [id]);
+
+    await conn.commit();
 
     try {
       if (order.user_id) {
@@ -1197,6 +1420,9 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     res.json({ ok: true, status: "CANCELLED" });
   } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
