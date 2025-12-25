@@ -375,7 +375,8 @@ function parseVariantsBody(body) {
     if (!size && !color) continue;
 
     const stockN = Number(v.stock);
-    const stock = Number.isFinite(stockN) && stockN >= 0 ? Math.floor(stockN) : 0;
+    const stock =
+      Number.isFinite(stockN) && stockN >= 0 ? Math.floor(stockN) : 0;
 
     const po =
       v.price_override == null || v.price_override === ""
@@ -383,7 +384,9 @@ function parseVariantsBody(body) {
         : Number(v.price_override);
     const price_override = Number.isFinite(po) && po >= 0 ? po : null;
 
-    const active = v.is_active === undefined ? 1 : parseBoolFlag(v.is_active, 1);
+    const active =
+      v.is_active === undefined ? 1 : parseBoolFlag(v.is_active, 1);
+
     out.push({
       size,
       color,
@@ -460,13 +463,6 @@ async function attachVariantsToProducts(pool, items, opts = {}) {
 
 /**
  * Liste des produits (sans filtre ville)
- * - channel: null | 'african-food' | 'african-market'
- * - onlyActive: bool
- * - onlyPromos: bool
- * - categoryId, subCategoryId, shopId, q
- * - vertical: null | 'FOOD' | 'MARKET' | 'FASHION'
- * - includeVariants: bool (si true => renvoie variants[] actifs)
- * - onlyWithVariants: bool (si true => renvoie uniquement produits qui ont des variants actifs)
  */
 async function listProducts(pool, opts) {
   const {
@@ -495,7 +491,9 @@ async function listProducts(pool, opts) {
     if (channel === "african-food") {
       whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
     } else if (channel === "african-market") {
-      whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+      whereParts.push(
+        `(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`
+      );
     } else {
       whereParts.push("1=1");
     }
@@ -504,7 +502,9 @@ async function listProducts(pool, opts) {
   if (onlyActive) whereParts.push("p.is_active = 1");
 
   if (onlyPromos) {
-    whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
+    whereParts.push(
+      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
+    );
   }
 
   const catId = Number(categoryId) || 0;
@@ -527,18 +527,19 @@ async function listProducts(pool, opts) {
 
   const qq = String(q || "").trim().toLowerCase();
   if (qq) {
-    whereParts.push(`
+    whereParts.push(
+      `
       (
         LOWER(p.name) LIKE ?
         OR LOWER(COALESCE(p.description,'')) LIKE ?
         OR LOWER(COALESCE(s.name,'')) LIKE ?
       )
-    `);
+    `
+    );
     const like = `%${qq}%`;
     params.push(like, like, like);
   }
 
-  // ✅ option: seulement produits avec variants actifs
   if (parseBoolFlag(onlyWithVariants, 0) === 1) {
     whereParts.push(
       `EXISTS (SELECT 1 FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1)`
@@ -603,7 +604,8 @@ async function listProducts(pool, opts) {
   let rows = rowsRaw.map((r) => {
     const base = stripDuuminiRateFromProduct(r);
     const variants_count = Number(r.variants_count || 0);
-    const min_price = r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
+    const min_price =
+      r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
     return {
       ...base,
       has_variants: variants_count > 0,
@@ -612,8 +614,9 @@ async function listProducts(pool, opts) {
     };
   });
 
-  // ✅ attach variants actifs si demandé
-  rows = await attachVariantsToProducts(pool, rows, { includeVariants: !!includeVariants });
+  rows = await attachVariantsToProducts(pool, rows, {
+    includeVariants: !!includeVariants,
+  });
 
   return { rows, total };
 }
@@ -659,10 +662,8 @@ async function listHandler(req, res, next) {
   try {
     const citiesCol = await getCitiesColCached(pool);
 
-    // ✅ Auto include variants for FASHION unless explicitly disabled
     const v = normalizeVertical(vertical, null);
-    const include =
-      includeVariants === 1 ? true : v === "FASHION" ? true : false;
+    const include = includeVariants === 1 ? true : v === "FASHION" ? true : false;
 
     const { rows, total } = await listProducts(pool, {
       limit,
@@ -752,9 +753,6 @@ async function listMarketHandler(req, res, next) {
   }
 }
 
-// ✅ NEW: listing fashion (alias pratique)
-// - par défaut : includeVariants=1
-// - tu peux forcer disable via ?includeVariants=0
 router.get("/fashion", async (req, res, next) => {
   req.query.vertical = "FASHION";
   if (req.query.includeVariants == null) req.query.includeVariants = "1";
@@ -796,7 +794,8 @@ router.get("/promotions", async (req, res, next) => {
       shopId,
       q,
       vertical,
-      includeVariants: includeVariants === 1 && normalizeVertical(vertical, null) === "FASHION",
+      includeVariants:
+        includeVariants === 1 && normalizeVertical(vertical, null) === "FASHION",
       onlyWithVariants: 0,
     });
 
@@ -912,7 +911,7 @@ router.get("/top-rated", async (req, res, next) => {
  * VARIANTS API
  * ======================================================================= */
 
-// ✅ GET variants for a product
+// GET variants for a product
 router.get("/:id/variants", async (req, res, next) => {
   const productId = parseIdParam(req.params.id);
   if (!productId) return next();
@@ -932,7 +931,7 @@ router.get("/:id/variants", async (req, res, next) => {
   }
 });
 
-// ✅ PUT one variant
+// PUT one variant
 router.put(
   "/variants/:variantId",
   authRequired,
@@ -1020,7 +1019,7 @@ router.put(
   }
 );
 
-// ✅ DELETE one variant
+// DELETE one variant
 router.delete(
   "/variants/:variantId",
   authRequired,
@@ -1055,7 +1054,7 @@ router.delete(
   }
 );
 
-// ✅ POST bulk variants for a product (replace or upsert)
+// POST bulk variants for a product (replace or upsert)
 router.post(
   "/:id/variants",
   authRequired,
@@ -1309,7 +1308,9 @@ router.post(
 
       const incomingVertical = normalizeVertical(vertical, null);
       const fallbackVertical =
-        String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
+        String(resolvedSub.slug || "").toLowerCase() === "food"
+          ? "FOOD"
+          : "MARKET";
       const finalVertical = incomingVertical || fallbackVertical;
 
       const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
@@ -1317,7 +1318,9 @@ router.post(
 
       const makeSlug = () =>
         (slug && String(slug).trim()) ||
-        `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
+        `${Date.now().toString(36)}${Math.random()
+          .toString(36)
+          .slice(2, 7)}`.toLowerCase();
 
       const promo = parsePromoFields({
         promo_eligible,
@@ -1406,7 +1409,15 @@ router.post(
               price_override = VALUES(price_override),
               is_active = VALUES(is_active)
             `,
-            [productId, v.size, v.color, v.sku, v.stock, v.price_override, v.is_active ?? 1]
+            [
+              productId,
+              v.size,
+              v.color,
+              v.sku,
+              v.stock,
+              v.price_override,
+              v.is_active ?? 1,
+            ]
           );
         }
       }
@@ -1441,7 +1452,10 @@ router.post(
           }
         }
       } catch (e) {
-        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
+        console.error(
+          "[products] Failed to enqueue PRODUCT_CREATED notifications",
+          e
+        );
       }
 
       try {
@@ -1531,7 +1545,10 @@ router.put(
             `SELECT id FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
-          if (!shop) return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          if (!shop)
+            return res
+              .status(400)
+              .json({ error: "Boutique invalide (shop_id)" });
           newShopIdParam = sid;
         }
       }
@@ -1550,7 +1567,8 @@ router.put(
       }
 
       let duuminiRate = null;
-      if (resolvedSub) duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
+      if (resolvedSub)
+        duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
 
       const active = parseBoolFlag(is_active, null);
 
@@ -1820,7 +1838,10 @@ router.delete(
 );
 
 /* =======================================================================
- *  Route de partage avec meta OG
+ *  Route de partage avec meta OG (✅ FIX)
+ *  - redirect vers la VRAIE route front
+ *  - og:image : si /uploads => base API (pas baseWeb)
+ *  - no-store pour éviter cache WhatsApp/FB
  * ======================================================================= */
 
 const shareRouter = express.Router();
@@ -1887,8 +1908,15 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       process.env.FRONT_WEB_BASE_URL ||
       "https://www.duumini.com";
 
-    const slugOrId = product.slug || product.id;
-    const finalUrl = `${baseWeb}/products/${encodeURIComponent(slugOrId)}`;
+    // ✅ base publique API (pour /uploads/…)
+    const apiBase =
+      env.API_PUBLIC_ORIGIN ||
+      process.env.API_PUBLIC_ORIGIN ||
+      "https://duumini-api.onrender.com";
+
+    // ✅ IMPORTANT: adapte ici la route exacte de ton front
+    // (le plus sûr: /product/:id)
+    const finalUrl = `${baseWeb}/product/${encodeURIComponent(product.id)}`;
 
     const sub = String(product.sub_category_slug || "").trim().toLowerCase();
     const channelPath = sub === "food" ? "/african-food" : "/african-market";
@@ -1898,18 +1926,16 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     );
 
     const descriptionRaw =
-      product.description ||
-      "Découvrez ce produit africain disponible sur Duumini.";
+      product.description || "Découvrez ce produit africain disponible sur Duumini.";
     const shortDesc =
-      descriptionRaw.length > 180
-        ? descriptionRaw.slice(0, 177) + "..."
-        : descriptionRaw;
+      descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
     const ogDescription = escapeHtml(shortDesc);
 
+    // ✅ og:image : si URL relative => base selon le cas
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
     if (ogImage && !/^https?:\/\//i.test(ogImage)) {
-      if (ogImage.startsWith("/")) ogImage = `${baseWeb}${ogImage}`;
-      else ogImage = `${baseWeb}/${ogImage}`;
+      const base = String(ogImage).startsWith("/uploads") ? apiBase : baseWeb;
+      ogImage = String(ogImage).startsWith("/") ? `${base}${ogImage}` : `${base}/${ogImage}`;
     }
     if (!ogImage) ogImage = `${baseWeb}/images/share-default-product.jpg`;
 
@@ -1979,6 +2005,8 @@ ${JSON.stringify(jsonLd)}
   </body>
 </html>`;
 
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store, max-age=0");
     res.status(200).send(html);
   } catch (e) {
     next(e);
