@@ -23,7 +23,6 @@ function absUrl(req, maybeUrl, { apiBase, webBase } = {}) {
   const WEB = (webBase || env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || originFromReq).replace(/\/+$/, "");
   const API = (apiBase || env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || originFromReq).replace(/\/+$/, "");
 
-  // uploads/media => API, sinon => WEB
   const base = u.startsWith("/uploads") || u.startsWith("/media") ? API : WEB;
   return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
@@ -73,11 +72,11 @@ router.get("/product/:id", async (req, res, next) => {
     let ogImage = absUrl(req, imgPick, { apiBase, webBase });
     if (!ogImage) ogImage = `${webBase}/images/share-default-product.jpg`;
 
-    // ✅ ROUTE FRONT (alignée avec ProductView)
+    // ✅ ROUTE FRONT (ProductView) : /products/:idOrSlug
     const slugOrId = (p.slug && String(p.slug).trim()) ? String(p.slug).trim() : String(p.id);
-    const finalUrl = `${webBase}/product/${encodeURIComponent(slugOrId)}`;
+    const finalUrl = `${webBase}/products/${encodeURIComponent(slugOrId)}`;
 
-    // ✅ URL partagée (celle qui contient les OG tags)
+    // ✅ URL partagée (celle avec OG tags) : ce endpoint
     const apiShareUrl = `${apiBase}${req.baseUrl}/product/${encodeURIComponent(p.id)}`;
 
     const priceAmount = Number(p.price || 0);
@@ -141,7 +140,6 @@ router.get("/product/:id", async (req, res, next) => {
 </html>`;
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    // ✅ un petit cache aide les scrapers (FB/WhatsApp) à être stables
     res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
     return res.status(200).send(html);
   } catch (e) {
