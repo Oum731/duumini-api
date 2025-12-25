@@ -1134,7 +1134,96 @@ router.post(
   }
 );
 
-/* ----------------------------- Read one ----------------------------- */
+/* ----------------------------- Read one by SLUG (✅ NEW) ----------------------------- */
+// Ton ProductView appelle /api/products/slug/:slug => on l'ajoute.
+router.get("/slug/:slug", async (req, res, next) => {
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!slug) return next();
+
+  const pool = getPool();
+  try {
+    const citiesCol = await getCitiesColCached(pool);
+
+    const [rows] = await pool.query(
+      `SELECT
+         p.*,
+         s.name AS shop_name,
+         s.logo AS shop_logo,
+         s.cover AS shop_cover,
+         s.city AS shop_city,
+
+         c.name AS category_name,
+         c.slug AS category_slug,
+
+         sc.id   AS sub_category_id,
+         sc.name AS sub_category_name,
+         sc.slug AS sub_category_slug,
+
+         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+         (SELECT MIN(COALESCE(pv.price_override, p.price))
+            FROM product_variants pv
+           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+
+       FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
+       WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
+      [slug]
+    );
+
+    const rawProduct = rows[0];
+    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+
+    const product = stripDuuminiRateFromProduct(rawProduct);
+
+    const [images] = await pool.query(
+      `SELECT id, url, sort_order
+         FROM product_images
+        WHERE product_id=?
+        ORDER BY sort_order ASC, id ASC`,
+      [rawProduct.id]
+    );
+
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    let variants = undefined;
+    if (wantVariants) {
+      const [vrows] = await pool.query(
+        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
+           FROM product_variants
+          WHERE product_id=?
+          ORDER BY is_active DESC, id ASC`,
+        [rawProduct.id]
+      );
+      variants = vrows || [];
+    }
+
+    let cities = null;
+    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
+
+    const variants_count = Number(rawProduct.variants_count || 0);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
+
+    res.json({
+      ...product,
+      images,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      ...(variants ? { variants } : {}),
+      ...(cities ? { cities } : {}),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/* ----------------------------- Read one by ID ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
   if (!id) return next();
@@ -1331,7 +1420,8 @@ router.post(
 
       const incomingCities = parseCitiesBody(req.body);
       const cities = incomingCities == null ? null : incomingCities;
-      const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
+      const citiesJson =
+        citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       const variantsList = parseVariantsBody({ variants });
       const replace = parseBoolFlag(replace_variants, 0) === 1;
@@ -1839,7 +1929,7 @@ router.delete(
 
 /* =======================================================================
  *  Route de partage avec meta OG (✅ FIX)
- *  - redirect vers la VRAIE route front
+ *  - redirect vers la VRAIE route front: /products/:idOrSlug
  *  - og:image : si /uploads => base API (pas baseWeb)
  *  - no-store pour éviter cache WhatsApp/FB
  * ======================================================================= */
@@ -1914,28 +2004,34 @@ shareRouter.get("/product/:id", async (req, res, next) => {
       process.env.API_PUBLIC_ORIGIN ||
       "https://duumini-api.onrender.com";
 
-    // ✅ IMPORTANT: adapte ici la route exacte de ton front
-    // (le plus sûr: /product/:id)
-    const finalUrl = `${baseWeb}/product/${encodeURIComponent(product.id)}`;
+    // ✅ IMPORTANT: ton front est /products/:idOrSlug
+    const finalUrl = `${baseWeb}/products/${encodeURIComponent(product.id)}`;
 
     const sub = String(product.sub_category_slug || "").trim().toLowerCase();
     const channelPath = sub === "food" ? "/african-food" : "/african-market";
 
     const ogTitle = escapeHtml(
-      `${product.name} — Duumini${product.shop_name ? ` (${product.shop_name})` : ""}`
+      `${product.name} — Duumini${
+        product.shop_name ? ` (${product.shop_name})` : ""
+      }`
     );
 
     const descriptionRaw =
-      product.description || "Découvrez ce produit africain disponible sur Duumini.";
+      product.description ||
+      "Découvrez ce produit africain disponible sur Duumini.";
     const shortDesc =
-      descriptionRaw.length > 180 ? descriptionRaw.slice(0, 177) + "..." : descriptionRaw;
+      descriptionRaw.length > 180
+        ? descriptionRaw.slice(0, 177) + "..."
+        : descriptionRaw;
     const ogDescription = escapeHtml(shortDesc);
 
     // ✅ og:image : si URL relative => base selon le cas
     let ogImage = product.cover || product.shop_cover || product.shop_logo || null;
     if (ogImage && !/^https?:\/\//i.test(ogImage)) {
       const base = String(ogImage).startsWith("/uploads") ? apiBase : baseWeb;
-      ogImage = String(ogImage).startsWith("/") ? `${base}${ogImage}` : `${base}/${ogImage}`;
+      ogImage = String(ogImage).startsWith("/")
+        ? `${base}${ogImage}`
+        : `${base}/${ogImage}`;
     }
     if (!ogImage) ogImage = `${baseWeb}/images/share-default-product.jpg`;
 
@@ -1985,7 +2081,9 @@ shareRouter.get("/product/:id", async (req, res, next) => {
     <meta property="og:image" content="${ogImage}" />
     <meta property="og:url" content="${finalUrl}" />
     <meta property="product:price:amount" content="${priceAmount}" />
-    <meta property="product:price:currency" content="${escapeHtml(priceCurrency)}" />
+    <meta property="product:price:currency" content="${escapeHtml(
+      priceCurrency
+    )}" />
     <meta property="product:retailer_item_id" content="${product.id}" />
     <meta property="product:category" content="${escapeHtml(channelPath)}" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -2007,6 +2105,8 @@ ${JSON.stringify(jsonLd)}
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     res.status(200).send(html);
   } catch (e) {
     next(e);
