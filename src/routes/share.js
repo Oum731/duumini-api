@@ -23,6 +23,7 @@ function absUrl(req, maybeUrl, { apiBase, webBase } = {}) {
   const WEB = (webBase || env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || originFromReq).replace(/\/+$/, "");
   const API = (apiBase || env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || originFromReq).replace(/\/+$/, "");
 
+  // uploads/media => API, sinon => WEB
   const base = u.startsWith("/uploads") || u.startsWith("/media") ? API : WEB;
   return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
@@ -48,7 +49,6 @@ router.get("/product/:id", async (req, res, next) => {
           WHERE pi.product_id = p.id
           ORDER BY pi.sort_order ASC, pi.id ASC
           LIMIT 1) AS cover_img,
-        p.cover AS cover_col,
         s.cover AS shop_cover,
         s.logo  AS shop_logo
       FROM products p
@@ -62,28 +62,29 @@ router.get("/product/:id", async (req, res, next) => {
     const p = rows[0];
     if (!p || Number(p.is_active || 0) !== 1) return res.status(404).send("Not found");
 
-    const title = escapeHtml(`${p.name || "Produit Duumini"}${p.shop_name ? ` — ${p.shop_name}` : ""}`);
+    const titleTxt = `${p.name || "Produit Duumini"}${p.shop_name ? ` — ${p.shop_name}` : ""}`;
+    const title = escapeHtml(titleTxt);
 
     const descRaw = p.description || "Découvrez ce produit africain disponible sur Duumini.";
     const shortDesc = descRaw.length > 180 ? descRaw.slice(0, 177) + "..." : descRaw;
     const description = escapeHtml(shortDesc);
 
-    const imgPick = p.cover_img || p.cover_col || p.shop_cover || p.shop_logo || null;
+    const imgPick = p.cover_img || p.shop_cover || p.shop_logo || null;
     let ogImage = absUrl(req, imgPick, { apiBase, webBase });
     if (!ogImage) ogImage = `${webBase}/images/share-default-product.jpg`;
 
-    // ✅ page produit du FRONT (cible finale)
-    const finalUrl = `${webBase}/products/${encodeURIComponent(p.id)}`;
+    // ✅ ROUTE FRONT (alignée avec ProductView)
+    const slugOrId = (p.slug && String(p.slug).trim()) ? String(p.slug).trim() : String(p.id);
+    const finalUrl = `${webBase}/product/${encodeURIComponent(slugOrId)}`;
 
-    // ✅ l'URL de partage réelle (cette route API)
-    // Si ton router est monté en /api/share => ce sera /api/share/product/:id
+    // ✅ URL partagée (celle qui contient les OG tags)
     const apiShareUrl = `${apiBase}${req.baseUrl}/product/${encodeURIComponent(p.id)}`;
 
     const priceAmount = Number(p.price || 0);
     const priceCurrency = escapeHtml(p.currency || "MAD");
 
     const sub = String(p.sub_category_slug || "").trim().toLowerCase();
-    const categoryLabel = sub === "food" ? "African Food" : "African Market";
+    const categoryLabel = sub === "food" ? "African Food" : sub === "fashion" ? "Fashion" : "African Market";
 
     const jsonLd = {
       "@context": "https://schema.org",
@@ -129,9 +130,7 @@ router.get("/product/:id", async (req, res, next) => {
     <meta name="twitter:description" content="${description}" />
     <meta name="twitter:image" content="${ogImage}" />
 
-    <script type="application/ld+json">
-${JSON.stringify(jsonLd)}
-    </script>
+    <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
 
     <meta http-equiv="refresh" content="0;url=${finalUrl}" />
     <script>window.location.replace(${JSON.stringify(finalUrl)});</script>
@@ -142,9 +141,8 @@ ${JSON.stringify(jsonLd)}
 </html>`;
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
+    // ✅ un petit cache aide les scrapers (FB/WhatsApp) à être stables
+    res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
     return res.status(200).send(html);
   } catch (e) {
     next(e);
