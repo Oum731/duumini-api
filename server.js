@@ -209,9 +209,14 @@ app.use("/api/products", productRatingsRouter);
 /* ✅ NEW: locations API (liste + ajout auto ville/commune/quartier) */
 app.use("/api/locations", locations);
 
-// ✅ Route de partage avec meta OG
-if (products.shareRouter) {
+/* =========================
+ * ✅ Partage (OG tags) — UNE SEULE SOURCE DE VÉRITÉ
+ * - /share/product/:id (HTML OG + redirection vers le front)
+ * ========================= */
+if (products && products.shareRouter) {
   app.use("/share", products.shareRouter);
+} else {
+  console.warn("[share] products.shareRouter missing -> /share disabled");
 }
 
 /* =========================
