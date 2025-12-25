@@ -6,10 +6,6 @@ const cookieParser = require("cookie-parser");
 const http = require("http");
 const path = require("path");
 
-/**
- * ✅ dotenv uniquement en local/dev
- * Render injecte déjà les variables d'env en production.
- */
 if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
@@ -32,28 +28,22 @@ const events = require("./src/routes/events");
 const productRatingsRouter = require("./src/routes/productRatings");
 const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
-
-// ✅ NEW: locations routes (villes/communes/quartiers suggestions)
 const locations = require("./src/routes/locations");
 
-// ✅ AI Ads routes
+// AI Ads routes
 const metaCampaignRoutes = require("./src/routes/meta_campaign");
 const googleCampaignRoutes = require("./src/routes/google_campaign");
 const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
 let metaAiAdsRoutes = null;
 try {
   metaAiAdsRoutes = require("./src/routes/meta_ai_ads");
-} catch {
-  // optionnel si pas encore créé
-}
+} catch {}
 
-// ✅ (optionnel) env-check admin-only
+// (optionnel) env-check admin-only
 let authRequired, isAdmin;
 try {
   ({ authRequired, isAdmin } = require("./src/middlewares/auth"));
-} catch {
-  // ignore
-}
+} catch {}
 
 /* =========================
  * ✅ SAFE env log (sans secrets)
@@ -61,30 +51,25 @@ try {
 function yn(v) {
   return v ? "OK" : "MISSING";
 }
-
 console.log("[ENV] NODE_ENV =", env.NODE_ENV);
 console.log("[ENV] PORT =", env.PORT);
 console.log("[ENV] CORS_ORIGINS =", env.CORS_ORIGINS || "*");
-
-// AI / OPENAI
 console.log("[ENV] DUUMINI_AI_MODE =", env.DUUMINI_AI_MODE || "SAFE");
 console.log("[ENV] OPENAI_API_KEY =", yn(env.OPENAI_API_KEY));
 console.log("[ENV] OPENAI_MODEL =", env.OPENAI_MODEL || "(default)");
-
-// META ADS
 console.log("[ENV] META_AD_ACCOUNT_ID =", yn(env.META_AD_ACCOUNT_ID));
 console.log("[ENV] META_AD_ACCESS_TOKEN =", yn(env.META_AD_ACCESS_TOKEN));
 console.log("[ENV] META_PAGE_ID =", yn(env.META_PAGE_ID));
 console.log("[ENV] META_DEFAULT_ADSET_ID =", yn(env.META_DEFAULT_ADSET_ID));
 
 /* =========================
- * ✅ APP INIT (AVANT app.use)
+ * ✅ APP INIT
  * ========================= */
 const app = express();
 app.set("trust proxy", 1);
 
 /* =========================
- * CORS (Express 5 compatible)
+ * ✅ CORS (clean, pas de double OPTIONS)
  * ========================= */
 const corsOrigins =
   env.CORS_ORIGINS === "*"
@@ -123,59 +108,32 @@ app.use(
   })
 );
 
-// ✅ Handler OPTIONS universel (préflight)
-app.use((req, res, next) => {
-  if (req.method !== "OPTIONS") return next();
-
-  const origin = req.headers.origin || "";
-  if (corsOrigins === true) {
-    res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  } else if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    [
-      "Content-Type",
-      "Authorization",
-      "Accept",
-      "Origin",
-      "X-Requested-With",
-      "x-access-token",
-      "Cache-Control",
-      "Pragma",
-    ].join(", ")
-  );
-  return res.sendStatus(204);
-});
-
 /* =========================
- * Body parsers & middlewares
+ * Middlewares
  * ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
-app.use(morgan("dev"));
+
+// logs: dev uniquement (évite de ralentir en prod)
+if (env.NODE_ENV !== "production") {
+  app.use(morgan("dev"));
+}
 
 /* =========================
  * Static files
  * ========================= */
-app.use("/media", express.static("media"));
+app.use("/media", express.static("media", { maxAge: "7d", index: false }));
+
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 
 /* =========================
- * Healthcheck
+ * Healthcheck (rapide)
  * ========================= */
-app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, pid: process.pid, uptime: process.uptime() })
+  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
 );
 
 /* =========================
@@ -206,12 +164,10 @@ app.use("/api/devices", devices);
 app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
-/* ✅ NEW: locations API (liste + ajout auto ville/commune/quartier) */
 app.use("/api/locations", locations);
 
 /* =========================
- * ✅ Partage (OG tags) — UNE SEULE SOURCE DE VÉRITÉ
- * - /share/product/:id (HTML OG + redirection vers le front)
+ * Partage (OG tags)
  * ========================= */
 if (products && products.shareRouter) {
   app.use("/share", products.shareRouter);
@@ -220,7 +176,7 @@ if (products && products.shareRouter) {
 }
 
 /* =========================
- * ✅ Admin env-check (optionnel)
+ * Admin env-check (optionnel)
  * ========================= */
 if (authRequired && isAdmin) {
   app.get("/api/admin/env-check", authRequired, isAdmin, (_req, res) => {
@@ -245,15 +201,25 @@ if (authRequired && isAdmin) {
 }
 
 /* =========================
- * ✅ AI (page copy + agent)
+ * AI (page copy + agent)
  * ========================= */
 app.use("/api/page-copy", require("./src/routes/pageCopy"));
-const { startAutoCopyCron } = require("./src/ai/autoCopyJob");
-startAutoCopyCron();
 app.use("/api/ai", aiRoutes);
 
+/* ✅ Cron auto-copy contrôlé par env */
+const RUN_CRON = String(process.env.RUN_CRON || "").trim() || (env.NODE_ENV === "production" ? "1" : "0");
+if (RUN_CRON === "1") {
+  try {
+    const { startAutoCopyCron } = require("./src/ai/autoCopyJob");
+    startAutoCopyCron();
+    console.log("[cron] autoCopyJob started");
+  } catch (e) {
+    console.warn("[cron] failed to start:", e?.message || e);
+  }
+}
+
 /* =========================
- * ✅ AI ADS ROUTES
+ * AI ADS ROUTES
  * ========================= */
 app.use("/api/ads", googleAiAdsRoutes);
 if (metaAiAdsRoutes) app.use("/api/ads", metaAiAdsRoutes);
@@ -267,18 +233,53 @@ app.use(notFound);
 app.use(errorHandler);
 
 /* =========================
- * Socket + Worker
+ * Server + Socket + Worker
  * ========================= */
 const server = http.createServer(app);
-const { attachSocket } = require("./src/ws");
-const io = attachSocket(server);
 
-const { startNotificationWorker } = require("./src/workers/notificationWorker");
-startNotificationWorker(io);
+// timeouts (évite des connexions qui pendouillent)
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 70_000;
+server.requestTimeout = 120_000;
+
+let io = null;
+try {
+  const { attachSocket } = require("./src/ws");
+  io = attachSocket(server);
+} catch (e) {
+  console.warn("[ws] socket attach skipped:", e?.message || e);
+}
+
+/* ✅ Worker notifications contrôlé par env */
+const RUN_WORKER = String(process.env.RUN_WORKER || "").trim() || (env.NODE_ENV === "production" ? "1" : "0");
+if (RUN_WORKER === "1" && io) {
+  try {
+    const { startNotificationWorker } = require("./src/workers/notificationWorker");
+    startNotificationWorker(io);
+    console.log("[worker] notificationWorker started");
+  } catch (e) {
+    console.warn("[worker] failed to start:", e?.message || e);
+  }
+}
 
 /* =========================
- * Start
+ * Start + Graceful shutdown
  * ========================= */
-server.listen(env.PORT, "0.0.0.0", () =>
-  console.log(`API listening on :${env.PORT}`)
-);
+server.listen(env.PORT, "0.0.0.0", () => {
+  console.log(`API listening on :${env.PORT}`);
+});
+
+function shutdown(signal) {
+  console.log(`[shutdown] ${signal} received`);
+  server.close(() => {
+    console.log("[shutdown] http server closed");
+    process.exit(0);
+  });
+  // au cas où un close bloquerait
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
