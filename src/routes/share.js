@@ -13,6 +13,10 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+function cleanBase(x) {
+  return String(x || "").trim().replace(/\/+$/, "");
+}
+
 function absUrl(req, maybeUrl, { apiBase, webBase } = {}) {
   if (!maybeUrl) return "";
   const u = String(maybeUrl).trim();
@@ -20,9 +24,10 @@ function absUrl(req, maybeUrl, { apiBase, webBase } = {}) {
   if (/^https?:\/\//i.test(u)) return u;
 
   const originFromReq = `${req.protocol}://${req.get("host")}`;
-  const WEB = (webBase || env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || originFromReq).replace(/\/+$/, "");
-  const API = (apiBase || env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || originFromReq).replace(/\/+$/, "");
+  const WEB = cleanBase(webBase || env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || originFromReq);
+  const API = cleanBase(apiBase || env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || originFromReq);
 
+  // si image servie par l’API (uploads/media) => API, sinon WEB
   const base = u.startsWith("/uploads") || u.startsWith("/media") ? API : WEB;
   return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
@@ -34,8 +39,10 @@ router.get("/product/:id", async (req, res, next) => {
   const pool = getPool();
 
   try {
-    const webBase = (env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com").replace(/\/+$/, "");
-    const apiBase = (env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || "https://duumini-api.onrender.com").replace(/\/+$/, "");
+    // ✅ domaine web “visible”
+    const webBase = cleanBase(env.FRONT_WEB_BASE_URL || process.env.FRONT_WEB_BASE_URL || "https://www.duumini.com");
+    // ✅ domaine public API (pour résoudre /uploads si besoin)
+    const apiBase = cleanBase(env.API_PUBLIC_ORIGIN || process.env.API_PUBLIC_ORIGIN || "https://duumini-api.onrender.com");
 
     const [rows] = await pool.query(
       `
@@ -72,12 +79,12 @@ router.get("/product/:id", async (req, res, next) => {
     let ogImage = absUrl(req, imgPick, { apiBase, webBase });
     if (!ogImage) ogImage = `${webBase}/images/share-default-product.jpg`;
 
-    // ✅ ROUTE FRONT (ProductView) : /products/:idOrSlug
+    // ✅ URL finale FRONT
     const slugOrId = (p.slug && String(p.slug).trim()) ? String(p.slug).trim() : String(p.id);
     const finalUrl = `${webBase}/products/${encodeURIComponent(slugOrId)}`;
 
-    // ✅ URL partagée (celle avec OG tags) : ce endpoint
-    const apiShareUrl = `${apiBase}${req.baseUrl}/product/${encodeURIComponent(p.id)}`;
+    // ✅ URL PARTAGÉE = SUR LE SITE (même si proxy vers l’API)
+    const shareUrl = `${webBase}/share/product/${encodeURIComponent(p.id)}`;
 
     const priceAmount = Number(p.price || 0);
     const priceCurrency = escapeHtml(p.currency || "MAD");
@@ -103,40 +110,44 @@ router.get("/product/:id", async (req, res, next) => {
       },
     };
 
+    // ✅ Redirection JS (pas besoin de meta refresh agressif)
     const html = `<!doctype html>
 <html lang="fr">
-  <head>
-    <meta charset="utf-8" />
-    <title>${title}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+<head>
+  <meta charset="utf-8" />
+  <title>${title}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <meta name="robots" content="noindex, nofollow, noarchive" />
-    <link rel="canonical" href="${finalUrl}" />
+  <link rel="canonical" href="${finalUrl}" />
 
-    <meta property="og:type" content="product" />
-    <meta property="og:site_name" content="Duumini" />
-    <meta property="og:locale" content="fr_FR" />
-    <meta property="og:title" content="${title}" />
-    <meta property="og:description" content="${description}" />
-    <meta property="og:image" content="${ogImage}" />
-    <meta property="og:url" content="${apiShareUrl}" />
+  <meta property="og:type" content="product" />
+  <meta property="og:site_name" content="Duumini" />
+  <meta property="og:locale" content="fr_FR" />
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${description}" />
+  <meta property="og:image" content="${ogImage}" />
+  <meta property="og:url" content="${shareUrl}" />
 
-    <meta property="product:price:amount" content="${priceAmount}" />
-    <meta property="product:price:currency" content="${priceCurrency}" />
+  <meta property="product:price:amount" content="${priceAmount}" />
+  <meta property="product:price:currency" content="${priceCurrency}" />
 
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="${title}" />
-    <meta name="twitter:description" content="${description}" />
-    <meta name="twitter:image" content="${ogImage}" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${ogImage}" />
 
-    <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+  <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
 
-    <meta http-equiv="refresh" content="0;url=${finalUrl}" />
-    <script>window.location.replace(${JSON.stringify(finalUrl)});</script>
-  </head>
-  <body>
-    <p>Redirection vers <a href="${finalUrl}">${finalUrl}</a>…</p>
-  </body>
+  <script>
+    // Laisse le temps aux bots/socials de lire les OG tags
+    setTimeout(function () {
+      window.location.replace(${JSON.stringify(finalUrl)});
+    }, 250);
+  </script>
+</head>
+<body>
+  <p>Redirection vers <a href="${finalUrl}">${finalUrl}</a>…</p>
+</body>
 </html>`;
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");

@@ -5,6 +5,7 @@ const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const http = require("http");
 const path = require("path");
+const crypto = require("crypto");
 
 if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
@@ -46,6 +47,23 @@ try {
 } catch {}
 
 /* =========================
+ * ✅ Optional middlewares (prod)
+ * ========================= */
+let helmet = null;
+let compression = null;
+let rateLimit = null;
+
+try {
+  helmet = require("helmet");
+} catch {}
+try {
+  compression = require("compression");
+} catch {}
+try {
+  rateLimit = require("express-rate-limit");
+} catch {}
+
+/* =========================
  * ✅ SAFE env log (sans secrets)
  * ========================= */
 function yn(v) {
@@ -67,6 +85,40 @@ console.log("[ENV] META_DEFAULT_ADSET_ID =", yn(env.META_DEFAULT_ADSET_ID));
  * ========================= */
 const app = express();
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
+/* =========================
+ * ✅ Request ID (utile pour debug)
+ * ========================= */
+app.use((req, res, next) => {
+  const rid =
+    req.headers["x-request-id"] ||
+    (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"));
+  req.id = String(rid);
+  res.setHeader("X-Request-Id", String(rid));
+  next();
+});
+
+/* =========================
+ * ✅ Security headers
+ * ========================= */
+if (helmet) {
+  app.use(
+    helmet({
+      // Si tu sers aussi du contenu via ce même serveur et que ça casse des assets,
+      // on pourra ajuster la CSP. Pour l'API c'est OK.
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+    })
+  );
+}
+
+/* =========================
+ * ✅ Compression (API + static)
+ * ========================= */
+if (compression) {
+  app.use(compression());
+}
 
 /* =========================
  * ✅ CORS (clean, pas de double OPTIONS)
@@ -79,14 +131,26 @@ const corsOrigins =
         .map((s) => s.trim())
         .filter(Boolean);
 
+function isOriginAllowed(origin) {
+  if (corsOrigins === true) return true;
+  if (!origin) return true; // curl/server-to-server
+  if (Array.isArray(corsOrigins)) {
+    if (corsOrigins.includes(origin)) return true;
+
+    // Option: autoriser via suffix (ex: *.duumini.com) si tu mets ".duumini.com" dans CORS_ORIGINS
+    // Exemple env: CORS_ORIGINS=https://duumini.com,https://www.duumini.com,.duumini.com
+    const lower = origin.toLowerCase();
+    for (const o of corsOrigins) {
+      if (o.startsWith(".") && lower.endsWith(o.toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
 app.use(
   cors({
     origin(origin, cb) {
-      if (corsOrigins === true) return cb(null, true);
-      if (!origin) return cb(null, true);
-      if (Array.isArray(corsOrigins) && corsOrigins.includes(origin)) {
-        return cb(null, true);
-      }
+      if (isOriginAllowed(origin)) return cb(null, true);
       return cb(new Error("CORS not allowed for origin: " + origin));
     },
     credentials: true,
@@ -100,13 +164,38 @@ app.use(
       "x-access-token",
       "Cache-Control",
       "Pragma",
+      "X-Request-Id",
     ],
-    exposedHeaders: ["Content-Type", "Content-Length"],
+    exposedHeaders: ["Content-Type", "Content-Length", "X-Request-Id"],
     preflightContinue: false,
     optionsSuccessStatus: 204,
     maxAge: 86400,
   })
 );
+
+/* =========================
+ * ✅ Rate limit (anti spam / brute force)
+ * ========================= */
+if (rateLimit) {
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 240, // ~4 req/sec
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests" },
+  });
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 60, // 60 tentatives / 15 min
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many auth attempts" },
+  });
+
+  app.use("/api", apiLimiter);
+  app.use("/api/auth", authLimiter);
+}
 
 /* =========================
  * Middlewares
@@ -115,9 +204,17 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
 
-// logs: dev uniquement (évite de ralentir en prod)
+/* =========================
+ * Logs
+ * ========================= */
+morgan.token("id", (req) => req.id || "-");
+const logFormatDev = ":id :method :url :status :res[content-length] - :response-time ms";
+const logFormatProd = ":id :method :url :status - :response-time ms";
+
 if (env.NODE_ENV !== "production") {
-  app.use(morgan("dev"));
+  app.use(morgan(logFormatDev));
+} else {
+  app.use(morgan(logFormatProd));
 }
 
 /* =========================
@@ -230,7 +327,13 @@ app.use("/api/ads", googleCampaignRoutes);
  * 404 + Error handler
  * ========================= */
 app.use(notFound);
-app.use(errorHandler);
+app.use((err, req, res, next) => {
+  // Ajoute request-id dans les logs d'erreur
+  if (err) {
+    console.error("[error]", { id: req?.id, msg: err?.message, stack: err?.stack });
+  }
+  return errorHandler(err, req, res, next);
+});
 
 /* =========================
  * Server + Socket + Worker
@@ -275,7 +378,6 @@ function shutdown(signal) {
     console.log("[shutdown] http server closed");
     process.exit(0);
   });
-  // au cas où un close bloquerait
   setTimeout(() => process.exit(1), 10_000).unref();
 }
 
