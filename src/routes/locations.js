@@ -17,14 +17,62 @@ function normSpaces(s) {
   return x ? x.replace(/\s+/g, " ") : null;
 }
 
+function toTitleCase(s) {
+  const x = normSpaces(s);
+  if (!x) return null;
+  return x
+    .split(" ")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : ""))
+    .join(" ");
+}
+
+/**
+ * ✅ Sécurité: refuser HTML/tags + chars invisibles
+ * ✅ Whitelist: lettres (accents), chiffres, espaces, ' . -
+ * ✅ Longueur: 2..40 (ajuste si besoin)
+ */
+function isSafeLabel(s, { min = 2, max = 40 } = {}) {
+  const x = normSpaces(s);
+  if (!x) return false;
+
+  if (x.length < min || x.length > max) return false;
+
+  // HTML / tags
+  if (/[<>]/.test(x)) return false;
+
+  // caractères de contrôle / invisibles
+  if (/[\u0000-\u001F\u007F]/.test(x)) return false;
+
+  // blacklist simple (optionnel, mais utile)
+  const low = x.toLowerCase();
+  if (low.includes("script") || low.includes("onerror") || low.includes("onload")) return false;
+
+  // whitelist caractères
+  if (!/^[A-Za-zÀ-ÖØ-öø-ÿ0-9\s'.-]+$/.test(x)) return false;
+
+  return true;
+}
+
+/**
+ * ✅ Normalise + valide un champ (city/commune/quartier)
+ * - titre case (Mohammedia, Ain Sebaa…)
+ * - renvoie null si invalide
+ */
+function sanitizePlaceLabel(v, opts) {
+  const t = toTitleCase(v);
+  if (!t) return null;
+  if (!isSafeLabel(t, opts)) return null;
+  return t;
+}
+
 function normCity(v) {
-  return normSpaces(v);
+  return sanitizePlaceLabel(v, { min: 2, max: 40 });
 }
 function normCommune(v) {
-  return normSpaces(v);
+  return sanitizePlaceLabel(v, { min: 2, max: 60 });
 }
 function normQuartier(v) {
-  return normSpaces(v);
+  return sanitizePlaceLabel(v, { min: 1, max: 80 });
 }
 
 function pickQuery(req, ...keys) {
@@ -66,6 +114,17 @@ function sortFr(a, b) {
   return String(a).localeCompare(String(b), "fr");
 }
 
+/** ✅ filtre sécurité au moment du GET (si DB polluée) */
+function safeList(list, normalizer) {
+  const out = [];
+  for (const raw of list) {
+    const v = normalizer(raw);
+    if (!v) continue;
+    out.push(v);
+  }
+  return out;
+}
+
 function mergeUniqueStrings(rowsA, rowsB, normalizer) {
   const map = new Map();
   for (const r of [...rowsA, ...rowsB]) {
@@ -77,7 +136,6 @@ function mergeUniqueStrings(rowsA, rowsB, normalizer) {
 }
 
 function mergeWithCounts(rowsA, rowsB, normalizer) {
-  // rows: { name, cnt }
   const map = new Map(); // keyLower -> { value, count }
   const push = (r) => {
     const name = normalizer(r?.name);
@@ -108,7 +166,6 @@ router.get("/cities", async (req, res) => {
 
   try {
     if (withCount) {
-      // suggestions
       const [a] = await pool.query(
         `
         SELECT city AS name, COUNT(*) AS cnt
@@ -121,7 +178,6 @@ router.get("/cities", async (req, res) => {
         [limit]
       );
 
-      // users
       const [b] = await pool.query(
         `
         SELECT ville AS name, COUNT(*) AS cnt
@@ -134,7 +190,7 @@ router.get("/cities", async (req, res) => {
         [limit]
       );
 
-      let items = mergeWithCounts(a, b, normCity);
+      let items = mergeWithCounts(a, b, normCity); // ✅ filtre ici
       if (q) items = items.filter((x) => x.value.toLowerCase().includes(q));
       return res.json({ items });
     }
@@ -161,7 +217,7 @@ router.get("/cities", async (req, res) => {
       [limit]
     );
 
-    let items = mergeUniqueStrings(a, b, normCity);
+    let items = mergeUniqueStrings(a, b, normCity); // ✅ filtre ici
     if (q) items = items.filter((x) => x.toLowerCase().includes(q));
     res.json({ items });
   } catch (e) {
@@ -174,8 +230,11 @@ router.get("/cities", async (req, res) => {
  * body: { city } (ou { ville })
  * ========================= */
 router.post("/cities", async (req, res) => {
-  const city = normCity(pickBody(req, "city", "ville"));
-  if (!city) return res.status(400).json({ error: "city required" });
+  const raw = pickBody(req, "city", "ville");
+  const city = normCity(raw);
+
+  if (!raw) return res.status(400).json({ error: "city required" });
+  if (!city) return res.status(400).json({ error: "invalid city" });
 
   const pool = getPool();
   try {
@@ -198,8 +257,10 @@ router.post("/cities", async (req, res) => {
  * q=...&limit=...&withCount=1
  * ========================= */
 router.get("/communes", async (req, res) => {
-  const city = normCity(pickQuery(req, "city", "ville"));
-  if (!city) return res.status(400).json({ error: "city required" });
+  const cityRaw = pickQuery(req, "city", "ville");
+  const city = normCity(cityRaw);
+  if (!cityRaw) return res.status(400).json({ error: "city required" });
+  if (!city) return res.status(400).json({ error: "invalid city" });
 
   const q = qLike(req);
   const limit = parseLimit(req, 800, 1, 2000);
@@ -272,10 +333,16 @@ router.get("/communes", async (req, res) => {
  * body: { city/ville, commune }
  * ========================= */
 router.post("/communes", async (req, res) => {
-  const city = normCity(pickBody(req, "city", "ville"));
-  const commune = normCommune(pickBody(req, "commune"));
-  if (!city) return res.status(400).json({ error: "city required" });
-  if (!commune) return res.status(400).json({ error: "commune required" });
+  const cityRaw = pickBody(req, "city", "ville");
+  const communeRaw = pickBody(req, "commune");
+
+  const city = normCity(cityRaw);
+  const commune = normCommune(communeRaw);
+
+  if (!cityRaw) return res.status(400).json({ error: "city required" });
+  if (!communeRaw) return res.status(400).json({ error: "commune required" });
+  if (!city) return res.status(400).json({ error: "invalid city" });
+  if (!commune) return res.status(400).json({ error: "invalid commune" });
 
   const pool = getPool();
   try {
@@ -299,10 +366,16 @@ router.post("/communes", async (req, res) => {
  * q=...&limit=...&withCount=1
  * ========================= */
 router.get("/quartiers", async (req, res) => {
-  const city = normCity(pickQuery(req, "city", "ville"));
-  const commune = normCommune(pickQuery(req, "commune"));
-  if (!city) return res.status(400).json({ error: "city required" });
-  if (!commune) return res.status(400).json({ error: "commune required" });
+  const cityRaw = pickQuery(req, "city", "ville");
+  const communeRaw = pickQuery(req, "commune");
+
+  const city = normCity(cityRaw);
+  const commune = normCommune(communeRaw);
+
+  if (!cityRaw) return res.status(400).json({ error: "city required" });
+  if (!communeRaw) return res.status(400).json({ error: "commune required" });
+  if (!city) return res.status(400).json({ error: "invalid city" });
+  if (!commune) return res.status(400).json({ error: "invalid commune" });
 
   const q = qLike(req);
   const limit = parseLimit(req, 1200, 1, 3000);
@@ -375,12 +448,21 @@ router.get("/quartiers", async (req, res) => {
  * body: { city/ville, commune, quartier }
  * ========================= */
 router.post("/quartiers", async (req, res) => {
-  const city = normCity(pickBody(req, "city", "ville"));
-  const commune = normCommune(pickBody(req, "commune"));
-  const quartier = normQuartier(pickBody(req, "quartier"));
-  if (!city) return res.status(400).json({ error: "city required" });
-  if (!commune) return res.status(400).json({ error: "commune required" });
-  if (!quartier) return res.status(400).json({ error: "quartier required" });
+  const cityRaw = pickBody(req, "city", "ville");
+  const communeRaw = pickBody(req, "commune");
+  const quartierRaw = pickBody(req, "quartier");
+
+  const city = normCity(cityRaw);
+  const commune = normCommune(communeRaw);
+  const quartier = normQuartier(quartierRaw);
+
+  if (!cityRaw) return res.status(400).json({ error: "city required" });
+  if (!communeRaw) return res.status(400).json({ error: "commune required" });
+  if (!quartierRaw) return res.status(400).json({ error: "quartier required" });
+
+  if (!city) return res.status(400).json({ error: "invalid city" });
+  if (!commune) return res.status(400).json({ error: "invalid commune" });
+  if (!quartier) return res.status(400).json({ error: "invalid quartier" });
 
   const pool = getPool();
   try {
@@ -401,21 +483,22 @@ router.post("/quartiers", async (req, res) => {
 /* =========================
  * POST /api/locations/track  ✅ PRO (best-effort)
  * body: { kind: 'VILLE'|'COMMUNE'|'QUARTIER', ville/city, commune, quartier }
- *
- * - VILLE    => upsert (city, NULL, NULL)
- * - COMMUNE  => upsert (city, commune, NULL)
- * - QUARTIER => upsert (city, commune?, quartier)
  * ========================= */
 router.post("/track", async (req, res) => {
   const kindRaw = String(req.body?.kind || "").trim().toUpperCase();
   const kind = ["VILLE", "COMMUNE", "QUARTIER"].includes(kindRaw) ? kindRaw : null;
 
-  const city = normCity(pickBody(req, "city", "ville"));
-  const commune = normCommune(pickBody(req, "commune"));
-  const quartier = normQuartier(pickBody(req, "quartier"));
+  const cityRaw = pickBody(req, "city", "ville");
+  const communeRaw = pickBody(req, "commune");
+  const quartierRaw = pickBody(req, "quartier");
+
+  const city = normCity(cityRaw);
+  const commune = normCommune(communeRaw);
+  const quartier = normQuartier(quartierRaw);
 
   if (!kind) return res.status(400).json({ error: "kind required" });
-  if (!city) return res.status(400).json({ error: "city required" });
+  if (!cityRaw) return res.status(400).json({ error: "city required" });
+  if (!city) return res.status(400).json({ error: "invalid city" });
 
   const pool = getPool();
 
@@ -433,7 +516,9 @@ router.post("/track", async (req, res) => {
     }
 
     if (kind === "COMMUNE") {
-      if (!commune) return res.status(400).json({ error: "commune required" });
+      if (!communeRaw) return res.status(400).json({ error: "commune required" });
+      if (!commune) return res.status(400).json({ error: "invalid commune" });
+
       await pool.query(
         `
         INSERT INTO location_suggestions (city, commune, quartier)
@@ -446,16 +531,20 @@ router.post("/track", async (req, res) => {
     }
 
     // QUARTIER
-    if (!quartier) return res.status(400).json({ error: "quartier required" });
+    if (!quartierRaw) return res.status(400).json({ error: "quartier required" });
+    if (!quartier) return res.status(400).json({ error: "invalid quartier" });
 
-    // commune peut être null (si invité a tapé une adresse libre), on la laisse NULL
+    // commune peut être null (invité), mais si fourni on le valide
+    const communeSafe = communeRaw ? commune : null;
+    if (communeRaw && !communeSafe) return res.status(400).json({ error: "invalid commune" });
+
     await pool.query(
       `
       INSERT INTO location_suggestions (city, commune, quartier)
       VALUES (?, ?, ?)
       ON DUPLICATE KEY UPDATE city = VALUES(city)
       `,
-      [city, commune || null, quartier]
+      [city, communeSafe || null, quartier]
     );
 
     return res.json({ ok: true });
