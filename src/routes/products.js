@@ -6,12 +6,7 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const {
-  authRequired,
-  requireRole,
-  isVendor,
-  isAdmin,
-} = require("../middlewares/auth");
+const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
 
 // --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
@@ -27,9 +22,7 @@ cloudinary.config({
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
-    const folder = `products/${now.getFullYear()}/${String(
-      now.getMonth() + 1
-    ).padStart(2, "0")}`;
+    const folder = `products/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}`;
 
     const upload = cloudinary.uploader.upload_stream(
       {
@@ -282,6 +275,59 @@ function parsePromoFields(body) {
   };
 }
 
+/**
+ * ✅ FIX: calcul promo toujours sur price (client), jamais sur vendor_price.
+ * L'API renvoie promo_price / min_promo_price pour éviter les erreurs côté front.
+ */
+function computePromoPrice(basePrice, promoEligible, type, value) {
+  const base = Number(basePrice || 0);
+  if (!promoEligible) return null;
+
+  const v = Number(value);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  if (!Number.isFinite(v) || v <= 0) return null;
+
+  const t = String(type || "").toUpperCase();
+  let out = base;
+
+  if (t === "AMOUNT") out = base - v;
+  else if (t === "PERCENT") out = base * (1 - v / 100);
+  else out = base * (1 - v / 100);
+
+  if (!Number.isFinite(out)) return null;
+  if (out < 0) out = 0;
+
+  return +out.toFixed(2);
+}
+
+function withPromoComputed(p) {
+  if (!p) return p;
+
+  const promo_price = computePromoPrice(
+    p.price,
+    Number(p.promo_eligible) === 1,
+    p.promo_discount_type,
+    p.promo_discount_value
+  );
+
+  const min_promo_price =
+    p.min_price != null
+      ? computePromoPrice(
+          p.min_price,
+          Number(p.promo_eligible) === 1,
+          p.promo_discount_type,
+          p.promo_discount_value
+        )
+      : null;
+
+  return {
+    ...p,
+    promo_price,
+    min_promo_price,
+    has_promo: promo_price != null,
+  };
+}
+
 /* ============================
  * SubCategory (table)
  * ============================ */
@@ -375,8 +421,7 @@ function parseVariantsBody(body) {
     if (!size && !color) continue;
 
     const stockN = Number(v.stock);
-    const stock =
-      Number.isFinite(stockN) && stockN >= 0 ? Math.floor(stockN) : 0;
+    const stock = Number.isFinite(stockN) && stockN >= 0 ? Math.floor(stockN) : 0;
 
     const po =
       v.price_override == null || v.price_override === ""
@@ -384,8 +429,7 @@ function parseVariantsBody(body) {
         : Number(v.price_override);
     const price_override = Number.isFinite(po) && po >= 0 ? po : null;
 
-    const active =
-      v.is_active === undefined ? 1 : parseBoolFlag(v.is_active, 1);
+    const active = v.is_active === undefined ? 1 : parseBoolFlag(v.is_active, 1);
 
     out.push({
       size,
@@ -491,9 +535,7 @@ async function listProducts(pool, opts) {
     if (channel === "african-food") {
       whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
     } else if (channel === "african-market") {
-      whereParts.push(
-        `(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`
-      );
+      whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
     } else {
       whereParts.push("1=1");
     }
@@ -502,9 +544,7 @@ async function listProducts(pool, opts) {
   if (onlyActive) whereParts.push("p.is_active = 1");
 
   if (onlyPromos) {
-    whereParts.push(
-      `(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`
-    );
+    whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
   }
 
   const catId = Number(categoryId) || 0;
@@ -603,15 +643,19 @@ async function listProducts(pool, opts) {
 
   let rows = rowsRaw.map((r) => {
     const base = stripDuuminiRateFromProduct(r);
+
     const variants_count = Number(r.variants_count || 0);
     const min_price =
       r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
-    return {
+
+    const merged = {
       ...base,
       has_variants: variants_count > 0,
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
     };
+
+    return withPromoComputed(merged);
   });
 
   rows = await attachVariantsToProducts(pool, rows, {
@@ -648,15 +692,8 @@ function pickFilters(req) {
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActive = parseOnlyActive(req);
-  const {
-    categoryId,
-    subCategoryId,
-    shopId,
-    q,
-    vertical,
-    includeVariants,
-    onlyWithVariants,
-  } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, vertical, includeVariants, onlyWithVariants } =
+    pickFilters(req);
 
   const pool = getPool();
   try {
@@ -697,6 +734,7 @@ async function listFoodHandler(req, res, next) {
   const pool = getPool();
   try {
     const citiesCol = await getCitiesColCached(pool);
+
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
@@ -729,6 +767,7 @@ async function listMarketHandler(req, res, next) {
   const pool = getPool();
   try {
     const citiesCol = await getCitiesColCached(pool);
+
     const { rows, total } = await listProducts(pool, {
       limit,
       offset,
@@ -777,8 +816,7 @@ router.get("/promotions", async (req, res, next) => {
       ? "african-market"
       : null;
 
-  const { categoryId, subCategoryId, shopId, q, vertical, includeVariants } =
-    pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, vertical, includeVariants } = pickFilters(req);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
@@ -794,8 +832,7 @@ router.get("/promotions", async (req, res, next) => {
       shopId,
       q,
       vertical,
-      includeVariants:
-        includeVariants === 1 && normalizeVertical(vertical, null) === "FASHION",
+      includeVariants: includeVariants === 1 ? true : normalizeVertical(vertical, null) === "FASHION",
       onlyWithVariants: 0,
     });
 
@@ -850,7 +887,8 @@ router.get("/top-ordered", async (req, res, next) => {
       [limit]
     );
 
-    res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
+    const mapped = rowsRaw.map((r) => withPromoComputed(stripDuuminiRateFromProduct(r)));
+    res.json(withCities(mapped, citiesCol));
   } catch (e) {
     next(e);
   }
@@ -901,7 +939,8 @@ router.get("/top-rated", async (req, res, next) => {
       [minCount, limit]
     );
 
-    res.json(withCities(rowsRaw.map(stripDuuminiRateFromProduct), citiesCol));
+    const mapped = rowsRaw.map((r) => withPromoComputed(stripDuuminiRateFromProduct(r)));
+    res.json(withCities(mapped, citiesCol));
   } catch (e) {
     next(e);
   }
@@ -957,18 +996,14 @@ router.put(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const size =
-        req.body?.size === undefined ? null : normalizeSize(req.body.size);
-      const color =
-        req.body?.color === undefined ? null : normalizeColor(req.body.color);
-      const sku =
-        req.body?.sku === undefined ? null : normalizeSku(req.body.sku);
+      const size = req.body?.size === undefined ? null : normalizeSize(req.body.size);
+      const color = req.body?.color === undefined ? null : normalizeColor(req.body.color);
+      const sku = req.body?.sku === undefined ? null : normalizeSku(req.body.sku);
 
       const stock =
         req.body?.stock === undefined
           ? null
-          : Number.isFinite(Number(req.body.stock)) &&
-            Number(req.body.stock) >= 0
+          : Number.isFinite(Number(req.body.stock)) && Number(req.body.stock) >= 0
           ? Math.floor(Number(req.body.stock))
           : 0;
 
@@ -978,13 +1013,10 @@ router.put(
           : req.body.price_override == null || req.body.price_override === ""
           ? null
           : Number(req.body.price_override);
-      const price_override =
-        po == null ? null : Number.isFinite(po) && po >= 0 ? po : null;
 
-      const active =
-        req.body?.is_active === undefined
-          ? null
-          : parseBoolFlag(req.body.is_active, 1);
+      const price_override = po == null ? null : Number.isFinite(po) && po >= 0 ? po : null;
+
+      const active = req.body?.is_active === undefined ? null : parseBoolFlag(req.body.is_active, 1);
 
       await conn.query(
         `UPDATE product_variants SET
@@ -995,16 +1027,7 @@ router.put(
            price_override = CASE WHEN ? IS NULL THEN price_override ELSE ? END,
            is_active = COALESCE(?, is_active)
          WHERE id=?`,
-        [
-          size,
-          color,
-          sku,
-          stock,
-          po === undefined ? null : 1,
-          price_override,
-          active,
-          variantId,
-        ]
+        [size, color, sku, stock, po === undefined ? null : 1, price_override, active, variantId]
       );
 
       res.json({ ok: true });
@@ -1070,8 +1093,7 @@ router.post(
       const auth = await assertCanMutateProduct(conn, req.user, productId);
       if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
-      const replace =
-        parseBoolFlag(req.query.replace ?? req.body?.replace, 0) === 1;
+      const replace = parseBoolFlag(req.query.replace ?? req.body?.replace, 0) === 1;
 
       const variants = parseVariantsBody(req.body);
       if (!variants.length) {
@@ -1081,9 +1103,7 @@ router.post(
       await conn.beginTransaction();
 
       if (replace) {
-        await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [
-          productId,
-        ]);
+        await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [productId]);
       }
 
       for (const v of variants) {
@@ -1097,15 +1117,7 @@ router.post(
             price_override = VALUES(price_override),
             is_active = VALUES(is_active)
           `,
-          [
-            productId,
-            v.size,
-            v.color,
-            v.sku,
-            v.stock,
-            v.price_override,
-            v.is_active ?? 1,
-          ]
+          [productId, v.size, v.color, v.sku, v.stock, v.price_override, v.is_active ?? 1]
         );
       }
 
@@ -1135,7 +1147,6 @@ router.post(
 );
 
 /* ----------------------------- Read one by SLUG (✅ NEW) ----------------------------- */
-// Ton ProductView appelle /api/products/slug/:slug => on l'ajoute.
 router.get("/slug/:slug", async (req, res, next) => {
   const slug = String(req.params.slug || "").trim().toLowerCase();
   if (!slug) return next();
@@ -1175,8 +1186,6 @@ router.get("/slug/:slug", async (req, res, next) => {
     const rawProduct = rows[0];
     if (!rawProduct) return res.status(404).json({ error: "Not found" });
 
-    const product = stripDuuminiRateFromProduct(rawProduct);
-
     const [images] = await pool.query(
       `SELECT id, url, sort_order
          FROM product_images
@@ -1210,11 +1219,17 @@ router.get("/slug/:slug", async (req, res, next) => {
         ? null
         : Number(rawProduct.min_price);
 
+    const base = stripDuuminiRateFromProduct(rawProduct);
+    const product = withPromoComputed({
+      ...base,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      variants_count,
+    });
+
     res.json({
       ...product,
       images,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
       ...(variants ? { variants } : {}),
       ...(cities ? { cities } : {}),
     });
@@ -1263,8 +1278,6 @@ router.get("/:id", async (req, res, next) => {
     const rawProduct = rows[0];
     if (!rawProduct) return res.status(404).json({ error: "Not found" });
 
-    const product = stripDuuminiRateFromProduct(rawProduct);
-
     const [images] = await pool.query(
       `SELECT id, url, sort_order
          FROM product_images
@@ -1298,11 +1311,17 @@ router.get("/:id", async (req, res, next) => {
         ? null
         : Number(rawProduct.min_price);
 
+    const base = stripDuuminiRateFromProduct(rawProduct);
+    const product = withPromoComputed({
+      ...base,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      variants_count,
+    });
+
     res.json({
       ...product,
       images,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
       ...(variants ? { variants } : {}),
       ...(cities ? { cities } : {}),
     });
@@ -1357,22 +1376,15 @@ router.post(
           [req.user.id]
         );
         if (!shop) {
-          return res
-            .status(400)
-            .json({ error: "Aucune boutique associée à ce vendeur" });
+          return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
         }
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
         const sid = Number(shop_id) || 0;
         if (!sid) {
-          return res
-            .status(400)
-            .json({ error: "shop_id requis pour la création par un admin" });
+          return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
         }
-        const [[shop]] = await conn.query(
-          `SELECT id FROM shops WHERE id=? LIMIT 1`,
-          [sid]
-        );
+        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
         if (!shop) {
           return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         }
@@ -1385,10 +1397,7 @@ router.post(
         return res.status(400).json({ error: "name et price requis" });
       }
 
-      const resolvedSub = await resolveSubCategory(conn, {
-        sub_category_id,
-        category_id,
-      });
+      const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
       if (!resolvedSub) {
         return res.status(400).json({
           error: "sub_category_id invalide (ou ne correspond pas à category_id)",
@@ -1397,9 +1406,7 @@ router.post(
 
       const incomingVertical = normalizeVertical(vertical, null);
       const fallbackVertical =
-        String(resolvedSub.slug || "").toLowerCase() === "food"
-          ? "FOOD"
-          : "MARKET";
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
       const finalVertical = incomingVertical || fallbackVertical;
 
       const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
@@ -1407,9 +1414,7 @@ router.post(
 
       const makeSlug = () =>
         (slug && String(slug).trim()) ||
-        `${Date.now().toString(36)}${Math.random()
-          .toString(36)
-          .slice(2, 7)}`.toLowerCase();
+        `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toLowerCase();
 
       const promo = parsePromoFields({
         promo_eligible,
@@ -1420,8 +1425,7 @@ router.post(
 
       const incomingCities = parseCitiesBody(req.body);
       const cities = incomingCities == null ? null : incomingCities;
-      const citiesJson =
-        citiesCol && cities != null ? JSON.stringify(cities) : null;
+      const citiesJson = citiesCol && cities != null ? JSON.stringify(cities) : null;
 
       const variantsList = parseVariantsBody({ variants });
       const replace = parseBoolFlag(replace_variants, 0) === 1;
@@ -1433,8 +1437,7 @@ router.post(
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active, vertical`;
 
-      const promoEligibleFinal =
-        promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
+      const promoEligibleFinal = promo.promo_mode === "UNTOUCHED" ? 0 : promo.promo_eligible ?? 0;
 
       const insertVals = [
         finalShopId,
@@ -1470,10 +1473,7 @@ router.post(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -1484,9 +1484,7 @@ router.post(
 
       if (variantsList.length) {
         if (replace) {
-          await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [
-            productId,
-          ]);
+          await conn.query(`DELETE FROM product_variants WHERE product_id=?`, [productId]);
         }
         for (const v of variantsList) {
           await conn.query(
@@ -1499,15 +1497,7 @@ router.post(
               price_override = VALUES(price_override),
               is_active = VALUES(is_active)
             `,
-            [
-              productId,
-              v.size,
-              v.color,
-              v.sku,
-              v.stock,
-              v.price_override,
-              v.is_active ?? 1,
-            ]
+            [productId, v.size, v.color, v.sku, v.stock, v.price_override, v.is_active ?? 1]
           );
         }
       }
@@ -1515,9 +1505,7 @@ router.post(
       await conn.commit();
 
       const channel =
-        String(resolvedSub.slug || "").toLowerCase() === "food"
-          ? "african-food"
-          : "african-market";
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
 
       try {
         const [userRows] = await pool.query(
@@ -1542,10 +1530,7 @@ router.post(
           }
         }
       } catch (e) {
-        console.error(
-          "[products] Failed to enqueue PRODUCT_CREATED notifications",
-          e
-        );
+        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
       }
 
       try {
@@ -1565,9 +1550,7 @@ router.post(
         return res.status(409).json({ error: "Duplicate slug" });
       }
       if (e && e.code === "ER_NO_REFERENCED_ROW_2") {
-        return res
-          .status(400)
-          .json({ error: "FK invalid (category/sub_category?)" });
+        return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
       }
       next(e);
     } finally {
@@ -1631,14 +1614,8 @@ router.put(
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
         if (sid > 0 && isAdmin(req.user)) {
-          const [[shop]] = await conn.query(
-            `SELECT id FROM shops WHERE id=? LIMIT 1`,
-            [sid]
-          );
-          if (!shop)
-            return res
-              .status(400)
-              .json({ error: "Boutique invalide (shop_id)" });
+          const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
+          if (!shop) return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           newShopIdParam = sid;
         }
       }
@@ -1657,8 +1634,7 @@ router.put(
       }
 
       let duuminiRate = null;
-      if (resolvedSub)
-        duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
+      if (resolvedSub) duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
 
       const active = parseBoolFlag(is_active, null);
 
@@ -1762,10 +1738,7 @@ router.put(
         for (let i = 0; i < files.length; i++) {
           const f = files[i];
           if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-          const up = await uploadBufferToCloudinary(
-            f.buffer,
-            f.originalname || undefined
-          );
+          const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
           const webUrl = up?.secure_url || up?.url;
           if (!webUrl) continue;
           await conn.query(
@@ -1837,10 +1810,7 @@ router.put(
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f || !f.buffer || !f.mimetype?.startsWith("image/")) continue;
-        const up = await uploadBufferToCloudinary(
-          f.buffer,
-          f.originalname || undefined
-        );
+        const up = await uploadBufferToCloudinary(f.buffer, f.originalname || undefined);
         const webUrl = up?.secure_url || up?.url;
         if (!webUrl) continue;
         await conn.query(
@@ -1900,10 +1870,7 @@ router.delete(
       for (const it of imgs) {
         const u = String(it.url || "");
         if (!u.startsWith("/uploads/")) continue;
-        const abs = path.join(
-          process.cwd(),
-          u.replace(/^\//, "").replace(/\//g, path.sep)
-        );
+        const abs = path.join(process.cwd(), u.replace(/^\//, "").replace(/\//g, path.sep));
         fs.promises.unlink(abs).catch(() => {});
       }
 
