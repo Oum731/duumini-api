@@ -9,14 +9,18 @@ const { env } = require("../lib/env");
 const router = Router();
 
 /* =========================
- * CONFIG WHATSAPP BACKOFFICE
+ * CONFIG WHATSAPP ADMIN (NUMÉRO EN DUR)
  * =======================*/
 
+// ✅ Mets ici le numéro admin (en dur)
+const ADMIN_WHATSAPP_HARDCODED_RAW = "+212623677884";
+
 // ✅ Normalise: accepte "+212..." ou "whatsapp:+212..." (Twilio WhatsApp)
-const BACKOFFICE_WHATSAPP_RAW = env.DUUMINI_BACKOFFICE_WHATSAPP || "+212623677884";
-const BACKOFFICE_WHATSAPP = String(BACKOFFICE_WHATSAPP_RAW).trim().startsWith("whatsapp:")
-  ? String(BACKOFFICE_WHATSAPP_RAW).trim()
-  : `whatsapp:${String(BACKOFFICE_WHATSAPP_RAW).trim()}`;
+const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
+  .trim()
+  .startsWith("whatsapp:")
+  ? String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()
+  : `whatsapp:${String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()}`;
 
 /* =========================
  * Helpers
@@ -280,9 +284,10 @@ async function enqueueOrderStatusForClient(orderId, status) {
 
 /* =========================
  * WhatsApp helper (réutilisé connecté + invité)
+ * -> envoie toujours au numéro admin en dur
  * =======================*/
 
-async function sendBackofficeWhatsAppForOrder({
+async function sendAdminWhatsAppForOrder({
   pool,
   orderId,
   displayCode,
@@ -297,6 +302,10 @@ async function sendBackofficeWhatsAppForOrder({
 
   if (!hasFrom) {
     console.warn("[WhatsApp] skip: TWILIO_WHATSAPP_FROM missing");
+    return;
+  }
+  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) {
+    console.warn("[WhatsApp] skip: ADMIN_WHATSAPP invalid");
     return;
   }
   if (!isProd) {
@@ -372,11 +381,11 @@ async function sendBackofficeWhatsAppForOrder({
     console.error(`[WhatsApp] image query failed order #${orderId}`, imgErr?.message || imgErr);
   }
 
-  console.log("[WhatsApp] sending order", { orderId, to: BACKOFFICE_WHATSAPP });
+  console.log("[WhatsApp] sending order", { orderId, to: ADMIN_WHATSAPP });
 
   try {
     await sendWhatsAppOrderConfirmation({
-      to: BACKOFFICE_WHATSAPP,
+      to: ADMIN_WHATSAPP,
       name: fullName,
       orderId,
       displayCode,
@@ -793,9 +802,6 @@ router.get("/", authRequired, async (req, res) => {
 /* =========================
  * Create order (UTILISATEUR CONNECTÉ)
  * ✅ support variantes: items[].variant_id (optionnel)
- * - Si variant_id: stock décrémenté sur product_variants.stock
- * - Sinon: stock décrémenté sur products.stock
- * ✅ unit_price: price_override si présent, sinon p.price
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
   const { contact = null, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
@@ -850,7 +856,6 @@ router.post("/", authRequired, async (req, res) => {
         throw err;
       }
 
-      // ✅ Multi-restaurant FOOD: basé sur sub_category_slug
       const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
       if (isFood) {
         const shopId = p.shop_id != null ? Number(p.shop_id) : null;
@@ -871,7 +876,6 @@ router.post("/", authRequired, async (req, res) => {
 
       if (isPromoProductRow(p)) hasPromo = true;
 
-      // ✅ Variante (optionnel)
       let unit_price = Number(p.price || 0);
       let stockSource = "PRODUCT";
       let current_stock = p.stock;
@@ -898,7 +902,12 @@ router.post("/", authRequired, async (req, res) => {
 
         stockSource = "VARIANT";
         current_stock = v.stock;
-        variant_meta = { variant_id: v.id, size: v.size || null, color: v.color || null, sku: v.sku || null };
+        variant_meta = {
+          variant_id: v.id,
+          size: v.size || null,
+          color: v.color || null,
+          sku: v.sku || null,
+        };
       }
 
       const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
@@ -940,7 +949,6 @@ router.post("/", authRequired, async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // ✅ insert items (variant_id support)
     for (const it of cleanItems) {
       await conn.query(
         `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
@@ -948,7 +956,6 @@ router.post("/", authRequired, async (req, res) => {
       );
     }
 
-    // ✅ decrement stock: variant first, else product
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -993,8 +1000,8 @@ router.post("/", authRequired, async (req, res) => {
       });
     } catch {}
 
-    // ✅ WhatsApp backoffice (après commit, non bloquant)
-    sendBackofficeWhatsAppForOrder({
+    // ✅ WhatsApp admin (après commit, non bloquant)
+    sendAdminWhatsAppForOrder({
       pool,
       orderId,
       displayCode,
@@ -1211,8 +1218,8 @@ router.post("/guest", async (req, res) => {
       console.error("[Notify] enqueueOrderCreatedNotifications failed (guest)", eNot);
     }
 
-    // ✅ WhatsApp backoffice (après commit, non bloquant)
-    sendBackofficeWhatsAppForOrder({
+    // ✅ WhatsApp admin (après commit, non bloquant)
+    sendAdminWhatsAppForOrder({
       pool,
       orderId,
       displayCode,
@@ -1376,7 +1383,6 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(409).json({ error: "Cannot cancel at this stage" });
     }
 
-    // ✅ restock items
     const [items] = await conn.query(
       `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
       [id]
