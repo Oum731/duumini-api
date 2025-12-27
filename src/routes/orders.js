@@ -9,13 +9,9 @@ const { env } = require("../lib/env");
 const router = Router();
 
 /* =========================
- * CONFIG WHATSAPP ADMIN (NUMÉRO EN DUR)
+ * CONFIG WHATSAPP ADMIN
  * =======================*/
-
-// ✅ Mets ici le numéro admin (en dur)
 const ADMIN_WHATSAPP_HARDCODED_RAW = "+212623677884";
-
-// ✅ Normalise: accepte "+212..." ou "whatsapp:+212..." (Twilio WhatsApp)
 const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   .trim()
   .startsWith("whatsapp:")
@@ -25,7 +21,6 @@ const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
 /* =========================
  * Helpers
  * =======================*/
-
 function safeParseJSON(maybe) {
   if (!maybe) return null;
   if (typeof maybe === "object") return maybe;
@@ -109,26 +104,11 @@ function buildDisplayCode(id) {
   return n.toString(36).toUpperCase();
 }
 
-/**
- * ✅ Commission: on se base sur p.sub_category_slug (nouveau) ou fallback food/non-food
- */
 function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
   const sub = String(subSlug || "").trim().toLowerCase();
   const rate = sub === "food" ? 0.18 : 0.11;
   return +(+totalClientLine * rate).toFixed(2);
-}
-
-/**
- * ✅ Promo: même logique, mais sur slug (nouveau)
- */
-function isPromoProductRow(p) {
-  const isFood = String(p?.sub_category_slug || "").trim().toLowerCase() === "food";
-  return (
-    !isFood &&
-    Number(p?.promo_eligible ?? 0) === 1 &&
-    Number(p?.promo_discount_value ?? 0) > 0
-  );
 }
 
 function stripCommissionFromOrderRow(row, user) {
@@ -190,8 +170,7 @@ async function getOrderWithPerm(conn, id, user) {
   return { status: 200, order, items };
 }
 
-/* ========= Helpers notifications commande ========= */
-
+/* ========= Notifications ========= */
 async function getAdminUserIds() {
   const [rows] = await getPool().query(
     `SELECT id 
@@ -283,10 +262,8 @@ async function enqueueOrderStatusForClient(orderId, status) {
 }
 
 /* =========================
- * WhatsApp helper (réutilisé connecté + invité)
- * -> envoie toujours au numéro admin en dur
+ * WhatsApp admin
  * =======================*/
-
 async function sendAdminWhatsAppForOrder({
   pool,
   orderId,
@@ -300,22 +277,9 @@ async function sendAdminWhatsAppForOrder({
   const hasFrom = !!(env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM);
   const isProd = String(env.NODE_ENV || process.env.NODE_ENV || "").toLowerCase() === "production";
 
-  if (!hasFrom) {
-    console.warn("[WhatsApp] skip: TWILIO_WHATSAPP_FROM missing");
-    return;
-  }
-  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) {
-    console.warn("[WhatsApp] skip: ADMIN_WHATSAPP invalid");
-    return;
-  }
-  if (!isProd) {
-    console.warn("[WhatsApp] NODE_ENV != production -> Twilio DEV_MODE (no real send)");
-  }
+  if (!hasFrom) return;
+  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) return;
 
-  const fullName =
-    `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() || "Client Duumini";
-
-  // ✅ Détails: inclut variante si présente
   let details = "";
   try {
     const [rows] = await pool.query(
@@ -347,22 +311,19 @@ async function sendAdminWhatsAppForOrder({
         })
         .join("\n");
     }
-  } catch (e) {
-    console.error("[WhatsApp] details query failed", e?.message || e);
+  } catch {
     if (Array.isArray(items) && items.length) {
       details = items
         .map((it) => {
           const label = it?.name || `Produit #${it?.product_id || ""}`.trim();
           const qty = it?.qty || 1;
-          const price =
-            it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
+          const price = it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
           return `• ${label} ×${qty}${price ? ` — ${price}` : ""}`;
         })
         .join("\n");
     }
   }
 
-  // ✅ Première image: depuis la BDD
   let firstProductImage = null;
   try {
     const [[rowImg]] = await pool.query(
@@ -377,11 +338,10 @@ async function sendAdminWhatsAppForOrder({
       [orderId]
     );
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
-  } catch (imgErr) {
-    console.error(`[WhatsApp] image query failed order #${orderId}`, imgErr?.message || imgErr);
-  }
+  } catch {}
 
-  console.log("[WhatsApp] sending order", { orderId, to: ADMIN_WHATSAPP });
+  const fullName =
+    `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() || "Client Duumini";
 
   try {
     await sendWhatsAppOrderConfirmation({
@@ -397,22 +357,12 @@ async function sendAdminWhatsAppForOrder({
       details,
       imageUrl: firstProductImage || null,
     });
-
-    console.log("[WhatsApp] sent OK", { orderId });
-  } catch (errWa) {
-    console.error(`[WhatsApp] FAIL order #${orderId}`, {
-      message: errWa?.message,
-      code: errWa?.code,
-      status: errWa?.status,
-      moreInfo: errWa?.moreInfo,
-    });
-  }
+  } catch {}
 }
 
 /* =========================
- * STOCK helpers (produit vs variante)
+ * STOCK helpers
  * =======================*/
-
 function normQty(x) {
   const n = Number(x);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -466,7 +416,7 @@ async function lockVariantForItem(conn, productId, variantId) {
 }
 
 /* =========================
- * List (admin : tout / client : ses commandes)
+ * LIST
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -486,10 +436,7 @@ router.get("/", authRequired, async (req, res) => {
         params.push(rawStatus);
       }
 
-      const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params
-      );
+      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
       const [rowsRaw] = await pool.query(
         `
@@ -800,8 +747,7 @@ router.get("/", authRequired, async (req, res) => {
 });
 
 /* =========================
- * Create order (UTILISATEUR CONNECTÉ)
- * ✅ support variantes: items[].variant_id (optionnel)
+ * Create order (auth)
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
   const { contact = null, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
@@ -827,7 +773,6 @@ router.post("/", authRequired, async (req, res) => {
     let totalCommission = 0;
     const cleanItems = [];
     let firstFoodShopId = null;
-    let hasPromo = false;
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
@@ -873,8 +818,6 @@ router.post("/", authRequired, async (req, res) => {
           }
         }
       }
-
-      if (isPromoProductRow(p)) hasPromo = true;
 
       let unit_price = Number(p.price || 0);
       let stockSource = "PRODUCT";
@@ -926,7 +869,7 @@ router.post("/", authRequired, async (req, res) => {
       totalCommission += lineCommission;
     }
 
-    const deliveryFee = hasPromo ? 0 : Number(delivery?.fee || totals?.delivery_fee || 0);
+    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
@@ -987,9 +930,7 @@ router.post("/", authRequired, async (req, res) => {
 
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
-    } catch (eNot) {
-      console.error("[Notify] enqueueOrderCreatedNotifications failed", eNot);
-    }
+    } catch {}
 
     try {
       const { notifyUser } = require("../services/notify");
@@ -1000,7 +941,6 @@ router.post("/", authRequired, async (req, res) => {
       });
     } catch {}
 
-    // ✅ WhatsApp admin (après commit, non bloquant)
     sendAdminWhatsAppForOrder({
       pool,
       orderId,
@@ -1033,8 +973,7 @@ router.post("/", authRequired, async (req, res) => {
 });
 
 /* =========================
- * Create order invité (SANS AUTH)
- * ✅ support variantes: items[].variant_id (optionnel)
+ * Create order guest
  * =======================*/
 router.post("/guest", async (req, res) => {
   const { contact = {}, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
@@ -1063,7 +1002,6 @@ router.post("/guest", async (req, res) => {
     let totalCommission = 0;
     const cleanItems = [];
     let firstFoodShopId = null;
-    let hasPromo = false;
 
     for (const it of items) {
       const product_id = Number(it?.product_id);
@@ -1110,8 +1048,6 @@ router.post("/guest", async (req, res) => {
         }
       }
 
-      if (isPromoProductRow(p)) hasPromo = true;
-
       let unit_price = Number(p.price || 0);
       let stockSource = "PRODUCT";
       let current_stock = p.stock;
@@ -1154,7 +1090,7 @@ router.post("/guest", async (req, res) => {
       totalCommission += lineCommission;
     }
 
-    const deliveryFee = hasPromo ? 0 : Number(delivery?.fee || totals?.delivery_fee || 0);
+    const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
@@ -1214,11 +1150,8 @@ router.post("/guest", async (req, res) => {
 
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
-    } catch (eNot) {
-      console.error("[Notify] enqueueOrderCreatedNotifications failed (guest)", eNot);
-    }
+    } catch {}
 
-    // ✅ WhatsApp admin (après commit, non bloquant)
     sendAdminWhatsAppForOrder({
       pool,
       orderId,
@@ -1250,7 +1183,7 @@ router.post("/guest", async (req, res) => {
 });
 
 /* =========================
- * Get one order (detail + items)
+ * Get one order
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1263,10 +1196,9 @@ router.get("/:id", authRequired, async (req, res) => {
     const o = result.order;
     const addr = safeParseJSON(o.address);
 
-    const [[u]] = await conn.query(
-      "SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1",
-      [o.user_id]
-    );
+    const [[u]] = await conn.query("SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1", [
+      o.user_id,
+    ]);
 
     const contactFromOrder = safeParseJSON(o.contact);
     const contact =
@@ -1338,9 +1270,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
     if (order && order.user_id) {
       try {
         await enqueueOrderStatusForClient(id, status);
-      } catch (eQueue) {
-        console.error("[Notify] enqueueOrderStatusForClient failed", eQueue);
-      }
+      } catch {}
 
       try {
         const { notifyUser } = require("../services/notify");
@@ -1359,8 +1289,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
 });
 
 /* =========================
- * Annulation par l’acheteur (ou admin)
- * ✅ RESTOCK: on remet le stock sur variante/produit
+ * Cancel (restock)
  * =======================*/
 router.post("/:id/cancel", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1412,7 +1341,6 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
     try {
       if (order.user_id) {
         await enqueueOrderStatusForClient(id, "CANCELLED");
-
         const { notifyUser } = require("../services/notify");
         await notifyUser(order.user_id, "ORDER_STATUS", {
           order_id: id,
@@ -1420,9 +1348,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
           status: "CANCELLED",
         });
       }
-    } catch (eNot) {
-      console.error("[Notify] ORDER_STATUS cancel failed", eNot);
-    }
+    } catch {}
 
     res.json({ ok: true, status: "CANCELLED" });
   } catch (e) {

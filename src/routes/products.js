@@ -8,7 +8,6 @@ const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
 
-// --- Cloudinary ---
 const cloudinary = require("cloudinary").v2;
 const { env } = require("../lib/env");
 
@@ -18,7 +17,6 @@ cloudinary.config({
   api_secret: env.CLOUDINARY_API_SECRET,
 });
 
-// Upload buffer -> Cloudinary (stream)
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
@@ -43,20 +41,7 @@ function uploadBufferToCloudinary(buffer, filename) {
 }
 
 const router = express.Router();
-
-/* =========================
- * Upload (Cloudinary via mémoire)
- * ========================= */
-
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
-function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-ensureDirSync(UPLOAD_DIR);
-
 const upload = multer({ storage: multer.memoryStorage() });
-
-/* ----------------------------- Helpers ----------------------------- */
 
 function toPositiveInt(value, defaultValue) {
   const n = Number(value);
@@ -103,11 +88,6 @@ function parseBoolQuery(req, key, defaultValue = 0) {
   if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
   return defaultValue;
 }
-
-/* ============================
- *  Colonne cities (optionnelle)
- *  ⚠️ On ne filtre PLUS dessus, on la renvoie juste si elle existe.
- * ============================ */
 
 async function detectCitiesColumn(conn) {
   const candidates = ["available_cities", "cities", "villes"];
@@ -223,10 +203,6 @@ function withCities(rows, citiesCol) {
   });
 }
 
-/* ============================
- * Promotions
- * ============================ */
-
 function normalizePromoType(value) {
   const t = String(value || "").trim().toUpperCase();
   if (t === "AMOUNT") return "AMOUNT";
@@ -275,10 +251,6 @@ function parsePromoFields(body) {
   };
 }
 
-/**
- * ✅ FIX: calcul promo toujours sur price (client), jamais sur vendor_price.
- * L'API renvoie promo_price / min_promo_price pour éviter les erreurs côté front.
- */
 function computePromoPrice(basePrice, promoEligible, type, value) {
   const base = Number(basePrice || 0);
   if (!promoEligible) return null;
@@ -327,10 +299,6 @@ function withPromoComputed(p) {
     has_promo: promo_price != null,
   };
 }
-
-/* ============================
- * SubCategory (table)
- * ============================ */
 
 function computeDuuminiRateFromSubCategorySlug(subSlug) {
   const sub = String(subSlug || "").trim().toLowerCase();
@@ -382,10 +350,6 @@ async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   );
   return rows[0] || null;
 }
-
-/* ============================
- * Variants helpers
- * ============================ */
 
 function normalizeSize(x) {
   const s = String(x ?? "").trim();
@@ -459,10 +423,6 @@ async function assertCanMutateProduct(conn, reqUser, productId) {
   return { ok: true, prod };
 }
 
-/* ============================
- * Listing: include variants (Fashion / opt-in)
- * ============================ */
-
 async function attachVariantsToProducts(pool, items, opts = {}) {
   const include = !!opts.includeVariants;
   if (!include) return items;
@@ -505,9 +465,6 @@ async function attachVariantsToProducts(pool, items, opts = {}) {
   });
 }
 
-/**
- * Liste des produits (sans filtre ville)
- */
 async function listProducts(pool, opts) {
   const {
     limit,
@@ -665,8 +622,6 @@ async function listProducts(pool, opts) {
   return { rows, total };
 }
 
-/* ----------------------------- Listing ----------------------------- */
-
 function parseOnlyActive(req) {
   const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
   return (
@@ -802,7 +757,6 @@ router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
 
-/* ----------------------------- Promotions list ----------------------------- */
 router.get("/promotions", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
@@ -842,7 +796,6 @@ router.get("/promotions", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Top produits : plus commandés ----------------------------- */
 router.get("/top-ordered", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
@@ -894,7 +847,6 @@ router.get("/top-ordered", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Top produits : mieux notés ----------------------------- */
 router.get("/top-rated", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
@@ -946,11 +898,9 @@ router.get("/top-rated", async (req, res, next) => {
   }
 });
 
-/* =======================================================================
+/* =========================
  * VARIANTS API
- * ======================================================================= */
-
-// GET variants for a product
+ * =======================*/
 router.get("/:id/variants", async (req, res, next) => {
   const productId = parseIdParam(req.params.id);
   if (!productId) return next();
@@ -970,7 +920,6 @@ router.get("/:id/variants", async (req, res, next) => {
   }
 });
 
-// PUT one variant
 router.put(
   "/variants/:variantId",
   authRequired,
@@ -1007,14 +956,15 @@ router.put(
           ? Math.floor(Number(req.body.stock))
           : 0;
 
-      const po =
-        req.body?.price_override === undefined
-          ? null
-          : req.body.price_override == null || req.body.price_override === ""
-          ? null
-          : Number(req.body.price_override);
-
-      const price_override = po == null ? null : Number.isFinite(po) && po >= 0 ? po : null;
+      const hasPriceOverride = Object.prototype.hasOwnProperty.call(req.body || {}, "price_override");
+      let price_override = null;
+      if (hasPriceOverride) {
+        if (req.body.price_override == null || req.body.price_override === "") price_override = null;
+        else {
+          const po = Number(req.body.price_override);
+          price_override = Number.isFinite(po) && po >= 0 ? po : null;
+        }
+      }
 
       const active = req.body?.is_active === undefined ? null : parseBoolFlag(req.body.is_active, 1);
 
@@ -1024,10 +974,19 @@ router.put(
            color = COALESCE(?, color),
            sku = COALESCE(?, sku),
            stock = COALESCE(?, stock),
-           price_override = CASE WHEN ? IS NULL THEN price_override ELSE ? END,
+           price_override = CASE WHEN ? = 0 THEN price_override ELSE ? END,
            is_active = COALESCE(?, is_active)
          WHERE id=?`,
-        [size, color, sku, stock, po === undefined ? null : 1, price_override, active, variantId]
+        [
+          size,
+          color,
+          sku,
+          stock,
+          hasPriceOverride ? 1 : 0,
+          hasPriceOverride ? price_override : null,
+          active,
+          variantId,
+        ]
       );
 
       res.json({ ok: true });
@@ -1042,7 +1001,6 @@ router.put(
   }
 );
 
-// DELETE one variant
 router.delete(
   "/variants/:variantId",
   authRequired,
@@ -1077,7 +1035,6 @@ router.delete(
   }
 );
 
-// POST bulk variants for a product (replace or upsert)
 router.post(
   "/:id/variants",
   authRequired,
@@ -1146,7 +1103,7 @@ router.post(
   }
 );
 
-/* ----------------------------- Read one by SLUG (✅ NEW) ----------------------------- */
+/* ----------------------------- Read by SLUG ----------------------------- */
 router.get("/slug/:slug", async (req, res, next) => {
   const slug = String(req.params.slug || "").trim().toLowerCase();
   if (!slug) return next();
@@ -1238,7 +1195,7 @@ router.get("/slug/:slug", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Read one by ID ----------------------------- */
+/* ----------------------------- Read by ID ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
   if (!id) return next();
@@ -1330,7 +1287,7 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Create (multipart) ----------------------------- */
+/* ----------------------------- Create ----------------------------- */
 router.post(
   "/",
   authRequired,
@@ -1375,38 +1332,27 @@ router.post(
           `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
           [req.user.id]
         );
-        if (!shop) {
-          return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
-        }
+        if (!shop) return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
         finalShopId = Number(shop.id);
       } else if (role === "ADMIN") {
         const sid = Number(shop_id) || 0;
-        if (!sid) {
-          return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
-        }
+        if (!sid) return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
         const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
-        if (!shop) {
-          return res.status(400).json({ error: "Boutique invalide (shop_id)" });
-        }
+        if (!shop) return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         finalShopId = sid;
       } else {
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      if (!name || price == null) {
-        return res.status(400).json({ error: "name et price requis" });
-      }
+      if (!name || price == null) return res.status(400).json({ error: "name et price requis" });
 
       const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
       if (!resolvedSub) {
-        return res.status(400).json({
-          error: "sub_category_id invalide (ou ne correspond pas à category_id)",
-        });
+        return res.status(400).json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
       }
 
       const incomingVertical = normalizeVertical(vertical, null);
-      const fallbackVertical =
-        String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
+      const fallbackVertical = String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
       const finalVertical = incomingVertical || fallbackVertical;
 
       const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
@@ -1504,8 +1450,7 @@ router.post(
 
       await conn.commit();
 
-      const channel =
-        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
+      const channel = String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
 
       try {
         const [userRows] = await pool.query(
@@ -1529,9 +1474,7 @@ router.post(
             );
           }
         }
-      } catch (e) {
-        console.error("[products] Failed to enqueue PRODUCT_CREATED notifications", e);
-      }
+      } catch {}
 
       try {
         const { getIO, emitToShops } = require("../ws");
@@ -1546,12 +1489,8 @@ router.post(
       try {
         await conn.rollback();
       } catch {}
-      if (e && e.code === "ER_DUP_ENTRY") {
-        return res.status(409).json({ error: "Duplicate slug" });
-      }
-      if (e && e.code === "ER_NO_REFERENCED_ROW_2") {
-        return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
-      }
+      if (e && e.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "Duplicate slug" });
+      if (e && e.code === "ER_NO_REFERENCED_ROW_2") return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
       next(e);
     } finally {
       conn.release();
@@ -1559,7 +1498,7 @@ router.post(
   }
 );
 
-/* ----------------------------- Update (multipart ou JSON) ----------------------------- */
+/* ----------------------------- Update ----------------------------- */
 router.put(
   "/:id",
   authRequired,
@@ -1627,9 +1566,7 @@ router.put(
           category_id: category_id ?? prod.category_id,
         });
         if (!resolvedSub) {
-          return res.status(400).json({
-            error: "sub_category_id invalide (ou ne correspond pas à category_id)",
-          });
+          return res.status(400).json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
         }
       }
 
@@ -1710,10 +1647,7 @@ router.put(
       const incomingCities = parseCitiesBody(req.body);
       if (citiesCol && incomingCities != null) {
         const cities = allowTrimList(incomingCities || []);
-        await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
-          JSON.stringify(cities),
-          id,
-        ]);
+        await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [JSON.stringify(cities), id]);
       }
 
       const files = Array.isArray(req.files) ? req.files : [];
@@ -1765,7 +1699,6 @@ router.put(
   }
 );
 
-/* ----------------------------- Replace images ----------------------------- */
 router.put(
   "/:id/images",
   authRequired,
@@ -1832,7 +1765,6 @@ router.put(
   }
 );
 
-/* ----------------------------- Delete ----------------------------- */
 router.delete(
   "/:id",
   authRequired,
