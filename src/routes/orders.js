@@ -375,6 +375,128 @@ function parseVariantId(x) {
   return Math.floor(n);
 }
 
+/* =========================
+ * PROMO helpers (✅ NEW)
+ * - applique promo seulement si eligible
+ * - applique sur le prix de base (variant override ou price normal)
+ * - fige le prix final dans order_items.unit_price
+ * - (optionnel) stocke promo_applied/type/value/base_price si colonnes présentes
+ * =======================*/
+function normalizePromoType(value) {
+  const t = String(value || "").trim().toUpperCase();
+  if (t === "AMOUNT") return "AMOUNT";
+  if (t === "PERCENT") return "PERCENT";
+  return "PERCENT";
+}
+
+function computePromoPrice(basePrice, promoEligible, type, value) {
+  const base = Number(basePrice || 0);
+  if (!promoEligible) return null;
+
+  const v = Number(value);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  if (!Number.isFinite(v) || v <= 0) return null;
+
+  const t = String(type || "").toUpperCase();
+  let out = base;
+
+  if (t === "AMOUNT") out = base - v;
+  else if (t === "PERCENT") out = base * (1 - v / 100);
+  else out = base * (1 - v / 100);
+
+  if (!Number.isFinite(out)) return null;
+  if (out < 0) out = 0;
+
+  return +out.toFixed(2);
+}
+
+function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
+  const base = Number(baseUnitPrice || 0);
+  if (!Number.isFinite(base) || base < 0) {
+    return {
+      base_unit_price: 0,
+      unit_price: 0,
+      promo_applied: 0,
+      promo_type: null,
+      promo_value: null,
+    };
+  }
+
+  const eligible = Number(p?.promo_eligible || 0) === 1;
+  const promoValue = Number(p?.promo_discount_value);
+  const hasValue = Number.isFinite(promoValue) && promoValue > 0;
+
+  // type peut être null en DB => on normalise si besoin
+  const promoType = normalizePromoType(p?.promo_discount_type || "PERCENT");
+
+  if (!eligible || !hasValue) {
+    return {
+      base_unit_price: +base.toFixed(2),
+      unit_price: +base.toFixed(2),
+      promo_applied: 0,
+      promo_type: null,
+      promo_value: null,
+    };
+  }
+
+  const promoPrice = computePromoPrice(base, true, promoType, promoValue);
+
+  if (promoPrice == null) {
+    return {
+      base_unit_price: +base.toFixed(2),
+      unit_price: +base.toFixed(2),
+      promo_applied: 0,
+      promo_type: null,
+      promo_value: null,
+    };
+  }
+
+  return {
+    base_unit_price: +base.toFixed(2),
+    unit_price: promoPrice,
+    promo_applied: 1,
+    promo_type: promoType,
+    promo_value: promoValue,
+  };
+}
+
+/* =========================
+ * OPTIONAL: détecter colonnes promo dans order_items
+ * =======================*/
+let _orderItemsPromoCols = null;
+let _orderItemsPromoColsLoaded = false;
+
+async function detectOrderItemsPromoCols(conn) {
+  const candidates = ["promo_applied", "promo_type", "promo_value", "base_unit_price"];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'order_items'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    promo_applied: found.has("promo_applied"),
+    promo_type: found.has("promo_type"),
+    promo_value: found.has("promo_value"),
+    base_unit_price: found.has("base_unit_price"),
+  };
+}
+
+async function getOrderItemsPromoColsCached(pool) {
+  if (_orderItemsPromoColsLoaded) return _orderItemsPromoCols;
+  const conn = await pool.getConnection();
+  try {
+    _orderItemsPromoCols = await detectOrderItemsPromoCols(conn);
+    _orderItemsPromoColsLoaded = true;
+    return _orderItemsPromoCols;
+  } finally {
+    conn.release();
+  }
+}
+
 async function lockProductForItem(conn, productId) {
   const [[p]] = await conn.query(
     `
@@ -384,6 +506,7 @@ async function lockProductForItem(conn, productId) {
       p.stock,
       p.shop_id,
       p.promo_eligible,
+      p.promo_discount_type,
       p.promo_discount_value,
       sc.slug AS sub_category_slug
     FROM products p
@@ -436,7 +559,10 @@ router.get("/", authRequired, async (req, res) => {
         params.push(rawStatus);
       }
 
-      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+        params
+      );
 
       const [rowsRaw] = await pool.query(
         `
@@ -512,7 +638,10 @@ router.get("/", authRequired, async (req, res) => {
         params.push(rawStatus);
       }
 
-      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+        params
+      );
 
       const [rowsRaw] = await pool.query(
         `
@@ -676,7 +805,10 @@ router.get("/", authRequired, async (req, res) => {
       params.push(rawStatus);
     }
 
-    const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
+      params
+    );
 
     const [rowsRaw] = await pool.query(
       `
@@ -747,6 +879,125 @@ router.get("/", authRequired, async (req, res) => {
 });
 
 /* =========================
+ * Shared: build cleanItems with promo (✅ NEW)
+ * =======================*/
+async function buildCleanItemsWithPromo({ conn, items }) {
+  let itemsAmount = 0;
+  let totalCommission = 0;
+  const cleanItems = [];
+  let firstFoodShopId = null;
+
+  for (const it of items) {
+    const product_id = Number(it?.product_id);
+    const qty = normQty(it?.qty);
+    const variant_id = parseVariantId(it?.variant_id);
+
+    if (!product_id || !qty) {
+      const err = new Error("product_id & qty required");
+      err.statusCode = 400;
+      err.payload = {
+        code: "INVALID_ITEM",
+        message: "Un ou plusieurs produits sont invalides dans votre panier.",
+      };
+      throw err;
+    }
+
+    const p = await lockProductForItem(conn, product_id);
+    if (!p) {
+      const err = new Error("Product not found: " + product_id);
+      err.statusCode = 400;
+      err.payload = {
+        code: "PRODUCT_NOT_FOUND",
+        message: "Un produit de votre panier n'est plus disponible.",
+        product_id,
+      };
+      throw err;
+    }
+
+    const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
+    if (isFood) {
+      const shopId = p.shop_id != null ? Number(p.shop_id) : null;
+      if (shopId != null) {
+        if (firstFoodShopId == null) firstFoodShopId = shopId;
+        else if (firstFoodShopId !== shopId) {
+          const err = new Error("MULTIPLE_FOOD_SHOPS_NOT_ALLOWED");
+          err.statusCode = 400;
+          err.payload = {
+            code: "MULTIPLE_FOOD_SHOPS_NOT_ALLOWED",
+            message:
+              "Vous ne pouvez pas commander dans plusieurs restaurants (catégorie Food) en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
+          };
+          throw err;
+        }
+      }
+    }
+
+    // base: prix normal produit
+    let base_unit_price = Number(p.price || 0);
+    let stockSource = "PRODUCT";
+    let current_stock = p.stock;
+    let variant_meta = null;
+
+    if (variant_id) {
+      const v = await lockVariantForItem(conn, product_id, variant_id);
+      if (!v || Number(v.is_active || 0) !== 1) {
+        const err = new Error("VARIANT_NOT_FOUND");
+        err.statusCode = 400;
+        err.payload = {
+          code: "VARIANT_NOT_FOUND",
+          message: "Une variante choisie n'est plus disponible.",
+          product_id,
+          variant_id,
+        };
+        throw err;
+      }
+
+      // ✅ promo sur variant: base = price_override si dispo, sinon price produit
+      base_unit_price =
+        v.price_override != null && v.price_override !== ""
+          ? Number(v.price_override)
+          : Number(p.price || 0);
+
+      stockSource = "VARIANT";
+      current_stock = v.stock;
+      variant_meta = {
+        variant_id: v.id,
+        size: v.size || null,
+        color: v.color || null,
+        sku: v.sku || null,
+      };
+    }
+
+    // ✅ appliquer promo seulement si eligible
+    const promoPack = calcLineUnitPriceWithPromo({ baseUnitPrice: base_unit_price, p });
+
+    // ✅ unit_price figé = prix final (promo incluse)
+    const unit_price = promoPack.unit_price;
+
+    const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
+
+    cleanItems.push({
+      product_id: p.id,
+      qty,
+      unit_price, // final (promo incluse)
+      base_unit_price: promoPack.base_unit_price,
+      promo_applied: promoPack.promo_applied,
+      promo_type: promoPack.promo_type,
+      promo_value: promoPack.promo_value,
+      stockSource,
+      current_stock,
+      variant_id: variant_id || null,
+      variant_meta,
+    });
+
+    itemsAmount += unit_price * qty;
+    totalCommission += lineCommission;
+  }
+
+  return { cleanItems, itemsAmount, totalCommission };
+}
+
+/* =========================
  * Create order (auth)
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
@@ -769,105 +1020,12 @@ router.post("/", authRequired, async (req, res) => {
       contactObj = buildContactFromUser(req.user);
     }
 
-    let itemsAmount = 0;
-    let totalCommission = 0;
-    const cleanItems = [];
-    let firstFoodShopId = null;
-
-    for (const it of items) {
-      const product_id = Number(it?.product_id);
-      const qty = normQty(it?.qty);
-      const variant_id = parseVariantId(it?.variant_id);
-
-      if (!product_id || !qty) {
-        const err = new Error("product_id & qty required");
-        err.statusCode = 400;
-        err.payload = {
-          code: "INVALID_ITEM",
-          message: "Un ou plusieurs produits sont invalides dans votre panier.",
-        };
-        throw err;
-      }
-
-      const p = await lockProductForItem(conn, product_id);
-      if (!p) {
-        const err = new Error("Product not found: " + product_id);
-        err.statusCode = 400;
-        err.payload = {
-          code: "PRODUCT_NOT_FOUND",
-          message: "Un produit de votre panier n'est plus disponible.",
-          product_id,
-        };
-        throw err;
-      }
-
-      const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
-      if (isFood) {
-        const shopId = p.shop_id != null ? Number(p.shop_id) : null;
-        if (shopId != null) {
-          if (firstFoodShopId == null) firstFoodShopId = shopId;
-          else if (firstFoodShopId !== shopId) {
-            const err = new Error("MULTIPLE_FOOD_SHOPS_NOT_ALLOWED");
-            err.statusCode = 400;
-            err.payload = {
-              code: "MULTIPLE_FOOD_SHOPS_NOT_ALLOWED",
-              message:
-                "Vous ne pouvez pas commander dans plusieurs restaurants (catégorie Food) en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
-            };
-            throw err;
-          }
-        }
-      }
-
-      let unit_price = Number(p.price || 0);
-      let stockSource = "PRODUCT";
-      let current_stock = p.stock;
-      let variant_meta = null;
-
-      if (variant_id) {
-        const v = await lockVariantForItem(conn, product_id, variant_id);
-        if (!v || Number(v.is_active || 0) !== 1) {
-          const err = new Error("VARIANT_NOT_FOUND");
-          err.statusCode = 400;
-          err.payload = {
-            code: "VARIANT_NOT_FOUND",
-            message: "Une variante choisie n'est plus disponible.",
-            product_id,
-            variant_id,
-          };
-          throw err;
-        }
-
-        unit_price =
-          v.price_override != null && v.price_override !== ""
-            ? Number(v.price_override)
-            : Number(p.price || 0);
-
-        stockSource = "VARIANT";
-        current_stock = v.stock;
-        variant_meta = {
-          variant_id: v.id,
-          size: v.size || null,
-          color: v.color || null,
-          sku: v.sku || null,
-        };
-      }
-
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
-
-      cleanItems.push({
-        product_id: p.id,
-        qty,
-        unit_price,
-        stockSource,
-        current_stock,
-        variant_id: variant_id || null,
-        variant_meta,
-      });
-
-      itemsAmount += unit_price * qty;
-      totalCommission += lineCommission;
-    }
+    // ✅ build items with promo
+    const promoCols = await getOrderItemsPromoColsCached(pool);
+    const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({
+      conn,
+      items,
+    });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
@@ -892,13 +1050,45 @@ router.post("/", authRequired, async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
+    // ✅ insert order_items with optional promo fields
     for (const it of cleanItems) {
-      await conn.query(
-        `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-        [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
-      );
+      if (
+        promoCols &&
+        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
+      ) {
+        const cols = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
+
+        if (promoCols.base_unit_price) {
+          cols.push("base_unit_price");
+          vals.push(it.base_unit_price);
+        }
+        if (promoCols.promo_applied) {
+          cols.push("promo_applied");
+          vals.push(it.promo_applied || 0);
+        }
+        if (promoCols.promo_type) {
+          cols.push("promo_type");
+          vals.push(it.promo_type || null);
+        }
+        if (promoCols.promo_value) {
+          cols.push("promo_value");
+          vals.push(it.promo_value != null ? Number(it.promo_value) : null);
+        }
+
+        await conn.query(
+          `INSERT INTO order_items (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+          vals
+        );
+      } else {
+        await conn.query(
+          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+        );
+      }
     }
 
+    // ✅ stock updates unchanged
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -998,97 +1188,12 @@ router.post("/guest", async (req, res) => {
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    let itemsAmount = 0;
-    let totalCommission = 0;
-    const cleanItems = [];
-    let firstFoodShopId = null;
-
-    for (const it of items) {
-      const product_id = Number(it?.product_id);
-      const qty = normQty(it?.qty);
-      const variant_id = parseVariantId(it?.variant_id);
-
-      if (!product_id || !qty) {
-        const err = new Error("product_id & qty required");
-        err.statusCode = 400;
-        err.payload = {
-          code: "INVALID_ITEM",
-          message: "Un ou plusieurs produits sont invalides dans votre panier.",
-        };
-        throw err;
-      }
-
-      const p = await lockProductForItem(conn, product_id);
-      if (!p) {
-        const err = new Error("Product not found: " + product_id);
-        err.statusCode = 400;
-        err.payload = {
-          code: "PRODUCT_NOT_FOUND",
-          message: "Un produit de votre panier n'est plus disponible.",
-          product_id,
-        };
-        throw err;
-      }
-
-      const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
-      if (isFood) {
-        const shopId = p.shop_id != null ? Number(p.shop_id) : null;
-        if (shopId != null) {
-          if (firstFoodShopId == null) firstFoodShopId = shopId;
-          else if (firstFoodShopId !== shopId) {
-            const err = new Error("MULTIPLE_FOOD_SHOPS_NOT_ALLOWED");
-            err.statusCode = 400;
-            err.payload = {
-              code: "MULTIPLE_FOOD_SHOPS_NOT_ALLOWED",
-              message:
-                "Vous ne pouvez pas commander dans plusieurs restaurants en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
-            };
-            throw err;
-          }
-        }
-      }
-
-      let unit_price = Number(p.price || 0);
-      let stockSource = "PRODUCT";
-      let current_stock = p.stock;
-
-      if (variant_id) {
-        const v = await lockVariantForItem(conn, product_id, variant_id);
-        if (!v || Number(v.is_active || 0) !== 1) {
-          const err = new Error("VARIANT_NOT_FOUND");
-          err.statusCode = 400;
-          err.payload = {
-            code: "VARIANT_NOT_FOUND",
-            message: "Une variante choisie n'est plus disponible.",
-            product_id,
-            variant_id,
-          };
-          throw err;
-        }
-
-        unit_price =
-          v.price_override != null && v.price_override !== ""
-            ? Number(v.price_override)
-            : Number(p.price || 0);
-
-        stockSource = "VARIANT";
-        current_stock = v.stock;
-      }
-
-      const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
-
-      cleanItems.push({
-        product_id: p.id,
-        qty,
-        unit_price,
-        stockSource,
-        current_stock,
-        variant_id: variant_id || null,
-      });
-
-      itemsAmount += unit_price * qty;
-      totalCommission += lineCommission;
-    }
+    // ✅ build items with promo
+    const promoCols = await getOrderItemsPromoColsCached(pool);
+    const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({
+      conn,
+      items,
+    });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
@@ -1112,13 +1217,45 @@ router.post("/guest", async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
+    // ✅ insert order_items with optional promo fields
     for (const it of cleanItems) {
-      await conn.query(
-        `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-        [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
-      );
+      if (
+        promoCols &&
+        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
+      ) {
+        const cols = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
+
+        if (promoCols.base_unit_price) {
+          cols.push("base_unit_price");
+          vals.push(it.base_unit_price);
+        }
+        if (promoCols.promo_applied) {
+          cols.push("promo_applied");
+          vals.push(it.promo_applied || 0);
+        }
+        if (promoCols.promo_type) {
+          cols.push("promo_type");
+          vals.push(it.promo_type || null);
+        }
+        if (promoCols.promo_value) {
+          cols.push("promo_value");
+          vals.push(it.promo_value != null ? Number(it.promo_value) : null);
+        }
+
+        await conn.query(
+          `INSERT INTO order_items (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+          vals
+        );
+      } else {
+        await conn.query(
+          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+        );
+      }
     }
 
+    // ✅ stock updates unchanged
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
