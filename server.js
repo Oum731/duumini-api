@@ -302,6 +302,7 @@ if (authRequired && isAdmin) {
  * ========================= */
 app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
+app.use("/api/snapshots", require("./routes/snapshots"));
 
 /* ✅ Cron auto-copy contrôlé par env */
 const RUN_CRON = String(process.env.RUN_CRON || "").trim() || (env.NODE_ENV === "production" ? "1" : "0");
