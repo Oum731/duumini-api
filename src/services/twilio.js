@@ -1,15 +1,20 @@
 // src/services/twilio.js
 const twilio = require("twilio");
-const { env } = require("../lib/env"); // ← CORRIGÉ: remonte d'un dossier
+const { env } = require("../lib/env");
 
-const DEV_MODE = (env.NODE_ENV || "development") !== "production";
-const DEV_TEST_CODE = env.OTP_TEST_CODE || process.env.OTP_TEST_CODE || "000000";
+const DEV_MODE =
+  String(env.NODE_ENV || process.env.NODE_ENV || "development").toLowerCase() !==
+  "production";
+
+const DEV_TEST_CODE =
+  env.OTP_TEST_CODE || process.env.OTP_TEST_CODE || "000000";
 
 // Numéro WhatsApp Twilio (ex: 'whatsapp:+14155238886' ou juste '+14155238886')
 const WHATSAPP_FROM =
   env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM || null;
 
 let client = null;
+
 if (!DEV_MODE) {
   if (
     env.TWILIO_API_KEY_SID &&
@@ -29,7 +34,7 @@ if (!DEV_MODE) {
 }
 
 /* =========================
- *   HELPERS
+ * HELPERS
  * =======================*/
 
 /**
@@ -40,6 +45,7 @@ function normalizeWhatsAppNumber(phone, defaultCountry = "+212") {
   if (!phone) throw new Error("Numéro WhatsApp manquant");
 
   let raw = String(phone).trim().replace(/\s+/g, "");
+
   // si déjà au format 'whatsapp:+212...', on laisse
   if (raw.startsWith("whatsapp:")) return raw;
 
@@ -58,13 +64,12 @@ function normalizeWhatsAppNumber(phone, defaultCountry = "+212") {
  */
 function getWhatsAppFrom() {
   if (!WHATSAPP_FROM) return null;
-  const raw = WHATSAPP_FROM.trim();
-  if (raw.startsWith("whatsapp:")) return raw;
-  return `whatsapp:${raw}`;
+  const raw = String(WHATSAPP_FROM).trim();
+  return raw.startsWith("whatsapp:") ? raw : `whatsapp:${raw}`;
 }
 
 /* =========================
- *   OTP (inchangé)
+ * OTP
  * =======================*/
 
 async function sendOtpStart(phone, purpose = "signup") {
@@ -74,28 +79,36 @@ async function sendOtpStart(phone, purpose = "signup") {
     );
     return { sid: "dev", status: "approved", to: phone, purpose };
   }
-  if (!client || !env.TWILIO_VERIFY_SID)
+
+  if (!client || !env.TWILIO_VERIFY_SID) {
     throw new Error("Twilio Verify non configuré");
+  }
+
   const res = await client.verify.v2
     .services(env.TWILIO_VERIFY_SID)
     .verifications.create({ to: phone, channel: "sms", locale: "fr" });
+
   return { sid: res.sid, status: res.status, to: res.to, purpose };
 }
 
 async function checkOtpCode(phone, code) {
-  if (DEV_MODE && DEV_TEST_CODE && code === DEV_TEST_CODE)
+  if (DEV_MODE && DEV_TEST_CODE && code === DEV_TEST_CODE) {
     return { status: "approved", valid: true };
+  }
 
-  if (!client || !env.TWILIO_VERIFY_SID)
+  if (!client || !env.TWILIO_VERIFY_SID) {
     throw new Error("Twilio Verify non configuré");
+  }
+
   const res = await client.verify.v2
     .services(env.TWILIO_VERIFY_SID)
     .verificationChecks.create({ to: phone, code });
+
   return { status: res.status, valid: res.status === "approved" };
 }
 
 /* =========================
- *   ENVOI WHATSAPP
+ * ENVOI WHATSAPP
  * =======================*/
 
 /**
@@ -110,24 +123,20 @@ async function sendWhatsAppMessage(to, body, mediaUrl) {
   // Mode DEV : on log seulement, aucun envoi réel
   if (DEV_MODE) {
     console.log("[Twilio DEV][WHATSAPP] Message simulé:");
-    console.log("  to   =", to);
-    console.log("  body =", body);
-    if (mediaUrl) {
-      console.log("  mediaUrl =", mediaUrl);
-    }
+    console.log("  to      =", to);
+    console.log("  body    =", body);
+    if (mediaUrl) console.log("  mediaUrl =", mediaUrl);
     return { sid: "dev-whatsapp", status: "queued-dev" };
   }
 
   if (!client) throw new Error("Twilio client non initialisé");
+
   const from = getWhatsAppFrom();
   if (!from) throw new Error("TWILIO_WHATSAPP_FROM non configuré");
 
   const toWhatsApp = normalizeWhatsAppNumber(to);
 
-  const payload = {
-    from,
-    to: toWhatsApp,
-  };
+  const payload = { from, to: toWhatsApp };
 
   if (body && String(body).trim().length > 0) {
     payload.body = body;
@@ -138,27 +147,18 @@ async function sendWhatsAppMessage(to, body, mediaUrl) {
   }
 
   const res = await client.messages.create(payload);
-
   return { sid: res.sid, status: res.status };
 }
 
 /**
  * Helper pour notifier le BACKOFFICE d'une commande Duumini.
- * Ce n'est PAS un message client, mais un message interne :
- *   - résumé de la commande
- *   - infos client (connecté OU invité)
- *   - adresse
- *   - liste des articles
- *   - + option image du produit (ex: première image de la commande)
- *
- * Pour le client invité, le backend envoie par ex. name = "Client invité Duumini".
- * On peut aussi recevoir un displayCode alphanumérique (base36) à afficher.
+ * Ce n'est PAS un message client, mais un message interne.
  */
 async function sendWhatsAppOrderConfirmation({
   to,
   name,
   orderId,
-  displayCode,       // ✅ optionnel, ex: "3FZ9"
+  displayCode, // optionnel, ex: "3FZ9"
   total,
   ville,
   commune,
@@ -169,12 +169,9 @@ async function sendWhatsAppOrderConfirmation({
 }) {
   const lines = [];
 
-  // En-tête interne
   lines.push("🧾 *Nouvelle commande Duumini*");
 
-  // ID visible dans le message
   if (displayCode && orderId) {
-    // Exemple : 3FZ9 (#24) → humain + traçabilité DB
     lines.push(`• ID commande : ${displayCode} (#${orderId})`);
   } else if (displayCode) {
     lines.push(`• ID commande : ${displayCode}`);
@@ -182,25 +179,17 @@ async function sendWhatsAppOrderConfirmation({
     lines.push(`• ID commande : #${orderId}`);
   }
 
-  if (name) {
-    lines.push(`• Client : ${name}`);
-  }
-  if (phone) {
-    lines.push(`• Téléphone : ${phone}`);
-  }
-  if (typeof total !== "undefined") {
-    lines.push(`• Total : ${total} MAD`);
-  }
+  if (name) lines.push(`• Client : ${name}`);
+  if (phone) lines.push(`• Téléphone : ${phone}`);
+  if (typeof total !== "undefined") lines.push(`• Total : ${total} MAD`);
 
-  lines.push(""); // ligne vide
+  lines.push("");
 
-  // Adresse
   lines.push("📍 *Adresse de livraison*");
   if (ville) lines.push(`• Ville : ${ville}`);
   if (commune) lines.push(`• Commune : ${commune}`);
   if (quartier) lines.push(`• Quartier : ${quartier}`);
 
-  // Détails des articles
   if (details) {
     lines.push("");
     lines.push("🛒 *Articles*");
