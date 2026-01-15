@@ -377,10 +377,6 @@ function parseVariantId(x) {
 
 /* =========================
  * PROMO helpers (✅ NEW)
- * - applique promo seulement si eligible
- * - applique sur le prix de base (variant override ou price normal)
- * - fige le prix final dans order_items.unit_price
- * - (optionnel) stocke promo_applied/type/value/base_price si colonnes présentes
  * =======================*/
 function normalizePromoType(value) {
   const t = String(value || "").trim().toUpperCase();
@@ -426,7 +422,6 @@ function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   const promoValue = Number(p?.promo_discount_value);
   const hasValue = Number.isFinite(promoValue) && promoValue > 0;
 
-  // type peut être null en DB => on normalise si besoin
   const promoType = normalizePromoType(p?.promo_discount_type || "PERCENT");
 
   if (!eligible || !hasValue) {
@@ -495,6 +490,78 @@ async function getOrderItemsPromoColsCached(pool) {
   } finally {
     conn.release();
   }
+}
+
+/* =========================
+ * ✅ NEW: Payment columns detection + normalization
+ * (ne casse rien si colonnes absentes)
+ * =======================*/
+let _ordersPayCols = null;
+let _ordersPayColsLoaded = false;
+
+async function detectOrdersPayCols(conn) {
+  const candidates = ["payment", "payment_status", "paid_amount", "remaining_amount"];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    payment: found.has("payment"),
+    payment_status: found.has("payment_status"),
+    paid_amount: found.has("paid_amount"),
+    remaining_amount: found.has("remaining_amount"),
+  };
+}
+
+async function getOrdersPayColsCached(pool) {
+  if (_ordersPayColsLoaded) return _ordersPayCols;
+  const conn = await pool.getConnection();
+  try {
+    _ordersPayCols = await detectOrdersPayCols(conn);
+    _ordersPayColsLoaded = true;
+    return _ordersPayCols;
+  } finally {
+    conn.release();
+  }
+}
+
+function normMoney(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return +n.toFixed(2);
+}
+function normPayStatus(s) {
+  const v = String(s || "").trim().toUpperCase();
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL") return v;
+  return null;
+}
+function buildPaymentFromPayload(payment, orderTotal, currency) {
+  const cur = String(currency || "MAD").toUpperCase();
+  const p = payment && typeof payment === "object" ? payment : {};
+  const askedStatus = normPayStatus(p.status);
+  const total = normMoney(orderTotal);
+
+  const paid = Math.min(normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0), total);
+  const remaining = Math.max(0, total - paid);
+
+  let status = askedStatus || "UNPAID";
+  if (paid <= 0) status = "UNPAID";
+  else if (paid >= total) status = "PAID";
+  else status = "PARTIAL";
+
+  return {
+    status,
+    paid_amount: paid,
+    remaining_amount: remaining,
+    currency: cur,
+    method: String(p.method || "CASH").toUpperCase(),
+    note: p.note ? String(p.note).slice(0, 500) : null,
+  };
 }
 
 async function lockProductForItem(conn, productId) {
@@ -611,12 +678,15 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
+        const payment = safeParseJSON(r.payment);
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          payment: payment || null,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -688,12 +758,15 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
+        const payment = safeParseJSON(r.payment);
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          payment: payment || null,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -779,12 +852,15 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
+        const payment = safeParseJSON(r.payment);
+
         return {
           ...r,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
           geo_link,
+          payment: payment || null,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -857,12 +933,15 @@ router.get("/", authRequired, async (req, res) => {
       const deliveryFee = Math.max(0, totalAmount - itemsAmount);
       const currency = (r.currency || "MAD").toUpperCase();
 
+      const payment = safeParseJSON(r.payment);
+
       return {
         ...r,
         display_code: buildDisplayCode(r.id),
         address,
         contact,
         geo_link,
+        payment: payment || null,
         totals: {
           items_amount: itemsAmount,
           delivery_fee: deliveryFee,
@@ -932,7 +1011,6 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       }
     }
 
-    // base: prix normal produit
     let base_unit_price = Number(p.price || 0);
     let stockSource = "PRODUCT";
     let current_stock = p.stock;
@@ -952,7 +1030,6 @@ async function buildCleanItemsWithPromo({ conn, items }) {
         throw err;
       }
 
-      // ✅ promo sur variant: base = price_override si dispo, sinon price produit
       base_unit_price =
         v.price_override != null && v.price_override !== ""
           ? Number(v.price_override)
@@ -968,10 +1045,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       };
     }
 
-    // ✅ appliquer promo seulement si eligible
     const promoPack = calcLineUnitPriceWithPromo({ baseUnitPrice: base_unit_price, p });
-
-    // ✅ unit_price figé = prix final (promo incluse)
     const unit_price = promoPack.unit_price;
 
     const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
@@ -979,7 +1053,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     cleanItems.push({
       product_id: p.id,
       qty,
-      unit_price, // final (promo incluse)
+      unit_price,
       base_unit_price: promoPack.base_unit_price,
       promo_applied: promoPack.promo_applied,
       promo_type: promoPack.promo_type,
@@ -999,9 +1073,10 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 
 /* =========================
  * Create order (auth)
+ * ✅ ajoute support payment si colonnes existent
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
-  const { contact = null, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
+  const { contact = null, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0)
     return res.status(400).json({ error: "items[] required" });
@@ -1020,7 +1095,6 @@ router.post("/", authRequired, async (req, res) => {
       contactObj = buildContactFromUser(req.user);
     }
 
-    // ✅ build items with promo
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({
       conn,
@@ -1031,20 +1105,59 @@ router.post("/", authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
+    // ✅ payment pack (reste à payer etc.)
+    const payCols = await getOrdersPayColsCached(pool);
+    const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
+
+    // ✅ insert order (safe selon colonnes)
+    const cols = [
+      "user_id",
+      "status",
+      "address",
+      "contact",
+      "geo_link",
+      "total",
+      "commission_duumini",
+      "currency",
+      "created_at",
+      "updated_at",
+    ];
+    const placeholders = ["?","?","?","?","?","?","?","?","NOW()","NOW()"];
+    const vals = [
+      req.user.id,
+      "OPEN",
+      JSON.stringify(addressObj),
+      JSON.stringify(contactObj),
+      geoLink,
+      orderTotal,
+      +totalCommission.toFixed(2),
+      currency,
+    ];
+
+    if (payCols?.payment) {
+      cols.push("payment");
+      placeholders.push("?");
+      vals.push(JSON.stringify(paymentObj));
+    }
+    if (payCols?.payment_status) {
+      cols.push("payment_status");
+      placeholders.push("?");
+      vals.push(paymentObj.status);
+    }
+    if (payCols?.paid_amount) {
+      cols.push("paid_amount");
+      placeholders.push("?");
+      vals.push(paymentObj.paid_amount);
+    }
+    if (payCols?.remaining_amount) {
+      cols.push("remaining_amount");
+      placeholders.push("?");
+      vals.push(paymentObj.remaining_amount);
+    }
+
     const [r] = await conn.query(
-      `
-      INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
-      VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, NOW(), NOW())
-      `,
-      [
-        req.user.id,
-        JSON.stringify(addressObj),
-        JSON.stringify(contactObj),
-        geoLink,
-        orderTotal,
-        +totalCommission.toFixed(2),
-        currency,
-      ]
+      `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
+      vals
     );
 
     const orderId = r.insertId;
@@ -1056,29 +1169,29 @@ router.post("/", authRequired, async (req, res) => {
         promoCols &&
         (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
       ) {
-        const cols = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
-        const vals = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
+        const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
         if (promoCols.base_unit_price) {
-          cols.push("base_unit_price");
-          vals.push(it.base_unit_price);
+          cols2.push("base_unit_price");
+          vals2.push(it.base_unit_price);
         }
         if (promoCols.promo_applied) {
-          cols.push("promo_applied");
-          vals.push(it.promo_applied || 0);
+          cols2.push("promo_applied");
+          vals2.push(it.promo_applied || 0);
         }
         if (promoCols.promo_type) {
-          cols.push("promo_type");
-          vals.push(it.promo_type || null);
+          cols2.push("promo_type");
+          vals2.push(it.promo_type || null);
         }
         if (promoCols.promo_value) {
-          cols.push("promo_value");
-          vals.push(it.promo_value != null ? Number(it.promo_value) : null);
+          cols2.push("promo_value");
+          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
         }
 
         await conn.query(
-          `INSERT INTO order_items (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-          vals
+          `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`,
+          vals2
         );
       } else {
         await conn.query(
@@ -1149,6 +1262,7 @@ router.post("/", authRequired, async (req, res) => {
       total: orderTotal,
       currency,
       geo_link: geoLink || null,
+      payment: paymentObj || null, // ✅ utile côté front
     });
   } catch (e) {
     try {
@@ -1164,9 +1278,10 @@ router.post("/", authRequired, async (req, res) => {
 
 /* =========================
  * Create order guest
+ * ✅ ajoute support payment si colonnes existent
  * =======================*/
 router.post("/guest", async (req, res) => {
-  const { contact = {}, address = {}, delivery = {}, items = [], totals = {} } = req.body || {};
+  const { contact = {}, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0)
     return res.status(400).json({ error: "items[] required" });
@@ -1188,7 +1303,6 @@ router.post("/guest", async (req, res) => {
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    // ✅ build items with promo
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({
       conn,
@@ -1199,53 +1313,92 @@ router.post("/guest", async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
+    // ✅ payment pack
+    const payCols = await getOrdersPayColsCached(pool);
+    const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
+
+    // ✅ insert order (safe selon colonnes)
+    const cols = [
+      "user_id",
+      "status",
+      "address",
+      "contact",
+      "geo_link",
+      "total",
+      "commission_duumini",
+      "currency",
+      "created_at",
+      "updated_at",
+    ];
+    const placeholders = ["NULL","?","?","?","?","?","?","?","NOW()","NOW()"];
+    const vals = [
+      "OPEN",
+      JSON.stringify(addressObj),
+      JSON.stringify(contactObj),
+      geoLink,
+      orderTotal,
+      +totalCommission.toFixed(2),
+      currency,
+    ];
+
+    // note: ici user_id = NULL => pas de "?" pour user_id
+    if (payCols?.payment) {
+      cols.push("payment");
+      placeholders.push("?");
+      vals.push(JSON.stringify(paymentObj));
+    }
+    if (payCols?.payment_status) {
+      cols.push("payment_status");
+      placeholders.push("?");
+      vals.push(paymentObj.status);
+    }
+    if (payCols?.paid_amount) {
+      cols.push("paid_amount");
+      placeholders.push("?");
+      vals.push(paymentObj.paid_amount);
+    }
+    if (payCols?.remaining_amount) {
+      cols.push("remaining_amount");
+      placeholders.push("?");
+      vals.push(paymentObj.remaining_amount);
+    }
+
     const [r] = await conn.query(
-      `
-      INSERT INTO orders (user_id, status, address, contact, geo_link, total, commission_duumini, currency, created_at, updated_at)
-      VALUES (NULL, 'OPEN', ?, ?, ?, ?, ?, ?, NOW(), NOW())
-      `,
-      [
-        JSON.stringify(addressObj),
-        JSON.stringify(contactObj),
-        geoLink,
-        orderTotal,
-        +totalCommission.toFixed(2),
-        currency,
-      ]
+      `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
+      vals
     );
 
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // ✅ insert order_items with optional promo fields
     for (const it of cleanItems) {
       if (
         promoCols &&
         (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
       ) {
-        const cols = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
-        const vals = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
+        const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
         if (promoCols.base_unit_price) {
-          cols.push("base_unit_price");
-          vals.push(it.base_unit_price);
+          cols2.push("base_unit_price");
+          vals2.push(it.base_unit_price);
         }
         if (promoCols.promo_applied) {
-          cols.push("promo_applied");
-          vals.push(it.promo_applied || 0);
+          cols2.push("promo_applied");
+          vals2.push(it.promo_applied || 0);
         }
         if (promoCols.promo_type) {
-          cols.push("promo_type");
-          vals.push(it.promo_type || null);
+          cols2.push("promo_type");
+          vals2.push(it.promo_type || null);
         }
         if (promoCols.promo_value) {
-          cols.push("promo_value");
-          vals.push(it.promo_value != null ? Number(it.promo_value) : null);
+          cols2.push("promo_value");
+          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
         }
 
         await conn.query(
-          `INSERT INTO order_items (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-          vals
+          `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`,
+          vals2
         );
       } else {
         await conn.query(
@@ -1255,7 +1408,6 @@ router.post("/guest", async (req, res) => {
       }
     }
 
-    // ✅ stock updates unchanged
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -1307,6 +1459,7 @@ router.post("/guest", async (req, res) => {
       total: orderTotal,
       currency,
       geo_link: geoLink || null,
+      payment: paymentObj || null,
     });
   } catch (e) {
     try {
@@ -1321,6 +1474,7 @@ router.post("/guest", async (req, res) => {
 
 /* =========================
  * Get one order
+ * ✅ parse payment si présent
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1332,6 +1486,7 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
+    const payment = safeParseJSON(o.payment);
 
     const [[u]] = await conn.query("SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1", [
       o.user_id,
@@ -1358,6 +1513,7 @@ router.get("/:id", authRequired, async (req, res) => {
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
+      payment: payment || null,
       items: result.items,
       totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
