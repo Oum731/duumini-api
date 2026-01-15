@@ -1206,13 +1206,8 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         return res.status(404).json({ error: "Not found" });
       }
 
-      if (["DONE", "CANCELLED"].includes(String(o.status || "").toUpperCase())) {
-        await conn.rollback();
-        return res.status(409).json({
-          code: "ORDER_LOCKED",
-          message: "Impossible de modifier le paiement pour une commande DONE ou CANCELLED.",
-        });
-      }
+      // ✅ CHANGEMENT: on AUTORISE la mise à jour paiement même si DONE/CANCELLED (ADMIN)
+      // (si tu veux re-bloquer seulement CANCELLED, dis-moi)
 
       const total = Number(o.total || 0);
       const currency = (o.currency || "MAD").toUpperCase();
@@ -1263,7 +1258,13 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
       await conn.commit();
 
-      return res.json({ ok: true, id, payment: paymentObj });
+      return res.json({
+        ok: true,
+        id,
+        status: String(o.status || "").toUpperCase(),
+        display_code: buildDisplayCode(id),
+        payment: paymentObj,
+      });
     } catch (e) {
       try {
         await conn.rollback();
@@ -1276,6 +1277,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 });
+
 
 /* =========================
  * Create order (auth)
