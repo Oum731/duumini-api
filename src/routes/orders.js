@@ -275,8 +275,6 @@ async function sendAdminWhatsAppForOrder({
   items,
 }) {
   const hasFrom = !!(env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM);
-  const isProd = String(env.NODE_ENV || process.env.NODE_ENV || "").toLowerCase() === "production";
-
   if (!hasFrom) return;
   if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) return;
 
@@ -376,7 +374,7 @@ function parseVariantId(x) {
 }
 
 /* =========================
- * PROMO helpers (✅ NEW)
+ * PROMO helpers
  * =======================*/
 function normalizePromoType(value) {
   const t = String(value || "").trim().toUpperCase();
@@ -565,6 +563,54 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
   };
 }
 
+/** ✅ NEW: toujours renvoyer payment_status/paid_amount/remaining_amount dans LIST (même si colonnes absentes) */
+function normalizePaymentForRow(row, orderTotal, currency, payCols) {
+  const total = normMoney(orderTotal);
+  const cur = String(currency || "MAD").toUpperCase();
+
+  const paymentParsed = safeParseJSON(row?.payment) || null;
+
+  const colStatus = payCols?.payment_status ? normPayStatus(row?.payment_status) : null;
+  const colPaid = payCols?.paid_amount ? normMoney(row?.paid_amount) : null;
+  const colRemain = payCols?.remaining_amount ? normMoney(row?.remaining_amount) : null;
+
+  const jsonPaid = paymentParsed ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0) : 0;
+  const paid = colPaid != null ? colPaid : jsonPaid;
+
+  const remaining = colRemain != null ? colRemain : Math.max(0, total - Math.min(paid, total));
+
+  let status = colStatus;
+  if (!status) {
+    if (paid <= 0) status = "UNPAID";
+    else if (paid >= total) status = "PAID";
+    else status = "PARTIAL";
+  }
+
+  const paymentObj = paymentParsed
+    ? {
+        ...paymentParsed,
+        status,
+        paid_amount: Math.min(paid, total),
+        remaining_amount: remaining,
+        currency: String(paymentParsed.currency || cur).toUpperCase(),
+      }
+    : {
+        status,
+        paid_amount: Math.min(paid, total),
+        remaining_amount: remaining,
+        currency: cur,
+        method: null,
+        note: null,
+      };
+
+  return {
+    payment: paymentObj,
+    payment_status: status,
+    paid_amount: paymentObj.paid_amount,
+    remaining_amount: paymentObj.remaining_amount,
+  };
+}
+
 async function lockProductForItem(conn, productId) {
   const [[p]] = await conn.query(
     `
@@ -607,7 +653,7 @@ async function lockVariantForItem(conn, productId, variantId) {
 }
 
 /* =========================
- * LIST (✅ filtre payment_status ajouté)
+ * LIST (filtre payment_status)
  *  - /api/orders?payment_status=PAID|UNPAID|PARTIAL
  *  - alias: pay=PAID
  * =======================*/
@@ -619,7 +665,6 @@ router.get("/", authRequired, async (req, res) => {
   const rawStatus = req.query.status ? String(req.query.status).toUpperCase() : null;
   const hasStatus = rawStatus && rawStatus !== "ALL";
 
-  // ✅ payment filter
   const payFilterRaw =
     req.query.payment_status ?? req.query.paymentStatus ?? req.query.pay ?? req.query.payStatus ?? null;
   const payFilter = normPayStatus(payFilterRaw);
@@ -627,7 +672,6 @@ router.get("/", authRequired, async (req, res) => {
   try {
     const payCols = await getOrdersPayColsCached(pool);
 
-    // si on demande un filtre mais colonnes absentes => erreur claire
     if (payFilter && !(payCols && payCols.payment_status)) {
       return res.status(400).json({
         code: "PAYMENT_FILTER_UNAVAILABLE",
@@ -698,7 +742,7 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
-        const payment = safeParseJSON(r.payment);
+        const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
         return {
           ...r,
@@ -706,7 +750,7 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          payment: payment || null,
+          ...paymentNorm,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -779,7 +823,7 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
-        const payment = safeParseJSON(r.payment);
+        const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
         return {
           ...r,
@@ -787,7 +831,7 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          payment: payment || null,
+          ...paymentNorm,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -877,7 +921,7 @@ router.get("/", authRequired, async (req, res) => {
         const deliveryFee = Math.max(0, totalAmount - itemsAmount);
         const currency = (r.currency || "MAD").toUpperCase();
 
-        const payment = safeParseJSON(r.payment);
+        const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
         return {
           ...r,
@@ -885,7 +929,7 @@ router.get("/", authRequired, async (req, res) => {
           address,
           contact,
           geo_link,
-          payment: payment || null,
+          ...paymentNorm,
           totals: {
             items_amount: itemsAmount,
             delivery_fee: deliveryFee,
@@ -898,6 +942,7 @@ router.get("/", authRequired, async (req, res) => {
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
+    // fallback: client normal
     const params = [req.user.id];
     let where = "o.user_id = ?";
 
@@ -959,7 +1004,7 @@ router.get("/", authRequired, async (req, res) => {
       const deliveryFee = Math.max(0, totalAmount - itemsAmount);
       const currency = (r.currency || "MAD").toUpperCase();
 
-      const payment = safeParseJSON(r.payment);
+      const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
       return {
         ...r,
@@ -967,7 +1012,7 @@ router.get("/", authRequired, async (req, res) => {
         address,
         contact,
         geo_link,
-        payment: payment || null,
+        ...paymentNorm,
         totals: {
           items_amount: itemsAmount,
           delivery_fee: deliveryFee,
@@ -984,7 +1029,7 @@ router.get("/", authRequired, async (req, res) => {
 });
 
 /* =========================
- * Shared: build cleanItems with promo (✅ NEW)
+ * Shared: build cleanItems with promo
  * =======================*/
 async function buildCleanItemsWithPromo({ conn, items }) {
   let itemsAmount = 0;
@@ -1098,19 +1143,16 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 }
 
 /* =========================
- * ✅ NEW: Encaissement / update payment
+ * Encaissement / update payment (ADMIN ONLY)
  * PUT /api/orders/:id/payment
- *
- * Body:
- *  - mode: "SET" | "ADD" (default SET)
- *  - paid_amount: number (required in SET)
- *  - add_amount: number (required in ADD)
- *  - method?: "CASH" | ...
- *  - note?: string
  * =======================*/
 router.put("/:id/payment", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const pool = getPool();
 
@@ -1128,53 +1170,8 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       });
     }
 
-    const mode = String(req.body?.mode || "ADD").trim().toUpperCase(); // ✅ default ADD (plus safe)
+    const mode = String(req.body?.mode || "ADD").trim().toUpperCase(); // default ADD
     if (mode !== "SET" && mode !== "ADD") return res.status(400).json({ error: "invalid mode (SET|ADD)" });
-
-    // ✅ permissions SAFE
-    // - ADMIN: ADD/SET
-    // - VENDOR: ADD only (ou tu peux carrément interdire vendor)
-    if (!isAdmin(req.user)) {
-      if (!isVendor(req.user)) return res.status(403).json({ error: "Forbidden" });
-      if (mode === "SET") {
-        return res.status(403).json({
-          code: "PAYMENT_SET_FORBIDDEN",
-          message: "Seul un ADMIN peut fixer (SET) le montant payé. Utilise ADD.",
-        });
-      }
-
-      // ✅ vendor doit être concerné par la commande
-      const [[own]] = await pool.query(
-        `
-        SELECT 1
-        FROM order_items oi
-        JOIN products p ON p.id = oi.product_id
-        JOIN shops s ON s.id = p.shop_id
-        WHERE oi.order_id = ? AND s.owner_id = ?
-        LIMIT 1
-        `,
-        [id, req.user.id]
-      );
-      if (!own) return res.status(403).json({ error: "Forbidden" });
-
-      // ✅ Option ultra safe: interdire si multi-vendeur
-      const [[multi]] = await pool.query(
-        `
-        SELECT COUNT(DISTINCT s.owner_id) AS owners
-        FROM order_items oi
-        JOIN products p ON p.id = oi.product_id
-        JOIN shops s ON s.id = p.shop_id
-        WHERE oi.order_id = ?
-        `,
-        [id]
-      );
-      if (Number(multi?.owners || 0) > 1) {
-        return res.status(409).json({
-          code: "MULTI_VENDOR_ORDER_PAYMENT_LOCKED",
-          message: "Commande multi-vendeurs: seul un ADMIN peut modifier le paiement.",
-        });
-      }
-    }
 
     const add_amount = req.body?.add_amount ?? req.body?.addAmount ?? null;
     const paid_amount = req.body?.paid_amount ?? req.body?.paidAmount ?? req.body?.amount ?? null;
@@ -1209,7 +1206,6 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         return res.status(404).json({ error: "Not found" });
       }
 
-      // ✅ bloquer si commande terminée/annulée
       if (["DONE", "CANCELLED"].includes(String(o.status || "").toUpperCase())) {
         await conn.rollback();
         return res.status(409).json({
@@ -1222,13 +1218,13 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       const currency = (o.currency || "MAD").toUpperCase();
 
       const currentPayment = safeParseJSON(o.payment) || {};
-      const currentPaid = Number.isFinite(Number(o.paid_amount)) ? Number(o.paid_amount) : Number(currentPayment.paid_amount || 0) || 0;
+      const currentPaid =
+        Number.isFinite(Number(o.paid_amount)) ? Number(o.paid_amount) : Number(currentPayment.paid_amount || 0) || 0;
 
       let nextPaid = currentPaid;
       if (mode === "ADD") nextPaid = currentPaid + Number(add_amount || 0);
       else nextPaid = Number(paid_amount || 0);
 
-      // ✅ clamp hard
       if (!Number.isFinite(nextPaid) || nextPaid < 0) nextPaid = 0;
       if (Number.isFinite(total) && total >= 0) nextPaid = Math.min(nextPaid, total);
 
@@ -1244,10 +1240,22 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       const sets = [];
       const vals = [];
 
-      if (payCols.payment) { sets.push("payment = ?"); vals.push(JSON.stringify(paymentObj)); }
-      if (payCols.payment_status) { sets.push("payment_status = ?"); vals.push(paymentObj.status); }
-      if (payCols.paid_amount) { sets.push("paid_amount = ?"); vals.push(paymentObj.paid_amount); }
-      if (payCols.remaining_amount) { sets.push("remaining_amount = ?"); vals.push(paymentObj.remaining_amount); }
+      if (payCols.payment) {
+        sets.push("payment = ?");
+        vals.push(JSON.stringify(paymentObj));
+      }
+      if (payCols.payment_status) {
+        sets.push("payment_status = ?");
+        vals.push(paymentObj.status);
+      }
+      if (payCols.paid_amount) {
+        sets.push("paid_amount = ?");
+        vals.push(paymentObj.paid_amount);
+      }
+      if (payCols.remaining_amount) {
+        sets.push("remaining_amount = ?");
+        vals.push(paymentObj.remaining_amount);
+      }
 
       sets.push("updated_at = NOW()");
 
@@ -1257,7 +1265,9 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
       return res.json({ ok: true, id, payment: paymentObj });
     } catch (e) {
-      try { await conn.rollback(); } catch {}
+      try {
+        await conn.rollback();
+      } catch {}
       return res.status(500).json({ error: e.message });
     } finally {
       conn.release();
@@ -1269,13 +1279,11 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
 /* =========================
  * Create order (auth)
- * ✅ ajoute support payment si colonnes existent
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
   const { contact = null, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
-    return res.status(400).json({ error: "items[] required" });
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -1316,7 +1324,7 @@ router.post("/", authRequired, async (req, res) => {
       "created_at",
       "updated_at",
     ];
-    const placeholders = ["?","?","?","?","?","?","?","?","NOW()","NOW()"];
+    const placeholders = ["?", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
     const vals = [
       req.user.id,
       "OPEN",
@@ -1358,10 +1366,7 @@ router.post("/", authRequired, async (req, res) => {
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (
-        promoCols &&
-        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
-      ) {
+      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
         const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
         const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
@@ -1470,13 +1475,11 @@ router.post("/", authRequired, async (req, res) => {
 
 /* =========================
  * Create order guest
- * ✅ ajoute support payment si colonnes existent
  * =======================*/
 router.post("/guest", async (req, res) => {
   const { contact = {}, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
-    return res.status(400).json({ error: "items[] required" });
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
 
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
@@ -1520,7 +1523,7 @@ router.post("/guest", async (req, res) => {
       "created_at",
       "updated_at",
     ];
-    const placeholders = ["NULL","?","?","?","?","?","?","?","NOW()","NOW()"];
+    const placeholders = ["NULL", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
     const vals = [
       "OPEN",
       JSON.stringify(addressObj),
@@ -1561,10 +1564,7 @@ router.post("/guest", async (req, res) => {
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (
-        promoCols &&
-        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
-      ) {
+      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
         const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
         const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
@@ -1663,7 +1663,7 @@ router.post("/guest", async (req, res) => {
 
 /* =========================
  * Get one order
- * ✅ parse payment si présent
+ * ✅ parse + normalize payment
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1675,7 +1675,6 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
-    const payment = safeParseJSON(o.payment);
 
     const [[u]] = await conn.query("SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1", [
       o.user_id,
@@ -1697,12 +1696,15 @@ router.get("/:id", authRequired, async (req, res) => {
     const deliveryFee = Math.max(0, totalAmount - itemsAmount);
     const currency = (o.currency || "MAD").toUpperCase();
 
+    const payCols = await getOrdersPayColsCached(getPool());
+    const paymentNorm = normalizePaymentForRow(o, totalAmount, currency, payCols);
+
     res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
-      payment: payment || null,
+      ...paymentNorm,
       items: result.items,
       totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
