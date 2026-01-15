@@ -493,8 +493,7 @@ async function getOrderItemsPromoColsCached(pool) {
 }
 
 /* =========================
- * ✅ NEW: Payment columns detection + normalization
- * (ne casse rien si colonnes absentes)
+ * ✅ Payment columns detection + normalization
  * =======================*/
 let _ordersPayCols = null;
 let _ordersPayColsLoaded = false;
@@ -535,11 +534,13 @@ function normMoney(x) {
   if (!Number.isFinite(n) || n < 0) return 0;
   return +n.toFixed(2);
 }
+
 function normPayStatus(s) {
   const v = String(s || "").trim().toUpperCase();
   if (v === "PAID" || v === "UNPAID" || v === "PARTIAL") return v;
   return null;
 }
+
 function buildPaymentFromPayload(payment, orderTotal, currency) {
   const cur = String(currency || "MAD").toUpperCase();
   const p = payment && typeof payment === "object" ? payment : {};
@@ -606,7 +607,9 @@ async function lockVariantForItem(conn, productId, variantId) {
 }
 
 /* =========================
- * LIST
+ * LIST (✅ filtre payment_status ajouté)
+ *  - /api/orders?payment_status=PAID|UNPAID|PARTIAL
+ *  - alias: pay=PAID
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -616,7 +619,23 @@ router.get("/", authRequired, async (req, res) => {
   const rawStatus = req.query.status ? String(req.query.status).toUpperCase() : null;
   const hasStatus = rawStatus && rawStatus !== "ALL";
 
+  // ✅ payment filter
+  const payFilterRaw =
+    req.query.payment_status ?? req.query.paymentStatus ?? req.query.pay ?? req.query.payStatus ?? null;
+  const payFilter = normPayStatus(payFilterRaw);
+
   try {
+    const payCols = await getOrdersPayColsCached(pool);
+
+    // si on demande un filtre mais colonnes absentes => erreur claire
+    if (payFilter && !(payCols && payCols.payment_status)) {
+      return res.status(400).json({
+        code: "PAYMENT_FILTER_UNAVAILABLE",
+        message:
+          "Le filtre payment_status est demandé mais la colonne orders.payment_status n'existe pas encore. Ajoute la migration puis réessaie.",
+      });
+    }
+
     if (mine) {
       const params = [req.user.id];
       let where = "o.user_id = ?";
@@ -625,11 +644,12 @@ router.get("/", authRequired, async (req, res) => {
         where += " AND o.status = ?";
         params.push(rawStatus);
       }
+      if (payFilter) {
+        where += " AND o.payment_status = ?";
+        params.push(payFilter);
+      }
 
-      const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params
-      );
+      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
       const [rowsRaw] = await pool.query(
         `
@@ -707,11 +727,12 @@ router.get("/", authRequired, async (req, res) => {
         where += " AND o.status = ?";
         params.push(rawStatus);
       }
+      if (payFilter) {
+        where += " AND o.payment_status = ?";
+        params.push(payFilter);
+      }
 
-      const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params
-      );
+      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
       const [rowsRaw] = await pool.query(
         `
@@ -786,6 +807,10 @@ router.get("/", authRequired, async (req, res) => {
       if (hasStatus) {
         where += " AND o.status = ?";
         params.push(rawStatus);
+      }
+      if (payFilter) {
+        where += " AND o.payment_status = ?";
+        params.push(payFilter);
       }
 
       const [[{ total }]] = await pool.query(
@@ -880,11 +905,12 @@ router.get("/", authRequired, async (req, res) => {
       where += " AND o.status = ?";
       params.push(rawStatus);
     }
+    if (payFilter) {
+      where += " AND o.payment_status = ?";
+      params.push(payFilter);
+    }
 
-    const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-      params
-    );
+    const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
     const [rowsRaw] = await pool.query(
       `
@@ -1072,6 +1098,176 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 }
 
 /* =========================
+ * ✅ NEW: Encaissement / update payment
+ * PUT /api/orders/:id/payment
+ *
+ * Body:
+ *  - mode: "SET" | "ADD" (default SET)
+ *  - paid_amount: number (required in SET)
+ *  - add_amount: number (required in ADD)
+ *  - method?: "CASH" | ...
+ *  - note?: string
+ * =======================*/
+router.put("/:id/payment", authRequired, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+  const pool = getPool();
+
+  try {
+    const payCols = await getOrdersPayColsCached(pool);
+
+    const hasAny =
+      payCols?.payment || payCols?.payment_status || payCols?.paid_amount || payCols?.remaining_amount;
+
+    if (!hasAny) {
+      return res.status(409).json({
+        code: "PAYMENT_COLUMNS_MISSING",
+        message:
+          "Impossible de mettre à jour le paiement: colonnes payment/payment_status/paid_amount/remaining_amount absentes. Ajoute la migration puis réessaie.",
+      });
+    }
+
+    const mode = String(req.body?.mode || "ADD").trim().toUpperCase(); // ✅ default ADD (plus safe)
+    if (mode !== "SET" && mode !== "ADD") return res.status(400).json({ error: "invalid mode (SET|ADD)" });
+
+    // ✅ permissions SAFE
+    // - ADMIN: ADD/SET
+    // - VENDOR: ADD only (ou tu peux carrément interdire vendor)
+    if (!isAdmin(req.user)) {
+      if (!isVendor(req.user)) return res.status(403).json({ error: "Forbidden" });
+      if (mode === "SET") {
+        return res.status(403).json({
+          code: "PAYMENT_SET_FORBIDDEN",
+          message: "Seul un ADMIN peut fixer (SET) le montant payé. Utilise ADD.",
+        });
+      }
+
+      // ✅ vendor doit être concerné par la commande
+      const [[own]] = await pool.query(
+        `
+        SELECT 1
+        FROM order_items oi
+        JOIN products p ON p.id = oi.product_id
+        JOIN shops s ON s.id = p.shop_id
+        WHERE oi.order_id = ? AND s.owner_id = ?
+        LIMIT 1
+        `,
+        [id, req.user.id]
+      );
+      if (!own) return res.status(403).json({ error: "Forbidden" });
+
+      // ✅ Option ultra safe: interdire si multi-vendeur
+      const [[multi]] = await pool.query(
+        `
+        SELECT COUNT(DISTINCT s.owner_id) AS owners
+        FROM order_items oi
+        JOIN products p ON p.id = oi.product_id
+        JOIN shops s ON s.id = p.shop_id
+        WHERE oi.order_id = ?
+        `,
+        [id]
+      );
+      if (Number(multi?.owners || 0) > 1) {
+        return res.status(409).json({
+          code: "MULTI_VENDOR_ORDER_PAYMENT_LOCKED",
+          message: "Commande multi-vendeurs: seul un ADMIN peut modifier le paiement.",
+        });
+      }
+    }
+
+    const add_amount = req.body?.add_amount ?? req.body?.addAmount ?? null;
+    const paid_amount = req.body?.paid_amount ?? req.body?.paidAmount ?? req.body?.amount ?? null;
+
+    const method = req.body?.method ? String(req.body.method).toUpperCase() : null;
+    const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
+
+    if (mode === "ADD") {
+      const v = Number(add_amount);
+      if (!Number.isFinite(v) || v <= 0) return res.status(400).json({ error: "add_amount required" });
+    } else {
+      const v = Number(paid_amount);
+      if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: "paid_amount required" });
+    }
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [[o]] = await conn.query(
+        `
+        SELECT id, status, total, currency, payment, paid_amount
+        FROM orders
+        WHERE id = ?
+        FOR UPDATE
+        `,
+        [id]
+      );
+
+      if (!o) {
+        await conn.rollback();
+        return res.status(404).json({ error: "Not found" });
+      }
+
+      // ✅ bloquer si commande terminée/annulée
+      if (["DONE", "CANCELLED"].includes(String(o.status || "").toUpperCase())) {
+        await conn.rollback();
+        return res.status(409).json({
+          code: "ORDER_LOCKED",
+          message: "Impossible de modifier le paiement pour une commande DONE ou CANCELLED.",
+        });
+      }
+
+      const total = Number(o.total || 0);
+      const currency = (o.currency || "MAD").toUpperCase();
+
+      const currentPayment = safeParseJSON(o.payment) || {};
+      const currentPaid = Number.isFinite(Number(o.paid_amount)) ? Number(o.paid_amount) : Number(currentPayment.paid_amount || 0) || 0;
+
+      let nextPaid = currentPaid;
+      if (mode === "ADD") nextPaid = currentPaid + Number(add_amount || 0);
+      else nextPaid = Number(paid_amount || 0);
+
+      // ✅ clamp hard
+      if (!Number.isFinite(nextPaid) || nextPaid < 0) nextPaid = 0;
+      if (Number.isFinite(total) && total >= 0) nextPaid = Math.min(nextPaid, total);
+
+      const merged = {
+        ...currentPayment,
+        ...(method ? { method } : {}),
+        ...(note ? { note } : {}),
+        paid_amount: nextPaid,
+      };
+
+      const paymentObj = buildPaymentFromPayload(merged, total, currency);
+
+      const sets = [];
+      const vals = [];
+
+      if (payCols.payment) { sets.push("payment = ?"); vals.push(JSON.stringify(paymentObj)); }
+      if (payCols.payment_status) { sets.push("payment_status = ?"); vals.push(paymentObj.status); }
+      if (payCols.paid_amount) { sets.push("paid_amount = ?"); vals.push(paymentObj.paid_amount); }
+      if (payCols.remaining_amount) { sets.push("remaining_amount = ?"); vals.push(paymentObj.remaining_amount); }
+
+      sets.push("updated_at = NOW()");
+
+      await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
+
+      await conn.commit();
+
+      return res.json({ ok: true, id, payment: paymentObj });
+    } catch (e) {
+      try { await conn.rollback(); } catch {}
+      return res.status(500).json({ error: e.message });
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
  * Create order (auth)
  * ✅ ajoute support payment si colonnes existent
  * =======================*/
@@ -1105,11 +1301,9 @@ router.post("/", authRequired, async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // ✅ payment pack (reste à payer etc.)
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    // ✅ insert order (safe selon colonnes)
     const cols = [
       "user_id",
       "status",
@@ -1163,7 +1357,6 @@ router.post("/", authRequired, async (req, res) => {
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
-    // ✅ insert order_items with optional promo fields
     for (const it of cleanItems) {
       if (
         promoCols &&
@@ -1201,7 +1394,6 @@ router.post("/", authRequired, async (req, res) => {
       }
     }
 
-    // ✅ stock updates unchanged
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -1262,7 +1454,7 @@ router.post("/", authRequired, async (req, res) => {
       total: orderTotal,
       currency,
       geo_link: geoLink || null,
-      payment: paymentObj || null, // ✅ utile côté front
+      payment: paymentObj || null,
     });
   } catch (e) {
     try {
@@ -1313,11 +1505,9 @@ router.post("/guest", async (req, res) => {
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
-    // ✅ payment pack
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    // ✅ insert order (safe selon colonnes)
     const cols = [
       "user_id",
       "status",
@@ -1341,7 +1531,6 @@ router.post("/guest", async (req, res) => {
       currency,
     ];
 
-    // note: ici user_id = NULL => pas de "?" pour user_id
     if (payCols?.payment) {
       cols.push("payment");
       placeholders.push("?");
