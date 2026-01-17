@@ -2,6 +2,7 @@
 const { Router } = require("express");
 const { authRequired, isAdmin } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
+const { upsertDraft } = require("../lib/contentStore");
 const { env } = require("../lib/env");
 
 const router = Router();
@@ -22,67 +23,118 @@ function ensureAiOn(res) {
   return true;
 }
 
-// ✅ POST /api/ai/duumini (ADMIN)
-router.post("/duumini", authRequired, isAdmin, async (req, res, next) => {
+/**
+ * POST /api/ai/seo/optimize-page (ADMIN)
+ * body: { slug, lang?, type?, current?, keywords?, internal_links? }
+ * -> crée/maj un draft dans DB (content_items)
+ */
+router.post("/seo/optimize-page", authRequired, isAdmin, async (req, res) => {
   if (!ensureAiOn(res)) return;
-  try {
-    const { taskType, payload } = req.body || {};
-    const out = await runDuuminiAgent(taskType, payload || {});
-    res.json(out);
-  } catch (e) {
-    next(e);
-  }
-});
 
-// POST /api/ai/weekly-plan (ADMIN)
-router.post("/weekly-plan", authRequired, isAdmin, async (req, res) => {
-  if (!ensureAiOn(res)) return;
+  const {
+    slug,
+    lang = "fr",
+    type = "page",
+    current = null,
+    keywords = [],
+    internal_links = [],
+  } = req.body || {};
+
+  if (!slug) return res.status(400).json({ error: "slug requis" });
+
   try {
-    const data = await runDuuminiAgent("weekly_plan", req.body || {});
-    return res.json({ ok: true, mode: env.DUUMINI_AI_MODE || "SAFE", data });
-  } catch (err) {
-    return res.status(500).json({
-      error: "weekly_plan_error",
-      details: err?.message || String(err),
+    const ai = await runDuuminiAgent("seo_optimize_page", {
+      slug,
+      lang,
+      current,
+      keywords,
+      internal_links,
     });
-  }
-});
 
-// POST /api/ai/social-posts (ADMIN)
-router.post("/social-posts", authRequired, isAdmin, async (req, res) => {
-  if (!ensureAiOn(res)) return;
-  try {
-    const data = await runDuuminiAgent("social_posts", req.body || {});
-    return res.json({ ok: true, mode: env.DUUMINI_AI_MODE || "SAFE", data });
-  } catch (err) {
-    return res.status(500).json({
-      error: "social_posts_error",
-      details: err?.message || String(err),
+    const saved = await upsertDraft({
+      type,
+      slug,
+      lang,
+      data: ai,
+      score: ai?.score ?? null,
+      created_by: "agent",
     });
-  }
-});
 
-// POST /api/ai/whatsapp-reply (ADMIN)
-router.post("/whatsapp-reply", authRequired, isAdmin, async (req, res) => {
-  if (!ensureAiOn(res)) return;
-
-  const { message, context, language } = req.body || {};
-  if (!message) return res.status(400).json({ error: "message requis" });
-
-  try {
-    const text = await runDuuminiAgent("whatsapp_reply", {
-      message,
-      context,
-      language,
-    });
     return res.json({
       ok: true,
       mode: env.DUUMINI_AI_MODE || "SAFE",
-      data: { text },
+      draft: saved,
+      preview: ai,
     });
   } catch (err) {
     return res.status(500).json({
-      error: "whatsapp_reply_error",
+      error: "seo_optimize_page_error",
+      details: err?.message || String(err),
+    });
+  }
+});
+
+/**
+ * POST /api/ai/seo/generate-city-page (ADMIN)
+ * body: { city, slug?, lang?, keywords? }
+ */
+router.post("/seo/generate-city-page", authRequired, isAdmin, async (req, res) => {
+  if (!ensureAiOn(res)) return;
+
+  const { city, slug, lang = "fr", keywords = [] } = req.body || {};
+  if (!city && !slug) return res.status(400).json({ error: "city ou slug requis" });
+
+  try {
+    const ai = await runDuuminiAgent("seo_generate_city_page", {
+      city,
+      slug,
+      lang,
+      keywords,
+    });
+
+    const finalSlug =
+      slug ||
+      String(city || "casablanca")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "-") + "/produits-africains";
+
+    const saved = await upsertDraft({
+      type: "city_page",
+      slug: finalSlug,
+      lang,
+      data: ai,
+      score: ai?.score ?? null,
+      created_by: "agent",
+    });
+
+    return res.json({
+      ok: true,
+      mode: env.DUUMINI_AI_MODE || "SAFE",
+      draft: saved,
+      preview: ai,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "seo_generate_city_page_error",
+      details: err?.message || String(err),
+    });
+  }
+});
+
+/**
+ * POST /api/ai/seo/audit (ADMIN)
+ * body: { urls?: [] }
+ */
+router.post("/seo/audit", authRequired, isAdmin, async (req, res) => {
+  if (!ensureAiOn(res)) return;
+
+  try {
+    const data = await runDuuminiAgent("seo_audit", req.body || {});
+    return res.json({ ok: true, mode: env.DUUMINI_AI_MODE || "SAFE", data });
+  } catch (err) {
+    return res.status(500).json({
+      error: "seo_audit_error",
       details: err?.message || String(err),
     });
   }

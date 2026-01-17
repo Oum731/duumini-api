@@ -31,14 +31,13 @@ const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 const locations = require("./src/routes/locations");
 
-// AI Ads routes
-const metaCampaignRoutes = require("./src/routes/meta_campaign");
-const googleCampaignRoutes = require("./src/routes/google_campaign");
-const googleAiAdsRoutes = require("./src/routes/google_ai_ads");
-let metaAiAdsRoutes = null;
+// ✅ NEW: Admin validation/publish for AI content (SEO-only)
+let adminContentAiRoutes = null;
 try {
-  metaAiAdsRoutes = require("./src/routes/meta_ai_ads");
-} catch {}
+  adminContentAiRoutes = require("./src/routes/adminContentAi");
+} catch (e) {
+  console.warn("[adminContentAi] route missing:", e?.message || e);
+}
 
 // (optionnel) env-check admin-only
 let authRequired, isAdmin;
@@ -72,9 +71,13 @@ function yn(v) {
 console.log("[ENV] NODE_ENV =", env.NODE_ENV);
 console.log("[ENV] PORT =", env.PORT);
 console.log("[ENV] CORS_ORIGINS =", env.CORS_ORIGINS || "*");
+
+// ✅ SEO IA only
 console.log("[ENV] DUUMINI_AI_MODE =", env.DUUMINI_AI_MODE || "SAFE");
 console.log("[ENV] OPENAI_API_KEY =", yn(env.OPENAI_API_KEY));
 console.log("[ENV] OPENAI_MODEL =", env.OPENAI_MODEL || "(default)");
+
+// ✅ Ads intentionally disabled (kept only for legacy env visibility)
 console.log("[ENV] META_AD_ACCOUNT_ID =", yn(env.META_AD_ACCOUNT_ID));
 console.log("[ENV] META_AD_ACCESS_TOKEN =", yn(env.META_AD_ACCESS_TOKEN));
 console.log("[ENV] META_PAGE_ID =", yn(env.META_PAGE_ID));
@@ -93,7 +96,9 @@ app.disable("x-powered-by");
 app.use((req, res, next) => {
   const rid =
     req.headers["x-request-id"] ||
-    (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"));
+    (crypto.randomUUID
+      ? crypto.randomUUID()
+      : crypto.randomBytes(16).toString("hex"));
   req.id = String(rid);
   res.setHeader("X-Request-Id", String(rid));
   next();
@@ -105,8 +110,6 @@ app.use((req, res, next) => {
 if (helmet) {
   app.use(
     helmet({
-      // Si tu sers aussi du contenu via ce même serveur et que ça casse des assets,
-      // on pourra ajuster la CSP. Pour l'API c'est OK.
       contentSecurityPolicy: false,
       crossOriginResourcePolicy: { policy: "cross-origin" },
     })
@@ -138,7 +141,6 @@ function isOriginAllowed(origin) {
     if (corsOrigins.includes(origin)) return true;
 
     // Option: autoriser via suffix (ex: *.duumini.com) si tu mets ".duumini.com" dans CORS_ORIGINS
-    // Exemple env: CORS_ORIGINS=https://duumini.com,https://www.duumini.com,.duumini.com
     const lower = origin.toLowerCase();
     for (const o of corsOrigins) {
       if (o.startsWith(".") && lower.endsWith(o.toLowerCase())) return true;
@@ -208,7 +210,8 @@ app.use(cookieParser());
  * Logs
  * ========================= */
 morgan.token("id", (req) => req.id || "-");
-const logFormatDev = ":id :method :url :status :res[content-length] - :response-time ms";
+const logFormatDev =
+  ":id :method :url :status :res[content-length] - :response-time ms";
 const logFormatProd = ":id :method :url :status - :response-time ms";
 
 if (env.NODE_ENV !== "production") {
@@ -228,7 +231,9 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 /* =========================
  * Healthcheck (rapide)
  * ========================= */
-app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
+app.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true, ts: Date.now() })
+);
 app.get("/api/health", (_req, res) =>
   res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
 );
@@ -284,6 +289,7 @@ if (authRequired && isAdmin) {
         OPENAI_API_KEY: !!env.OPENAI_API_KEY,
         OPENAI_MODEL: env.OPENAI_MODEL || null,
       },
+      // ✅ Ads disabled intentionally; we keep the info visible for legacy env
       meta: {
         META_AD_ACCOUNT_ID: !!env.META_AD_ACCOUNT_ID,
         META_AD_ACCESS_TOKEN: !!env.META_AD_ACCESS_TOKEN,
@@ -298,14 +304,21 @@ if (authRequired && isAdmin) {
 }
 
 /* =========================
- * AI (page copy + agent)
+ * AI (SEO-only) + Content validation
  * ========================= */
 app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
 app.use("/api/snapshots", require("./src/routes/snapshots"));
 
+// ✅ NEW: Admin validates/publishes AI content drafts
+if (adminContentAiRoutes) {
+  app.use("/api/admin", adminContentAiRoutes);
+}
+
 /* ✅ Cron auto-copy contrôlé par env */
-const RUN_CRON = String(process.env.RUN_CRON || "").trim() || (env.NODE_ENV === "production" ? "1" : "0");
+const RUN_CRON =
+  String(process.env.RUN_CRON || "").trim() ||
+  (env.NODE_ENV === "production" ? "1" : "0");
 if (RUN_CRON === "1") {
   try {
     const { startAutoCopyCron } = require("./src/ai/autoCopyJob");
@@ -317,21 +330,26 @@ if (RUN_CRON === "1") {
 }
 
 /* =========================
- * AI ADS ROUTES
- * ========================= */
-app.use("/api/ads", googleAiAdsRoutes);
-if (metaAiAdsRoutes) app.use("/api/ads", metaAiAdsRoutes);
-app.use("/api/ads", metaCampaignRoutes);
-app.use("/api/ads", googleCampaignRoutes);
+ * ✅ AI ADS ROUTES DISABLED
+ * =========================
+ * Tu as demandé: plus de pubs.
+ * On garde /api/ads désactivé volontairement.
+ */
+app.use("/api/ads", (_req, res) => {
+  return res.status(410).json({ error: "ads_ai_disabled" });
+});
 
 /* =========================
  * 404 + Error handler
  * ========================= */
 app.use(notFound);
 app.use((err, req, res, next) => {
-  // Ajoute request-id dans les logs d'erreur
   if (err) {
-    console.error("[error]", { id: req?.id, msg: err?.message, stack: err?.stack });
+    console.error("[error]", {
+      id: req?.id,
+      msg: err?.message,
+      stack: err?.stack,
+    });
   }
   return errorHandler(err, req, res, next);
 });
@@ -355,7 +373,9 @@ try {
 }
 
 /* ✅ Worker notifications contrôlé par env */
-const RUN_WORKER = String(process.env.RUN_WORKER || "").trim() || (env.NODE_ENV === "production" ? "1" : "0");
+const RUN_WORKER =
+  String(process.env.RUN_WORKER || "").trim() ||
+  (env.NODE_ENV === "production" ? "1" : "0");
 if (RUN_WORKER === "1" && io) {
   try {
     const { startNotificationWorker } = require("./src/workers/notificationWorker");
@@ -384,5 +404,9 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+process.on("unhandledRejection", (err) =>
+  console.error("[unhandledRejection]", err)
+);
+process.on("uncaughtException", (err) =>
+  console.error("[uncaughtException]", err)
+);
