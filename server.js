@@ -368,6 +368,23 @@ let io = null;
 try {
   const { attachSocket } = require("./src/ws");
   io = attachSocket(server);
+  let io = null;
+try {
+  const { attachSocket } = require("./src/ws");
+  io = attachSocket(server);
+
+  // ✅ injecte io dans notify.js
+  try {
+    const { setIO } = require("./src/services/notify");
+    setIO(io);
+    console.log("[notify] io injected");
+  } catch (e) {
+    console.warn("[notify] setIO inject failed:", e?.message || e);
+  }
+} catch (e) {
+  console.warn("[ws] socket attach skipped:", e?.message || e);
+}
+
 } catch (e) {
   console.warn("[ws] socket attach skipped:", e?.message || e);
 }
