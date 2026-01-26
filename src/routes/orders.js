@@ -111,6 +111,14 @@ function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   return +(+totalClientLine * rate).toFixed(2);
 }
 
+/** ✅ NEW: cast commission_duumini (DECIMAL->string) to Number for JSON */
+function normCommission(x) {
+  if (x === null || x === undefined || x === "") return null;
+  const n = Number(x);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return +n.toFixed(2);
+}
+
 function stripCommissionFromOrderRow(row, user) {
   if (!row) return row;
   if (isAdmin(user) || isVendor(user)) return row;
@@ -744,8 +752,11 @@ router.get("/", authRequired, async (req, res) => {
 
         const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
+        const commissionDuumini = normCommission(r.commission_duumini);
+
         return {
           ...r,
+          commission_duumini: commissionDuumini,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
@@ -756,6 +767,7 @@ router.get("/", authRequired, async (req, res) => {
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
+            duumini_amount: commissionDuumini,
           },
         };
       });
@@ -825,8 +837,11 @@ router.get("/", authRequired, async (req, res) => {
 
         const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
+        const commissionDuumini = normCommission(r.commission_duumini);
+
         return {
           ...r,
+          commission_duumini: commissionDuumini,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
@@ -837,6 +852,7 @@ router.get("/", authRequired, async (req, res) => {
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
+            duumini_amount: commissionDuumini,
           },
         };
       });
@@ -923,8 +939,11 @@ router.get("/", authRequired, async (req, res) => {
 
         const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
+        const commissionDuumini = normCommission(r.commission_duumini);
+
         return {
           ...r,
+          commission_duumini: commissionDuumini,
           display_code: buildDisplayCode(r.id),
           address,
           contact,
@@ -935,6 +954,7 @@ router.get("/", authRequired, async (req, res) => {
             delivery_fee: deliveryFee,
             amount: totalAmount,
             currency,
+            duumini_amount: commissionDuumini,
           },
         };
       });
@@ -1006,8 +1026,11 @@ router.get("/", authRequired, async (req, res) => {
 
       const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
 
+      const commissionDuumini = normCommission(r.commission_duumini);
+
       return {
         ...r,
+        commission_duumini: commissionDuumini,
         display_code: buildDisplayCode(r.id),
         address,
         contact,
@@ -1018,6 +1041,7 @@ router.get("/", authRequired, async (req, res) => {
           delivery_fee: deliveryFee,
           amount: totalAmount,
           currency,
+          duumini_amount: commissionDuumini,
         },
       };
     });
@@ -1206,9 +1230,6 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         return res.status(404).json({ error: "Not found" });
       }
 
-      // ✅ CHANGEMENT: on AUTORISE la mise à jour paiement même si DONE/CANCELLED (ADMIN)
-      // (si tu veux re-bloquer seulement CANCELLED, dis-moi)
-
       const total = Number(o.total || 0);
       const currency = (o.currency || "MAD").toUpperCase();
 
@@ -1277,7 +1298,6 @@ router.put("/:id/payment", authRequired, async (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 });
-
 
 /* =========================
  * Create order (auth)
@@ -1368,7 +1388,10 @@ router.post("/", authRequired, async (req, res) => {
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
+      if (
+        promoCols &&
+        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
+      ) {
         const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
         const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
@@ -1566,7 +1589,10 @@ router.post("/guest", async (req, res) => {
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
+      if (
+        promoCols &&
+        (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)
+      ) {
         const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
         const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
@@ -1701,14 +1727,23 @@ router.get("/:id", authRequired, async (req, res) => {
     const payCols = await getOrdersPayColsCached(getPool());
     const paymentNorm = normalizePaymentForRow(o, totalAmount, currency, payCols);
 
+    const commissionDuumini = normCommission(o.commission_duumini);
+
     res.json({
       ...o,
+      commission_duumini: commissionDuumini,
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
       ...paymentNorm,
       items: result.items,
-      totals: { items_amount: itemsAmount, delivery_fee: deliveryFee, amount: totalAmount, currency },
+      totals: {
+        items_amount: itemsAmount,
+        delivery_fee: deliveryFee,
+        amount: totalAmount,
+        currency,
+        duumini_amount: commissionDuumini,
+      },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) {
