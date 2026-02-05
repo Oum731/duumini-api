@@ -1,12 +1,7 @@
 // src/routes/orders.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-const {
-  authRequired,
-  requireRole,
-  isAdmin,
-  isVendor,
-} = require("../middlewares/auth");
+const { authRequired, requireRole, isAdmin, isVendor } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { sendWhatsAppOrderConfirmation } = require("../services/twilio");
 const { env } = require("../lib/env");
@@ -54,8 +49,7 @@ function buildAddressObj(input = {}) {
 }
 
 function buildGeoLink(gps) {
-  if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number")
-    return null;
+  if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number") return null;
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
 }
 
@@ -112,9 +106,7 @@ function buildDisplayCode(id) {
 
 function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
-  const sub = String(subSlug || "")
-    .trim()
-    .toLowerCase();
+  const sub = String(subSlug || "").trim().toLowerCase();
   const rate = sub === "food" ? 0.18 : 0.11;
   return +(+totalClientLine * rate).toFixed(2);
 }
@@ -135,9 +127,7 @@ function stripCommissionFromOrderRow(row, user) {
 }
 
 async function getOrderWithPerm(conn, id, user) {
-  const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [
-    id,
-  ]);
+  const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
   if (!orderRaw) return { status: 404, error: "Not found" };
 
   if (!isAdmin(user)) {
@@ -155,8 +145,7 @@ async function getOrderWithPerm(conn, id, user) {
       );
       if (!own) return { status: 403, error: "Forbidden" };
     } else {
-      if (String(orderRaw.user_id) !== String(user.id))
-        return { status: 403, error: "Forbidden" };
+      if (String(orderRaw.user_id) !== String(user.id)) return { status: 403, error: "Forbidden" };
     }
   }
 
@@ -217,10 +206,7 @@ async function getVendorsForOrder(orderId) {
 }
 
 async function enqueueOrderCreatedNotifications(orderId, total, currency) {
-  const [adminIds, vendorIds] = await Promise.all([
-    getAdminUserIds(),
-    getVendorsForOrder(orderId),
-  ]);
+  const [adminIds, vendorIds] = await Promise.all([getAdminUserIds(), getVendorsForOrder(orderId)]);
   const allUserIds = Array.from(new Set([...adminIds, ...vendorIds]));
   if (!allUserIds.length) return;
 
@@ -238,12 +224,7 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   };
 
   const payload = JSON.stringify(payloadObj);
-  const values = allUserIds.map((uid) => [
-    uid,
-    "ORDER_CREATED",
-    payload,
-    "queued",
-  ]);
+  const values = allUserIds.map((uid) => [uid, "ORDER_CREATED", payload, "queued"]);
 
   await getPool().query(
     `
@@ -301,12 +282,9 @@ async function sendAdminWhatsAppForOrder({
   contactObj,
   items,
 }) {
-  const hasFrom = !!(
-    env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM
-  );
+  const hasFrom = !!(env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM);
   if (!hasFrom) return;
-  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:"))
-    return;
+  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) return;
 
   let details = "";
   try {
@@ -345,10 +323,7 @@ async function sendAdminWhatsAppForOrder({
         .map((it) => {
           const label = it?.name || `Produit #${it?.product_id || ""}`.trim();
           const qty = it?.qty || 1;
-          const price =
-            it?.price != null
-              ? `${it.price} ${(currency || "MAD").toUpperCase()}`
-              : "";
+          const price = it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
           return `• ${label} ×${qty}${price ? ` — ${price}` : ""}`;
         })
         .join("\n");
@@ -371,9 +346,7 @@ async function sendAdminWhatsAppForOrder({
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
   } catch {}
 
-  const fullName =
-    `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() ||
-    "Client Duumini";
+  const fullName = `${contactObj?.first_name || ""} ${contactObj?.last_name || ""}`.trim() || "Client Duumini";
 
   try {
     await sendWhatsAppOrderConfirmation({
@@ -411,9 +384,7 @@ function parseVariantId(x) {
  * PROMO helpers
  * =======================*/
 function normalizePromoType(value) {
-  const t = String(value || "")
-    .trim()
-    .toUpperCase();
+  const t = String(value || "").trim().toUpperCase();
   if (t === "AMOUNT") return "AMOUNT";
   if (t === "PERCENT") return "PERCENT";
   return "PERCENT";
@@ -443,13 +414,7 @@ function computePromoPrice(basePrice, promoEligible, type, value) {
 function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   const base = Number(baseUnitPrice || 0);
   if (!Number.isFinite(base) || base < 0) {
-    return {
-      base_unit_price: 0,
-      unit_price: 0,
-      promo_applied: 0,
-      promo_type: null,
-      promo_value: null,
-    };
+    return { base_unit_price: 0, unit_price: 0, promo_applied: 0, promo_type: null, promo_value: null };
   }
 
   const eligible = Number(p?.promo_eligible || 0) === 1;
@@ -459,34 +424,15 @@ function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   const promoType = normalizePromoType(p?.promo_discount_type || "PERCENT");
 
   if (!eligible || !hasValue) {
-    return {
-      base_unit_price: +base.toFixed(2),
-      unit_price: +base.toFixed(2),
-      promo_applied: 0,
-      promo_type: null,
-      promo_value: null,
-    };
+    return { base_unit_price: +base.toFixed(2), unit_price: +base.toFixed(2), promo_applied: 0, promo_type: null, promo_value: null };
   }
 
   const promoPrice = computePromoPrice(base, true, promoType, promoValue);
-
   if (promoPrice == null) {
-    return {
-      base_unit_price: +base.toFixed(2),
-      unit_price: +base.toFixed(2),
-      promo_applied: 0,
-      promo_type: null,
-      promo_value: null,
-    };
+    return { base_unit_price: +base.toFixed(2), unit_price: +base.toFixed(2), promo_applied: 0, promo_type: null, promo_value: null };
   }
 
-  return {
-    base_unit_price: +base.toFixed(2),
-    unit_price: promoPrice,
-    promo_applied: 1,
-    promo_type: promoType,
-    promo_value: promoValue,
-  };
+  return { base_unit_price: +base.toFixed(2), unit_price: promoPrice, promo_applied: 1, promo_type: promoType, promo_value: promoValue };
 }
 
 /* =========================
@@ -496,12 +442,7 @@ let _orderItemsPromoCols = null;
 let _orderItemsPromoColsLoaded = false;
 
 async function detectOrderItemsPromoCols(conn) {
-  const candidates = [
-    "promo_applied",
-    "promo_type",
-    "promo_value",
-    "base_unit_price",
-  ];
+  const candidates = ["promo_applied", "promo_type", "promo_value", "base_unit_price"];
   const [rows] = await conn.query(
     `SELECT COLUMN_NAME
        FROM INFORMATION_SCHEMA.COLUMNS
@@ -538,12 +479,7 @@ let _ordersPayCols = null;
 let _ordersPayColsLoaded = false;
 
 async function detectOrdersPayCols(conn) {
-  const candidates = [
-    "payment",
-    "payment_status",
-    "paid_amount",
-    "remaining_amount",
-  ];
+  const candidates = ["payment", "payment_status", "paid_amount", "remaining_amount"];
   const [rows] = await conn.query(
     `SELECT COLUMN_NAME
        FROM INFORMATION_SCHEMA.COLUMNS
@@ -583,29 +519,38 @@ function normMoney(x) {
   return +n.toFixed(2);
 }
 
+/** ✅ UPDATED: accepte PENDING */
 function normPayStatus(s) {
-  const v = String(s || "")
-    .trim()
-    .toUpperCase();
-  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL") return v;
+  const v = String(s || "").trim().toUpperCase();
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") return v;
   return null;
 }
 
+/** ✅ NEW: détecte virement */
+function isBankTransferMethod(m) {
+  const v = String(m || "").trim().toUpperCase();
+  return v === "BANK_TRANSFER" || v === "BANK" || v === "TRANSFER" || v === "VIREMENT";
+}
+
+/** ✅ UPDATED: PENDING si virement et pas totalement payé */
 function buildPaymentFromPayload(payment, orderTotal, currency) {
   const cur = String(currency || "MAD").toUpperCase();
   const p = payment && typeof payment === "object" ? payment : {};
   const askedStatus = normPayStatus(p.status);
   const total = normMoney(orderTotal);
 
-  const paid = Math.min(
-    normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0),
-    total,
-  );
+  const method = String(p.method || "CASH").toUpperCase();
+  const isBank = isBankTransferMethod(method);
+
+  const paid = Math.min(normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0), total);
   const remaining = Math.max(0, total - paid);
 
   let status = askedStatus || "UNPAID";
-  if (paid <= 0) status = "UNPAID";
-  else if (paid >= total) status = "PAID";
+
+  if (paid >= total && total > 0) status = "PAID";
+  else if (total <= 0) status = "PAID";
+  else if (isBank) status = "PENDING";
+  else if (paid <= 0) status = "UNPAID";
   else status = "PARTIAL";
 
   return {
@@ -613,7 +558,7 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
     paid_amount: paid,
     remaining_amount: remaining,
     currency: cur,
-    method: String(p.method || "CASH").toUpperCase(),
+    method,
     note: p.note ? String(p.note).slice(0, 500) : null,
   };
 }
@@ -625,27 +570,28 @@ function normalizePaymentForRow(row, orderTotal, currency, payCols) {
 
   const paymentParsed = safeParseJSON(row?.payment) || null;
 
-  const colStatus = payCols?.payment_status
-    ? normPayStatus(row?.payment_status)
-    : null;
+  const colStatus = payCols?.payment_status ? normPayStatus(row?.payment_status) : null;
   const colPaid = payCols?.paid_amount ? normMoney(row?.paid_amount) : null;
-  const colRemain = payCols?.remaining_amount
-    ? normMoney(row?.remaining_amount)
-    : null;
+  const colRemain = payCols?.remaining_amount ? normMoney(row?.remaining_amount) : null;
 
-  const jsonPaid = paymentParsed
-    ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0)
-    : 0;
+  const jsonPaid = paymentParsed ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0) : 0;
   const paid = colPaid != null ? colPaid : jsonPaid;
 
-  const remaining =
-    colRemain != null ? colRemain : Math.max(0, total - Math.min(paid, total));
+  const remaining = colRemain != null ? colRemain : Math.max(0, total - Math.min(paid, total));
 
   let status = colStatus;
   if (!status) {
     if (paid <= 0) status = "UNPAID";
-    else if (paid >= total) status = "PAID";
+    else if (paid >= total || total <= 0) status = "PAID";
     else status = "PARTIAL";
+  }
+
+  const parsedMethod = paymentParsed?.method ?? null;
+  const isBank = isBankTransferMethod(parsedMethod);
+
+  // ✅ virement et pas payé => PENDING
+  if (isBank && status !== "PAID" && total > 0) {
+    status = "PENDING";
   }
 
   const paymentObj = paymentParsed
@@ -715,10 +661,7 @@ async function lockVariantForItem(conn, productId, variantId) {
 }
 
 /* =========================
- * ✅ NEW: Multi-status filter (compat: status=OPEN, new: statuses=OPEN,PREPARATION)
- *  - /api/orders?statuses=OPEN,PREPARATION
- *  - /api/orders?status[]=OPEN&status[]=PREPARATION
- *  - legacy: /api/orders?status=OPEN|ALL
+ * ✅ Multi-status filter
  * =======================*/
 const ORDER_STATUSES = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
 
@@ -735,9 +678,7 @@ function parseStatusesQuery(req) {
       .map((s) => String(s).trim().toUpperCase())
       .filter(Boolean);
   } else if (Array.isArray(rawArray)) {
-    list = rawArray
-      .map((s) => String(s).trim().toUpperCase())
-      .filter(Boolean);
+    list = rawArray.map((s) => String(s).trim().toUpperCase()).filter(Boolean);
   } else if (rawArray != null) {
     list = String(rawArray)
       .split(",")
@@ -749,27 +690,17 @@ function parseStatusesQuery(req) {
   }
 
   list = Array.from(new Set(list)).filter((s) => ORDER_STATUSES.includes(s));
-  return list; // [] => pas de filtre
+  return list;
 }
 
 function buildStatusWhere(statuses) {
-  if (!Array.isArray(statuses) || statuses.length === 0) {
-    return { sql: "", params: [] };
-  }
-  if (statuses.length === 1) {
-    return { sql: " AND o.status = ?", params: [statuses[0]] };
-  }
-  return {
-    sql: ` AND o.status IN (${statuses.map(() => "?").join(",")})`,
-    params: [...statuses],
-  };
+  if (!Array.isArray(statuses) || statuses.length === 0) return { sql: "", params: [] };
+  if (statuses.length === 1) return { sql: " AND o.status = ?", params: [statuses[0]] };
+  return { sql: ` AND o.status IN (${statuses.map(() => "?").join(",")})`, params: [...statuses] };
 }
 
 /* =========================
  * LIST (filtre payment_status + multi status)
- *  - /api/orders?payment_status=PAID|UNPAID|PARTIAL
- *  - alias: pay=PAID
- *  - /api/orders?statuses=OPEN,PREPARATION (NEW)
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -784,6 +715,7 @@ router.get("/", authRequired, async (req, res) => {
     req.query.pay ??
     req.query.payStatus ??
     null;
+
   const payFilter = normPayStatus(payFilterRaw);
 
   try {
@@ -796,6 +728,43 @@ router.get("/", authRequired, async (req, res) => {
           "Le filtre payment_status est demandé mais la colonne orders.payment_status n'existe pas encore. Ajoute la migration puis réessaie.",
       });
     }
+
+    const mapRowToItem = (r, user, payCols) => {
+      const address = safeParseJSON(r.address);
+      const contactFromOrder = safeParseJSON(r.contact);
+      const contact =
+        contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
+          ? contactFromOrder
+          : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
+
+      const geo_link = r.geo_link || buildGeoLink(address?.gps);
+
+      const itemsAmount = Number(r.items_amount || 0);
+      const totalAmount = Number(r.total || itemsAmount);
+      const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+      const currency = (r.currency || "MAD").toUpperCase();
+
+      const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
+
+      const commissionDuumini = isCancelledStatus(r.status) ? null : normCommission(r.commission_duumini);
+
+      return {
+        ...r,
+        commission_duumini: commissionDuumini,
+        display_code: buildDisplayCode(r.id),
+        address,
+        contact,
+        geo_link,
+        ...paymentNorm,
+        totals: {
+          items_amount: itemsAmount,
+          delivery_fee: deliveryFee,
+          amount: totalAmount,
+          currency,
+          duumini_amount: commissionDuumini,
+        },
+      };
+    };
 
     if (mine) {
       const params = [req.user.id];
@@ -810,10 +779,7 @@ router.get("/", authRequired, async (req, res) => {
         params.push(payFilter);
       }
 
-      const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
-      );
+      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
       const [rowsRaw] = await pool.query(
         `
@@ -845,62 +811,8 @@ router.get("/", authRequired, async (req, res) => {
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
-
-      const items = rows.map((r) => {
-        const address = safeParseJSON(r.address);
-        const contactFromOrder = safeParseJSON(r.contact);
-        const contact =
-          contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
-            ? contactFromOrder
-            : buildContactFromUser({
-                first_name: r.u_first,
-                last_name: r.u_last,
-                phone: r.u_phone,
-              });
-
-        const geo_link = r.geo_link || buildGeoLink(address?.gps);
-
-        const itemsAmount = Number(r.items_amount || 0);
-        const totalAmount = Number(r.total || itemsAmount);
-        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
-        const currency = (r.currency || "MAD").toUpperCase();
-
-        const paymentNorm = normalizePaymentForRow(
-          r,
-          totalAmount,
-          currency,
-          payCols,
-        );
-
-        const commissionDuumini = isCancelledStatus(r.status)
-          ? null
-          : normCommission(r.commission_duumini);
-
-        return {
-          ...r,
-          commission_duumini: commissionDuumini,
-          display_code: buildDisplayCode(r.id),
-          address,
-          contact,
-          geo_link,
-          ...paymentNorm,
-          totals: {
-            items_amount: itemsAmount,
-            delivery_fee: deliveryFee,
-            amount: totalAmount,
-            currency,
-            duumini_amount: commissionDuumini,
-          },
-        };
-      });
-
-      return res.json({
-        items,
-        pageInfo: buildPageInfo(total, page, pageSize),
-      });
+      const items = rows.map((r) => mapRowToItem(r, req.user, payCols));
+      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
     if (isAdmin(req.user)) {
@@ -916,10 +828,7 @@ router.get("/", authRequired, async (req, res) => {
         params.push(payFilter);
       }
 
-      const [[{ total }]] = await pool.query(
-        `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
-      );
+      const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
       const [rowsRaw] = await pool.query(
         `
@@ -950,59 +859,8 @@ router.get("/", authRequired, async (req, res) => {
         [...params, limit, offset],
       );
 
-      const items = rowsRaw.map((r) => {
-        const address = safeParseJSON(r.address);
-        const contactFromOrder = safeParseJSON(r.contact);
-        const contact =
-          contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
-            ? contactFromOrder
-            : buildContactFromUser({
-                first_name: r.u_first,
-                last_name: r.u_last,
-                phone: r.u_phone,
-              });
-
-        const geo_link = r.geo_link || buildGeoLink(address?.gps);
-
-        const itemsAmount = Number(r.items_amount || 0);
-        const totalAmount = Number(r.total || itemsAmount);
-        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
-        const currency = (r.currency || "MAD").toUpperCase();
-
-        const paymentNorm = normalizePaymentForRow(
-          r,
-          totalAmount,
-          currency,
-          payCols,
-        );
-
-        const commissionDuumini = normCommission(r.commission_duumini);
-
-        return {
-          ...r,
-          commission_duumini: commissionDuumini,
-          display_code: buildDisplayCode(r.id),
-          address,
-          contact,
-          geo_link,
-          ...paymentNorm,
-          totals: {
-            items_amount: itemsAmount,
-            delivery_fee: deliveryFee,
-            amount: totalAmount,
-            currency,
-            duumini_amount: commissionDuumini,
-          },
-        };
-      });
-
-      return res.json({
-        items,
-        pageInfo: buildPageInfo(total, page, pageSize),
-      });
+      const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
+      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
     if (isVendor(req.user)) {
@@ -1066,59 +924,8 @@ router.get("/", authRequired, async (req, res) => {
         [...params, limit, offset],
       );
 
-      const items = rowsRaw.map((r) => {
-        const address = safeParseJSON(r.address);
-        const contactFromOrder = safeParseJSON(r.contact);
-        const contact =
-          contactFromOrder &&
-          (contactFromOrder.first_name ||
-            contactFromOrder.last_name ||
-            contactFromOrder.phone)
-            ? contactFromOrder
-            : buildContactFromUser({
-                first_name: r.u_first,
-                last_name: r.u_last,
-                phone: r.u_phone,
-              });
-
-        const geo_link = r.geo_link || buildGeoLink(address?.gps);
-
-        const itemsAmount = Number(r.items_amount || 0);
-        const totalAmount = Number(r.total || itemsAmount);
-        const deliveryFee = Math.max(0, totalAmount - itemsAmount);
-        const currency = (r.currency || "MAD").toUpperCase();
-
-        const paymentNorm = normalizePaymentForRow(
-          r,
-          totalAmount,
-          currency,
-          payCols,
-        );
-
-        const commissionDuumini = normCommission(r.commission_duumini);
-
-        return {
-          ...r,
-          commission_duumini: commissionDuumini,
-          display_code: buildDisplayCode(r.id),
-          address,
-          contact,
-          geo_link,
-          ...paymentNorm,
-          totals: {
-            items_amount: itemsAmount,
-            delivery_fee: deliveryFee,
-            amount: totalAmount,
-            currency,
-            duumini_amount: commissionDuumini,
-          },
-        };
-      });
-
-      return res.json({
-        items,
-        pageInfo: buildPageInfo(total, page, pageSize),
-      });
+      const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
+      return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
     // fallback: client normal
@@ -1134,10 +941,7 @@ router.get("/", authRequired, async (req, res) => {
       params.push(payFilter);
     }
 
-    const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-      params,
-    );
+    const [[{ total }]] = await pool.query(`SELECT COUNT(*) total FROM orders o WHERE ${where}`, params);
 
     const [rowsRaw] = await pool.query(
       `
@@ -1169,56 +973,7 @@ router.get("/", authRequired, async (req, res) => {
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
-
-    const items = rows.map((r) => {
-      const address = safeParseJSON(r.address);
-      const contactFromOrder = safeParseJSON(r.contact);
-      const contact =
-        contactFromOrder &&
-        (contactFromOrder.first_name ||
-          contactFromOrder.last_name ||
-          contactFromOrder.phone)
-          ? contactFromOrder
-          : buildContactFromUser({
-              first_name: r.u_first,
-              last_name: r.u_last,
-              phone: r.u_phone,
-            });
-
-      const geo_link = r.geo_link || buildGeoLink(address?.gps);
-
-      const itemsAmount = Number(r.items_amount || 0);
-      const totalAmount = Number(r.total || itemsAmount);
-      const deliveryFee = Math.max(0, totalAmount - itemsAmount);
-      const currency = (r.currency || "MAD").toUpperCase();
-
-      const paymentNorm = normalizePaymentForRow(
-        r,
-        totalAmount,
-        currency,
-        payCols,
-      );
-
-      const commissionDuumini = normCommission(r.commission_duumini);
-
-      return {
-        ...r,
-        commission_duumini: commissionDuumini,
-        display_code: buildDisplayCode(r.id),
-        address,
-        contact,
-        geo_link,
-        ...paymentNorm,
-        totals: {
-          items_amount: itemsAmount,
-          delivery_fee: deliveryFee,
-          amount: totalAmount,
-          currency,
-          duumini_amount: commissionDuumini,
-        },
-      };
-    });
-
+    const items = rows.map((r) => mapRowToItem(r, req.user, payCols));
     return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1242,10 +997,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     if (!product_id || !qty) {
       const err = new Error("product_id & qty required");
       err.statusCode = 400;
-      err.payload = {
-        code: "INVALID_ITEM",
-        message: "Un ou plusieurs produits sont invalides dans votre panier.",
-      };
+      err.payload = { code: "INVALID_ITEM", message: "Un ou plusieurs produits sont invalides dans votre panier." };
       throw err;
     }
 
@@ -1253,18 +1005,11 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     if (!p) {
       const err = new Error("Product not found: " + product_id);
       err.statusCode = 400;
-      err.payload = {
-        code: "PRODUCT_NOT_FOUND",
-        message: "Un produit de votre panier n'est plus disponible.",
-        product_id,
-      };
+      err.payload = { code: "PRODUCT_NOT_FOUND", message: "Un produit de votre panier n'est plus disponible.", product_id };
       throw err;
     }
 
-    const isFood =
-      String(p.sub_category_slug || "")
-        .trim()
-        .toLowerCase() === "food";
+    const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
     if (isFood) {
       const shopId = p.shop_id != null ? Number(p.shop_id) : null;
       if (shopId != null) {
@@ -1292,41 +1037,21 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       if (!v || Number(v.is_active || 0) !== 1) {
         const err = new Error("VARIANT_NOT_FOUND");
         err.statusCode = 400;
-        err.payload = {
-          code: "VARIANT_NOT_FOUND",
-          message: "Une variante choisie n'est plus disponible.",
-          product_id,
-          variant_id,
-        };
+        err.payload = { code: "VARIANT_NOT_FOUND", message: "Une variante choisie n'est plus disponible.", product_id, variant_id };
         throw err;
       }
 
-      base_unit_price =
-        v.price_override != null && v.price_override !== ""
-          ? Number(v.price_override)
-          : Number(p.price || 0);
+      base_unit_price = v.price_override != null && v.price_override !== "" ? Number(v.price_override) : Number(p.price || 0);
 
       stockSource = "VARIANT";
       current_stock = v.stock;
-      variant_meta = {
-        variant_id: v.id,
-        size: v.size || null,
-        color: v.color || null,
-        sku: v.sku || null,
-      };
+      variant_meta = { variant_id: v.id, size: v.size || null, color: v.color || null, sku: v.sku || null };
     }
 
-    const promoPack = calcLineUnitPriceWithPromo({
-      baseUnitPrice: base_unit_price,
-      p,
-    });
+    const promoPack = calcLineUnitPriceWithPromo({ baseUnitPrice: base_unit_price, p });
     const unit_price = promoPack.unit_price;
 
-    const lineCommission = computeCommissionForLine(
-      unit_price,
-      qty,
-      p.sub_category_slug,
-    );
+    const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
 
     cleanItems.push({
       product_id: p.id,
@@ -1355,24 +1080,16 @@ async function buildCleanItemsWithPromo({ conn, items }) {
  * =======================*/
 router.put("/:id/payment", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
-    return res.status(400).json({ error: "invalid id" });
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
 
-  if (!isAdmin(req.user)) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
+  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const pool = getPool();
 
   try {
     const payCols = await getOrdersPayColsCached(pool);
 
-    const hasAny =
-      payCols?.payment ||
-      payCols?.payment_status ||
-      payCols?.paid_amount ||
-      payCols?.remaining_amount;
-
+    const hasAny = payCols?.payment || payCols?.payment_status || payCols?.paid_amount || payCols?.remaining_amount;
     if (!hasAny) {
       return res.status(409).json({
         code: "PAYMENT_COLUMNS_MISSING",
@@ -1381,29 +1098,21 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       });
     }
 
-    const mode = String(req.body?.mode || "ADD")
-      .trim()
-      .toUpperCase(); // default ADD
-    if (mode !== "SET" && mode !== "ADD")
-      return res.status(400).json({ error: "invalid mode (SET|ADD)" });
+    const mode = String(req.body?.mode || "ADD").trim().toUpperCase();
+    if (mode !== "SET" && mode !== "ADD") return res.status(400).json({ error: "invalid mode (SET|ADD)" });
 
     const add_amount = req.body?.add_amount ?? req.body?.addAmount ?? null;
-    const paid_amount =
-      req.body?.paid_amount ?? req.body?.paidAmount ?? req.body?.amount ?? null;
+    const paid_amount = req.body?.paid_amount ?? req.body?.paidAmount ?? req.body?.amount ?? null;
 
-    const method = req.body?.method
-      ? String(req.body.method).toUpperCase()
-      : null;
+    const method = req.body?.method ? String(req.body.method).toUpperCase() : null;
     const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
 
     if (mode === "ADD") {
       const v = Number(add_amount);
-      if (!Number.isFinite(v) || v <= 0)
-        return res.status(400).json({ error: "add_amount required" });
+      if (!Number.isFinite(v) || v <= 0) return res.status(400).json({ error: "add_amount required" });
     } else {
       const v = Number(paid_amount);
-      if (!Number.isFinite(v) || v < 0)
-        return res.status(400).json({ error: "paid_amount required" });
+      if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: "paid_amount required" });
     }
 
     const conn = await pool.getConnection();
@@ -1438,8 +1147,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       else nextPaid = Number(paid_amount || 0);
 
       if (!Number.isFinite(nextPaid) || nextPaid < 0) nextPaid = 0;
-      if (Number.isFinite(total) && total >= 0)
-        nextPaid = Math.min(nextPaid, total);
+      if (Number.isFinite(total) && total >= 0) nextPaid = Math.min(nextPaid, total);
 
       const merged = {
         ...currentPayment,
@@ -1448,6 +1156,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         paid_amount: nextPaid,
       };
 
+      // ✅ ici, buildPaymentFromPayload gère PENDING si method=BANK_TRANSFER et pas payé
       const paymentObj = buildPaymentFromPayload(merged, total, currency);
 
       const sets = [];
@@ -1472,10 +1181,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
       sets.push("updated_at = NOW()");
 
-      await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [
-        ...vals,
-        id,
-      ]);
+      await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
 
       await conn.commit();
 
@@ -1487,9 +1193,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         payment: paymentObj,
       });
     } catch (e) {
-      try {
-        await conn.rollback();
-      } catch {}
+      try { await conn.rollback(); } catch {}
       return res.status(500).json({ error: e.message });
     } finally {
       conn.release();
@@ -1503,17 +1207,8 @@ router.put("/:id/payment", authRequired, async (req, res) => {
  * Create order (auth)
  * =======================*/
 router.post("/", authRequired, async (req, res) => {
-  const {
-    contact = null,
-    address = {},
-    delivery = {},
-    items = [],
-    totals = {},
-    payment = null,
-  } = req.body || {};
-
-  if (!Array.isArray(items) || items.length === 0)
-    return res.status(400).json({ error: "items[] required" });
+  const { contact = null, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -1525,65 +1220,23 @@ router.post("/", authRequired, async (req, res) => {
     const geoLink = buildGeoLink(addressObj.gps);
 
     let contactObj = contact ? buildContactFromPayload(contact) : null;
-    if (
-      !contactObj ||
-      (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)
-    ) {
+    if (!contactObj || (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)) {
       contactObj = buildContactFromUser(req.user);
     }
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
-    const { cleanItems, itemsAmount, totalCommission } =
-      await buildCleanItemsWithPromo({
-        conn,
-        items,
-      });
+    const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({ conn, items });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (
-      delivery?.currency ||
-      totals?.currency ||
-      "MAD"
-    ).toUpperCase();
+    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    const cols = [
-      "user_id",
-      "status",
-      "address",
-      "contact",
-      "geo_link",
-      "total",
-      "commission_duumini",
-      "currency",
-      "created_at",
-      "updated_at",
-    ];
-    const placeholders = [
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "NOW()",
-      "NOW()",
-    ];
-    const vals = [
-      req.user.id,
-      "OPEN",
-      JSON.stringify(addressObj),
-      JSON.stringify(contactObj),
-      geoLink,
-      orderTotal,
-      +totalCommission.toFixed(2),
-      currency,
-    ];
+    const cols = ["user_id", "status", "address", "contact", "geo_link", "total", "commission_duumini", "currency", "created_at", "updated_at"];
+    const placeholders = ["?", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
+    const vals = [req.user.id, "OPEN", JSON.stringify(addressObj), JSON.stringify(contactObj), geoLink, orderTotal, +totalCommission.toFixed(2), currency];
 
     if (payCols?.payment) {
       cols.push("payment");
@@ -1606,58 +1259,21 @@ router.post("/", authRequired, async (req, res) => {
       vals.push(paymentObj.remaining_amount);
     }
 
-    const [r] = await conn.query(
-      `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
-    );
-
+    const [r] = await conn.query(`INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`, vals);
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (
-        promoCols &&
-        (promoCols.promo_applied ||
-          promoCols.promo_type ||
-          promoCols.promo_value ||
-          promoCols.base_unit_price)
-      ) {
-        const cols2 = [
-          "order_id",
-          "product_id",
-          "variant_id",
-          "qty",
-          "unit_price",
-        ];
-        const vals2 = [
-          orderId,
-          it.product_id,
-          it.variant_id,
-          it.qty,
-          it.unit_price,
-        ];
+      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
+        const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
-        if (promoCols.base_unit_price) {
-          cols2.push("base_unit_price");
-          vals2.push(it.base_unit_price);
-        }
-        if (promoCols.promo_applied) {
-          cols2.push("promo_applied");
-          vals2.push(it.promo_applied || 0);
-        }
-        if (promoCols.promo_type) {
-          cols2.push("promo_type");
-          vals2.push(it.promo_type || null);
-        }
-        if (promoCols.promo_value) {
-          cols2.push("promo_value");
-          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
-        }
+        if (promoCols.base_unit_price) { cols2.push("base_unit_price"); vals2.push(it.base_unit_price); }
+        if (promoCols.promo_applied) { cols2.push("promo_applied"); vals2.push(it.promo_applied || 0); }
+        if (promoCols.promo_type) { cols2.push("promo_type"); vals2.push(it.promo_type || null); }
+        if (promoCols.promo_value) { cols2.push("promo_value"); vals2.push(it.promo_value != null ? Number(it.promo_value) : null); }
 
-        await conn.query(
-          `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`,
-          vals2,
-        );
+        await conn.query(`INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`, vals2);
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
@@ -1677,8 +1293,7 @@ router.post("/", authRequired, async (req, res) => {
         err.statusCode = 400;
         err.payload = {
           code: "STOCK_INSUFFICIENT",
-          message:
-            "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
+          message: "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
           variant_id: it.variant_id || null,
           requested: Number(it.qty || 0),
@@ -1688,43 +1303,21 @@ router.post("/", authRequired, async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [
-          newStock,
-          it.variant_id,
-        ]);
+        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [newStock, it.variant_id]);
       } else {
-        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [
-          newStock,
-          it.product_id,
-        ]);
+        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
       }
     }
 
     await conn.commit();
 
-    try {
-      await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
-    } catch {}
-
+    try { await enqueueOrderCreatedNotifications(orderId, orderTotal, currency); } catch {}
     try {
       const { notifyUser } = require("../services/notify");
-      await notifyUser(req.user.id, "ORDER_CREATED", {
-        order_id: orderId,
-        display_code: displayCode,
-        total: orderTotal,
-      });
+      await notifyUser(req.user.id, "ORDER_CREATED", { order_id: orderId, display_code: displayCode, total: orderTotal });
     } catch {}
 
-    sendAdminWhatsAppForOrder({
-      pool,
-      orderId,
-      displayCode,
-      orderTotal,
-      currency,
-      addressObj,
-      contactObj,
-      items,
-    }).catch(() => {});
+    sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }).catch(() => {});
 
     res.status(201).json({
       id: orderId,
@@ -1736,12 +1329,8 @@ router.post("/", authRequired, async (req, res) => {
       payment: paymentObj || null,
     });
   } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
-
-    if (e && e.statusCode === 400 && e.payload)
-      return res.status(400).json(e.payload);
+    try { await conn.rollback(); } catch {}
+    if (e && e.statusCode === 400 && e.payload) return res.status(400).json(e.payload);
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -1752,17 +1341,8 @@ router.post("/", authRequired, async (req, res) => {
  * Create order guest
  * =======================*/
 router.post("/guest", async (req, res) => {
-  const {
-    contact = {},
-    address = {},
-    delivery = {},
-    items = [],
-    totals = {},
-    payment = null,
-  } = req.body || {};
-
-  if (!Array.isArray(items) || items.length === 0)
-    return res.status(400).json({ error: "items[] required" });
+  const { contact = {}, address = {}, delivery = {}, items = [], totals = {}, payment = null } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "items[] required" });
 
   const contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
@@ -1782,130 +1362,39 @@ router.post("/guest", async (req, res) => {
     const geoLink = buildGeoLink(addressObj.gps);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
-    const { cleanItems, itemsAmount, totalCommission } =
-      await buildCleanItemsWithPromo({
-        conn,
-        items,
-      });
+    const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({ conn, items });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (
-      delivery?.currency ||
-      totals?.currency ||
-      "MAD"
-    ).toUpperCase();
+    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
     const orderTotal = itemsAmount + deliveryFee;
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    const cols = [
-      "user_id",
-      "status",
-      "address",
-      "contact",
-      "geo_link",
-      "total",
-      "commission_duumini",
-      "currency",
-      "created_at",
-      "updated_at",
-    ];
-    const placeholders = [
-      "NULL",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "?",
-      "NOW()",
-      "NOW()",
-    ];
-    const vals = [
-      "OPEN",
-      JSON.stringify(addressObj),
-      JSON.stringify(contactObj),
-      geoLink,
-      orderTotal,
-      +totalCommission.toFixed(2),
-      currency,
-    ];
+    const cols = ["user_id", "status", "address", "contact", "geo_link", "total", "commission_duumini", "currency", "created_at", "updated_at"];
+    const placeholders = ["NULL", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
+    const vals = ["OPEN", JSON.stringify(addressObj), JSON.stringify(contactObj), geoLink, orderTotal, +totalCommission.toFixed(2), currency];
 
-    if (payCols?.payment) {
-      cols.push("payment");
-      placeholders.push("?");
-      vals.push(JSON.stringify(paymentObj));
-    }
-    if (payCols?.payment_status) {
-      cols.push("payment_status");
-      placeholders.push("?");
-      vals.push(paymentObj.status);
-    }
-    if (payCols?.paid_amount) {
-      cols.push("paid_amount");
-      placeholders.push("?");
-      vals.push(paymentObj.paid_amount);
-    }
-    if (payCols?.remaining_amount) {
-      cols.push("remaining_amount");
-      placeholders.push("?");
-      vals.push(paymentObj.remaining_amount);
-    }
+    if (payCols?.payment) { cols.push("payment"); placeholders.push("?"); vals.push(JSON.stringify(paymentObj)); }
+    if (payCols?.payment_status) { cols.push("payment_status"); placeholders.push("?"); vals.push(paymentObj.status); }
+    if (payCols?.paid_amount) { cols.push("paid_amount"); placeholders.push("?"); vals.push(paymentObj.paid_amount); }
+    if (payCols?.remaining_amount) { cols.push("remaining_amount"); placeholders.push("?"); vals.push(paymentObj.remaining_amount); }
 
-    const [r] = await conn.query(
-      `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
-    );
-
+    const [r] = await conn.query(`INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`, vals);
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
 
     for (const it of cleanItems) {
-      if (
-        promoCols &&
-        (promoCols.promo_applied ||
-          promoCols.promo_type ||
-          promoCols.promo_value ||
-          promoCols.base_unit_price)
-      ) {
-        const cols2 = [
-          "order_id",
-          "product_id",
-          "variant_id",
-          "qty",
-          "unit_price",
-        ];
-        const vals2 = [
-          orderId,
-          it.product_id,
-          it.variant_id,
-          it.qty,
-          it.unit_price,
-        ];
+      if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
+        const cols2 = ["order_id", "product_id", "variant_id", "qty", "unit_price"];
+        const vals2 = [orderId, it.product_id, it.variant_id, it.qty, it.unit_price];
 
-        if (promoCols.base_unit_price) {
-          cols2.push("base_unit_price");
-          vals2.push(it.base_unit_price);
-        }
-        if (promoCols.promo_applied) {
-          cols2.push("promo_applied");
-          vals2.push(it.promo_applied || 0);
-        }
-        if (promoCols.promo_type) {
-          cols2.push("promo_type");
-          vals2.push(it.promo_type || null);
-        }
-        if (promoCols.promo_value) {
-          cols2.push("promo_value");
-          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
-        }
+        if (promoCols.base_unit_price) { cols2.push("base_unit_price"); vals2.push(it.base_unit_price); }
+        if (promoCols.promo_applied) { cols2.push("promo_applied"); vals2.push(it.promo_applied || 0); }
+        if (promoCols.promo_type) { cols2.push("promo_type"); vals2.push(it.promo_type || null); }
+        if (promoCols.promo_value) { cols2.push("promo_value"); vals2.push(it.promo_value != null ? Number(it.promo_value) : null); }
 
-        await conn.query(
-          `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`,
-          vals2,
-        );
+        await conn.query(`INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2.map(() => "?").join(",")})`, vals2);
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
@@ -1925,8 +1414,7 @@ router.post("/guest", async (req, res) => {
         err.statusCode = 400;
         err.payload = {
           code: "STOCK_INSUFFICIENT",
-          message:
-            "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
+          message: "La quantité demandée n'est plus disponible pour un des produits de votre panier.",
           product_id: it.product_id,
           variant_id: it.variant_id || null,
           requested: Number(it.qty || 0),
@@ -1936,34 +1424,17 @@ router.post("/guest", async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [
-          newStock,
-          it.variant_id,
-        ]);
+        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [newStock, it.variant_id]);
       } else {
-        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [
-          newStock,
-          it.product_id,
-        ]);
+        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [newStock, it.product_id]);
       }
     }
 
     await conn.commit();
 
-    try {
-      await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
-    } catch {}
+    try { await enqueueOrderCreatedNotifications(orderId, orderTotal, currency); } catch {}
 
-    sendAdminWhatsAppForOrder({
-      pool,
-      orderId,
-      displayCode,
-      orderTotal,
-      currency,
-      addressObj,
-      contactObj,
-      items,
-    }).catch(() => {});
+    sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }).catch(() => {});
 
     res.status(201).json({
       id: orderId,
@@ -1975,11 +1446,8 @@ router.post("/guest", async (req, res) => {
       payment: paymentObj || null,
     });
   } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
-    if (e && e.statusCode === 400 && e.payload)
-      return res.status(400).json(e.payload);
+    try { await conn.rollback(); } catch {}
+    if (e && e.statusCode === 400 && e.payload) return res.status(400).json(e.payload);
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -1988,7 +1456,6 @@ router.post("/guest", async (req, res) => {
 
 /* =========================
  * Get one order
- * ✅ parse + normalize payment
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1996,46 +1463,29 @@ router.get("/:id", authRequired, async (req, res) => {
 
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200)
-      return res.status(result.status).json({ error: result.error });
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
 
-    const [[u]] = await conn.query(
-      "SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1",
-      [o.user_id],
-    );
+    const [[u]] = await conn.query("SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1", [o.user_id]);
 
     const contactFromOrder = safeParseJSON(o.contact);
     const contact =
-      contactFromOrder &&
-      (contactFromOrder.first_name ||
-        contactFromOrder.last_name ||
-        contactFromOrder.phone)
+      contactFromOrder && (contactFromOrder.first_name || contactFromOrder.last_name || contactFromOrder.phone)
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    const itemsAmount = result.items.reduce(
-      (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
-    );
+    const itemsAmount = result.items.reduce((sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1), 0);
 
     const totalAmount = Number(o.total || itemsAmount);
     const deliveryFee = Math.max(0, totalAmount - itemsAmount);
     const currency = (o.currency || "MAD").toUpperCase();
 
     const payCols = await getOrdersPayColsCached(getPool());
-    const paymentNorm = normalizePaymentForRow(
-      o,
-      totalAmount,
-      currency,
-      payCols,
-    );
+    const paymentNorm = normalizePaymentForRow(o, totalAmount, currency, payCols);
 
-    const commissionDuumini = isCancelledStatus(o.status)
-      ? null
-      : normCommission(o.commission_duumini);
+    const commissionDuumini = isCancelledStatus(o.status) ? null : normCommission(o.commission_duumini);
 
     res.json({
       ...o,
@@ -2068,8 +1518,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const { status } = req.body || {};
   const allowed = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
-  if (!allowed.includes(status))
-    return res.status(400).json({ error: "invalid status" });
+  if (!allowed.includes(status)) return res.status(400).json({ error: "invalid status" });
 
   const pool = getPool();
 
@@ -2089,33 +1538,19 @@ router.put("/:id/status", authRequired, async (req, res) => {
       );
 
       if (!row) return res.status(404).json({ error: "Not found" });
-      if (
-        !(isVendor(req.user) && String(row.owner_id) === String(req.user.id))
-      ) {
+      if (!(isVendor(req.user) && String(row.owner_id) === String(req.user.id))) {
         return res.status(403).json({ error: "Forbidden" });
       }
     }
 
-    await pool.query(
-      `UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`,
-      [status, id],
-    );
+    await pool.query(`UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`, [status, id]);
 
-    const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [
-      id,
-    ]);
+    const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
     if (order && order.user_id) {
-      try {
-        await enqueueOrderStatusForClient(id, status);
-      } catch {}
-
+      try { await enqueueOrderStatusForClient(id, status); } catch {}
       try {
         const { notifyUser } = require("../services/notify");
-        await notifyUser(order.user_id, "ORDER_STATUS", {
-          order_id: id,
-          display_code: buildDisplayCode(id),
-          status,
-        });
+        await notifyUser(order.user_id, "ORDER_STATUS", { order_id: id, display_code: buildDisplayCode(id), status });
       } catch {}
     }
 
@@ -2149,25 +1584,16 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(409).json({ error: "Cannot cancel at this stage" });
     }
 
-    const [items] = await conn.query(
-      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
-      [id],
-    );
+    const [items] = await conn.query(`SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`, [id]);
 
     for (const it of items) {
       const qty = Number(it.qty || 0);
       if (!qty) continue;
 
       if (it.variant_id) {
-        await conn.query(
-          `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.variant_id],
-        );
+        await conn.query(`UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id=?`, [qty, it.variant_id]);
       } else if (it.product_id) {
-        await conn.query(
-          `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.product_id],
-        );
+        await conn.query(`UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id=?`, [qty, it.product_id]);
       }
     }
 
@@ -2186,19 +1612,13 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       if (order.user_id) {
         await enqueueOrderStatusForClient(id, "CANCELLED");
         const { notifyUser } = require("../services/notify");
-        await notifyUser(order.user_id, "ORDER_STATUS", {
-          order_id: id,
-          display_code: buildDisplayCode(id),
-          status: "CANCELLED",
-        });
+        await notifyUser(order.user_id, "ORDER_STATUS", { order_id: id, display_code: buildDisplayCode(id), status: "CANCELLED" });
       }
     } catch {}
 
     res.json({ ok: true, status: "CANCELLED" });
   } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
+    try { await conn.rollback(); } catch {}
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
