@@ -119,7 +119,7 @@ function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   return +(+totalClientLine * rate).toFixed(2);
 }
 
-/** ✅ NEW: cast commission_duumini (DECIMAL->string) to Number for JSON */
+/** ✅ cast commission_duumini (DECIMAL->string) to Number for JSON */
 function normCommission(x) {
   if (x === null || x === undefined || x === "") return null;
   const n = Number(x);
@@ -572,12 +572,9 @@ async function getOrdersPayColsCached(pool) {
     conn.release();
   }
 }
+
 function isCancelledStatus(s) {
-  return (
-    String(s || "")
-      .trim()
-      .toUpperCase() === "CANCELLED"
-  );
+  return String(s || "").trim().toUpperCase() === "CANCELLED";
 }
 
 function normMoney(x) {
@@ -621,7 +618,7 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
   };
 }
 
-/** ✅ NEW: toujours renvoyer payment_status/paid_amount/remaining_amount dans LIST (même si colonnes absentes) */
+/** ✅ toujours renvoyer payment_status/paid_amount/remaining_amount dans LIST (même si colonnes absentes) */
 function normalizePaymentForRow(row, orderTotal, currency, payCols) {
   const total = normMoney(orderTotal);
   const cur = String(currency || "MAD").toUpperCase();
@@ -718,19 +715,68 @@ async function lockVariantForItem(conn, productId, variantId) {
 }
 
 /* =========================
- * LIST (filtre payment_status)
+ * ✅ NEW: Multi-status filter (compat: status=OPEN, new: statuses=OPEN,PREPARATION)
+ *  - /api/orders?statuses=OPEN,PREPARATION
+ *  - /api/orders?status[]=OPEN&status[]=PREPARATION
+ *  - legacy: /api/orders?status=OPEN|ALL
+ * =======================*/
+const ORDER_STATUSES = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
+
+function parseStatusesQuery(req) {
+  const rawCsv = req.query.statuses ?? req.query.status_list ?? null;
+  const rawArray = req.query["status[]"] ?? req.query.statusArray ?? null;
+  const rawSingle = req.query.status ?? null;
+
+  let list = [];
+
+  if (rawCsv) {
+    list = String(rawCsv)
+      .split(",")
+      .map((s) => String(s).trim().toUpperCase())
+      .filter(Boolean);
+  } else if (Array.isArray(rawArray)) {
+    list = rawArray
+      .map((s) => String(s).trim().toUpperCase())
+      .filter(Boolean);
+  } else if (rawArray != null) {
+    list = String(rawArray)
+      .split(",")
+      .map((s) => String(s).trim().toUpperCase())
+      .filter(Boolean);
+  } else if (rawSingle) {
+    const s = String(rawSingle).trim().toUpperCase();
+    if (s && s !== "ALL") list = [s];
+  }
+
+  list = Array.from(new Set(list)).filter((s) => ORDER_STATUSES.includes(s));
+  return list; // [] => pas de filtre
+}
+
+function buildStatusWhere(statuses) {
+  if (!Array.isArray(statuses) || statuses.length === 0) {
+    return { sql: "", params: [] };
+  }
+  if (statuses.length === 1) {
+    return { sql: " AND o.status = ?", params: [statuses[0]] };
+  }
+  return {
+    sql: ` AND o.status IN (${statuses.map(() => "?").join(",")})`,
+    params: [...statuses],
+  };
+}
+
+/* =========================
+ * LIST (filtre payment_status + multi status)
  *  - /api/orders?payment_status=PAID|UNPAID|PARTIAL
  *  - alias: pay=PAID
+ *  - /api/orders?statuses=OPEN,PREPARATION (NEW)
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
 
   const mine = req.query.mine === "1" || req.query.mine === "true";
-  const rawStatus = req.query.status
-    ? String(req.query.status).toUpperCase()
-    : null;
-  const hasStatus = rawStatus && rawStatus !== "ALL";
+  const statuses = parseStatusesQuery(req);
 
   const payFilterRaw =
     req.query.payment_status ??
@@ -755,10 +801,10 @@ router.get("/", authRequired, async (req, res) => {
       const params = [req.user.id];
       let where = "o.user_id = ?";
 
-      if (hasStatus) {
-        where += " AND o.status = ?";
-        params.push(rawStatus);
-      }
+      const st = buildStatusWhere(statuses);
+      where += st.sql;
+      params.push(...st.params);
+
       if (payFilter) {
         where += " AND o.payment_status = ?";
         params.push(payFilter);
@@ -861,10 +907,10 @@ router.get("/", authRequired, async (req, res) => {
       let where = "1=1";
       const params = [];
 
-      if (hasStatus) {
-        where += " AND o.status = ?";
-        params.push(rawStatus);
-      }
+      const st = buildStatusWhere(statuses);
+      where += st.sql;
+      params.push(...st.params);
+
       if (payFilter) {
         where += " AND o.payment_status = ?";
         params.push(payFilter);
@@ -963,10 +1009,10 @@ router.get("/", authRequired, async (req, res) => {
       let where = "s.owner_id = ?";
       const params = [req.user.id];
 
-      if (hasStatus) {
-        where += " AND o.status = ?";
-        params.push(rawStatus);
-      }
+      const st = buildStatusWhere(statuses);
+      where += st.sql;
+      params.push(...st.params);
+
       if (payFilter) {
         where += " AND o.payment_status = ?";
         params.push(payFilter);
@@ -1079,10 +1125,10 @@ router.get("/", authRequired, async (req, res) => {
     const params = [req.user.id];
     let where = "o.user_id = ?";
 
-    if (hasStatus) {
-      where += " AND o.status = ?";
-      params.push(rawStatus);
-    }
+    const st = buildStatusWhere(statuses);
+    where += st.sql;
+    params.push(...st.params);
+
     if (payFilter) {
       where += " AND o.payment_status = ?";
       params.push(payFilter);
@@ -1722,8 +1768,7 @@ router.post("/guest", async (req, res) => {
   if (!contactObj.phone) {
     return res.status(400).json({
       code: "PHONE_REQUIRED",
-      message:
-        "Un numéro de téléphone est obligatoire pour passer une commande.",
+      message: "Un numéro de téléphone est obligatoire pour passer une commande.",
     });
   }
 
@@ -2056,10 +2101,9 @@ router.put("/:id/status", authRequired, async (req, res) => {
       [status, id],
     );
 
-    const [[order]] = await pool.query(
-      `SELECT user_id FROM orders WHERE id=?`,
-      [id],
-    );
+    const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [
+      id,
+    ]);
     if (order && order.user_id) {
       try {
         await enqueueOrderStatusForClient(id, status);
