@@ -465,6 +465,9 @@ async function attachVariantsToProducts(pool, items, opts = {}) {
   });
 }
 
+/**
+ * ✅ LIST PRODUCTS (supports vendor ownerId filtering)
+ */
 async function listProducts(pool, opts) {
   const {
     limit,
@@ -479,6 +482,9 @@ async function listProducts(pool, opts) {
     vertical,
     includeVariants,
     onlyWithVariants,
+
+    // ✅ NEW: ownerId => filter to shops owned by this user (VENDEUR)
+    ownerId,
   } = opts || {};
 
   const whereParts = [];
@@ -520,6 +526,13 @@ async function listProducts(pool, opts) {
   if (shId) {
     whereParts.push("p.shop_id = ?");
     params.push(shId);
+  }
+
+  // ✅ Vendor scope: only products from shops owned by ownerId
+  const oid = Number(ownerId) || 0;
+  if (oid) {
+    whereParts.push("s.owner_id = ?");
+    params.push(oid);
   }
 
   const qq = String(q || "").trim().toLowerCase();
@@ -644,6 +657,9 @@ function pickFilters(req) {
   };
 }
 
+/**
+ * PUBLIC LIST (catalogue)
+ */
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActive = parseOnlyActive(req);
@@ -670,6 +686,7 @@ async function listHandler(req, res, next) {
       vertical,
       includeVariants: include,
       onlyWithVariants,
+      ownerId: null, // ✅ PUBLIC: no vendor scope
     });
 
     res.json({
@@ -703,6 +720,7 @@ async function listFoodHandler(req, res, next) {
       vertical: null,
       includeVariants: false,
       onlyWithVariants: 0,
+      ownerId: null,
     });
 
     res.json({
@@ -736,6 +754,7 @@ async function listMarketHandler(req, res, next) {
       vertical: null,
       includeVariants: false,
       onlyWithVariants: 0,
+      ownerId: null,
     });
 
     res.json({
@@ -747,16 +766,268 @@ async function listMarketHandler(req, res, next) {
   }
 }
 
+/**
+ * ✅ MANAGE LIST (admin/vendor)
+ * - ADMIN: all products (can filter by shop_id)
+ * - VENDEUR: only own products (shop_id ignored for safety)
+ */
+async function listManageHandler(req, res, next) {
+  const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActive = parseOnlyActive(req);
+  const { categoryId, subCategoryId, shopId, q, vertical, includeVariants, onlyWithVariants } =
+    pickFilters(req);
+
+  const pool = getPool();
+  try {
+    const citiesCol = await getCitiesColCached(pool);
+
+    const v = normalizeVertical(vertical, null);
+    const include = includeVariants === 1 ? true : v === "FASHION" ? true : false;
+
+    const ownerId = isVendor(req.user) ? req.user.id : null;
+    const safeShopId = isVendor(req.user) ? null : shopId;
+
+    const { rows, total } = await listProducts(pool, {
+      limit,
+      offset,
+      channel: null,
+      onlyActive,
+      onlyPromos: false,
+      categoryId,
+      subCategoryId,
+      shopId: safeShopId,
+      q,
+      vertical,
+      includeVariants: include,
+      onlyWithVariants,
+      ownerId,
+    });
+
+    res.json({
+      items: withCities(rows, citiesCol),
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+async function getManageByIdHandler(req, res, next) {
+  const id = parseIdParam(req.params.id);
+  if (!id) return next();
+
+  const pool = getPool();
+  try {
+    const citiesCol = await getCitiesColCached(pool);
+
+    const [rows] = await pool.query(
+      `SELECT
+         p.*,
+         s.owner_id,
+         s.name AS shop_name,
+         s.logo AS shop_logo,
+         s.cover AS shop_cover,
+         s.city AS shop_city,
+
+         c.name AS category_name,
+         c.slug AS category_slug,
+
+         sc.id   AS sub_category_id,
+         sc.name AS sub_category_name,
+         sc.slug AS sub_category_slug,
+
+         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+         (SELECT MIN(COALESCE(pv.price_override, p.price))
+            FROM product_variants pv
+           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+
+       FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
+       WHERE p.id=?`,
+      [id]
+    );
+
+    const rawProduct = rows[0];
+    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+
+    if (isVendor(req.user) && String(rawProduct.owner_id) !== String(req.user.id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const [images] = await pool.query(
+      `SELECT id, url, sort_order
+         FROM product_images
+        WHERE product_id=?
+        ORDER BY sort_order ASC, id ASC`,
+      [id]
+    );
+
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    let variants = undefined;
+    if (wantVariants) {
+      const [vrows] = await pool.query(
+        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
+           FROM product_variants
+          WHERE product_id=?
+          ORDER BY is_active DESC, id ASC`,
+        [id]
+      );
+      variants = vrows || [];
+    }
+
+    let cities = null;
+    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
+
+    const variants_count = Number(rawProduct.variants_count || 0);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
+
+    const base = stripDuuminiRateFromProduct(rawProduct);
+    const product = withPromoComputed({
+      ...base,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      variants_count,
+    });
+
+    res.json({
+      ...product,
+      images,
+      ...(variants ? { variants } : {}),
+      ...(cities ? { cities } : {}),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+async function getManageBySlugHandler(req, res, next) {
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!slug) return next();
+
+  const pool = getPool();
+  try {
+    const citiesCol = await getCitiesColCached(pool);
+
+    const [rows] = await pool.query(
+      `SELECT
+         p.*,
+         s.owner_id,
+         s.name AS shop_name,
+         s.logo AS shop_logo,
+         s.cover AS shop_cover,
+         s.city AS shop_city,
+
+         c.name AS category_name,
+         c.slug AS category_slug,
+
+         sc.id   AS sub_category_id,
+         sc.name AS sub_category_name,
+         sc.slug AS sub_category_slug,
+
+         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+         (SELECT MIN(COALESCE(pv.price_override, p.price))
+            FROM product_variants pv
+           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+
+       FROM products p
+       LEFT JOIN shops s ON s.id = p.shop_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
+       WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
+      [slug]
+    );
+
+    const rawProduct = rows[0];
+    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+
+    if (isVendor(req.user) && String(rawProduct.owner_id) !== String(req.user.id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const [images] = await pool.query(
+      `SELECT id, url, sort_order
+         FROM product_images
+        WHERE product_id=?
+        ORDER BY sort_order ASC, id ASC`,
+      [rawProduct.id]
+    );
+
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    let variants = undefined;
+    if (wantVariants) {
+      const [vrows] = await pool.query(
+        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
+           FROM product_variants
+          WHERE product_id=?
+          ORDER BY is_active DESC, id ASC`,
+        [rawProduct.id]
+      );
+      variants = vrows || [];
+    }
+
+    let cities = null;
+    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
+
+    const variants_count = Number(rawProduct.variants_count || 0);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
+
+    const base = stripDuuminiRateFromProduct(rawProduct);
+    const product = withPromoComputed({
+      ...base,
+      has_variants: variants_count > 0,
+      min_price: Number.isFinite(min_price) ? min_price : null,
+      variants_count,
+    });
+
+    res.json({
+      ...product,
+      images,
+      ...(variants ? { variants } : {}),
+      ...(cities ? { cities } : {}),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/* =========================
+ * ROUTES
+ * ======================= */
+
+// ✅ FASHION shortcut (public)
 router.get("/fashion", async (req, res, next) => {
   req.query.vertical = "FASHION";
   if (req.query.includeVariants == null) req.query.includeVariants = "1";
   return listHandler(req, res, next);
 });
 
+// ✅ MANAGE routes (secure)
+router.get("/manage", authRequired, requireRole("VENDEUR", "ADMIN"), listManageHandler);
+router.get("/manage/slug/:slug", authRequired, requireRole("VENDEUR", "ADMIN"), getManageBySlugHandler);
+router.get("/manage/:id", authRequired, requireRole("VENDEUR", "ADMIN"), getManageByIdHandler);
+
+// ✅ PUBLIC catalogue routes
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
 
+/* =========================
+ * PROMOTIONS / TOP (public)
+ * ======================= */
 router.get("/promotions", async (req, res, next) => {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
@@ -788,6 +1059,7 @@ router.get("/promotions", async (req, res, next) => {
       vertical,
       includeVariants: includeVariants === 1 ? true : normalizeVertical(vertical, null) === "FASHION",
       onlyWithVariants: 0,
+      ownerId: null,
     });
 
     res.json(withCities(rows, citiesCol).slice(0, limit));
@@ -1103,7 +1375,7 @@ router.post(
   }
 );
 
-/* ----------------------------- Read by SLUG ----------------------------- */
+/* ----------------------------- Read by SLUG (public) ----------------------------- */
 router.get("/slug/:slug", async (req, res, next) => {
   const slug = String(req.params.slug || "").trim().toLowerCase();
   if (!slug) return next();
@@ -1195,7 +1467,7 @@ router.get("/slug/:slug", async (req, res, next) => {
   }
 });
 
-/* ----------------------------- Read by ID ----------------------------- */
+/* ----------------------------- Read by ID (public) ----------------------------- */
 router.get("/:id", async (req, res, next) => {
   const id = parseIdParam(req.params.id);
   if (!id) return next();
@@ -1348,11 +1620,14 @@ router.post(
 
       const resolvedSub = await resolveSubCategory(conn, { sub_category_id, category_id });
       if (!resolvedSub) {
-        return res.status(400).json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
+        return res
+          .status(400)
+          .json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
       }
 
       const incomingVertical = normalizeVertical(vertical, null);
-      const fallbackVertical = String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
+      const fallbackVertical =
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
       const finalVertical = incomingVertical || fallbackVertical;
 
       const duuminiRate = computeDuuminiRateFromSubCategorySlug(resolvedSub.slug);
@@ -1450,7 +1725,8 @@ router.post(
 
       await conn.commit();
 
-      const channel = String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
+      const channel =
+        String(resolvedSub.slug || "").toLowerCase() === "food" ? "african-food" : "african-market";
 
       try {
         const [userRows] = await pool.query(
@@ -1490,7 +1766,8 @@ router.post(
         await conn.rollback();
       } catch {}
       if (e && e.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "Duplicate slug" });
-      if (e && e.code === "ER_NO_REFERENCED_ROW_2") return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
+      if (e && e.code === "ER_NO_REFERENCED_ROW_2")
+        return res.status(400).json({ error: "FK invalid (category/sub_category?)" });
       next(e);
     } finally {
       conn.release();
@@ -1566,7 +1843,9 @@ router.put(
           category_id: category_id ?? prod.category_id,
         });
         if (!resolvedSub) {
-          return res.status(400).json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
+          return res
+            .status(400)
+            .json({ error: "sub_category_id invalide (ou ne correspond pas à category_id)" });
         }
       }
 

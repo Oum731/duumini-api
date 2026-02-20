@@ -69,9 +69,7 @@ function uploadBufferToCloudinary(file, folder = "shops") {
     ).padStart(2, "0")}`;
 
     const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        folder: folderPath,
-      },
+      { folder: folderPath },
       (err, result) => {
         if (err) return reject(err);
         resolve(result.secure_url);
@@ -179,14 +177,6 @@ router.get("/:id", async (req, res) => {
 
 /* ============================================================================
  * GET /api/shops/:id/stats
- * Stats CA / Duumini / produits les plus commandés pour UNE boutique
- * (ADMIN ou VENDEUR propriétaire).
- *
- * 🔔 NOUVELLE LOGIQUE :
- * - order_items.unit_price = prix client payé (snapshot au moment de la commande)
- * - CA (turnover) = somme(qty * unit_price) → CA client hors livraison
- * - Commission Duumini (duumini) = qty * unit_price * taux (0.18 food, 0.11 sinon)
- * - AUCUN frais de livraison pris en compte (pas de delivery_fee, etc.)
  * ==========================================================================*/
 router.get(
   "/:id/stats",
@@ -220,10 +210,6 @@ router.get(
       // On ne compte que les commandes "valides"
       const validStatuses = ["OPEN", "PREPARATION", "DELIVERY", "DONE"];
 
-      /* ===== CA jour / mois / année (prix CLIENT, unit_price) =====
-         → basé sur order_items.unit_price (snapshot du prix affiché au client)
-         → AUCUN frais de livraison utilisé ici
-      */
       const [rowsTurnover] = await pool.query(
         `
         SELECT
@@ -263,11 +249,6 @@ router.get(
         year: Number(t.year_turnover || 0),
       };
 
-      /* ===== Commission Duumini jour / mois / année =====
-         - commission = qty * unit_price (prix client) * taux
-         - taux = 0.18 si sub_category = 'food', sinon 0.11
-         - toujours SANS frais de livraison
-      */
       const [rowsCommission] = await pool.query(
         `
         SELECT
@@ -319,11 +300,6 @@ router.get(
         year: Number(c.year_commission || 0),
       };
 
-      /* ===== Produits les plus commandés (30 derniers jours)
-         - total_qty = somme des quantités
-         - total_amount = somme (qty * unit_price = prix client)
-         - SANS frais de livraison
-      */
       const [rowsTopProducts] = await pool.query(
         `
         SELECT
@@ -356,15 +332,11 @@ router.get(
         product_id: r.product_id,
         name: r.name,
         total_qty: Number(r.total_qty || 0),
-        total_amount: Number(r.total_amount || 0), // CA 30j sur prix client
+        total_amount: Number(r.total_amount || 0),
         cover: r.cover || null,
       }));
 
-      res.json({
-        turnover,
-        duumini,
-        top_products,
-      });
+      res.json({ turnover, duumini, top_products });
     } catch (e) {
       console.error("GET /api/shops/:id/stats error:", e);
       res.status(500).json({ error: "Erreur serveur" });
@@ -375,11 +347,6 @@ router.get(
 /* ============================================================================
  * POST /api/shops
  * Création d’une boutique (VENDEUR ou ADMIN).
- * Body: multipart/form-data
- *  - name (obligatoire)
- *  - description?, category_id?, address?, city?, country?, lat?, lng?
- *  - logo_file? (fichier), cover_file? (fichier)
- *  - logo? / cover? (URL texte, en fallback si pas de fichier)
  * ==========================================================================*/
 router.post(
   "/",
@@ -391,9 +358,26 @@ router.post(
   ]),
   async (req, res) => {
     const pool = getPool();
-    const owner_id = req.user.id; // admin OU vendeur → propriétaire de la boutique
+    const owner_id = req.user.id;
 
     try {
+      // ✅ Limite simple : VENDEUR max 2 boutiques
+      // (Admin illimité — si tu veux limiter admin aussi, dis-moi)
+      if (isVendor(req.user) && !isAdmin(req.user)) {
+        const [[{ total }]] = await pool.query(
+          "SELECT COUNT(*) AS total FROM shops WHERE owner_id=?",
+          [owner_id]
+        );
+        const count = Number(total || 0);
+        if (count >= 2) {
+          return res.status(409).json({
+            error: "SHOP_LIMIT_REACHED",
+            message: "Vous avez déjà atteint la limite de 2 boutiques.",
+            limit: 2,
+          });
+        }
+      }
+
       const {
         name,
         description,
@@ -407,7 +391,6 @@ router.post(
         cover: coverText,
       } = req.body || {};
 
-      // ✅ Nom OBLIGATOIRE (pas de fallback "Boutique")
       const rawName = (name ?? "").toString().trim();
       if (!rawName) {
         return res.status(400).json({ error: "name required" });
@@ -478,7 +461,6 @@ router.post(
 /* ============================================================================
  * PUT /api/shops/:id
  * Mise à jour d’une boutique (admin ou vendeur propriétaire).
- * Body: multipart/form-data (même principe que POST)
  * ==========================================================================*/
 router.put(
   "/:id",

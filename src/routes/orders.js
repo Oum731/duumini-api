@@ -126,18 +126,47 @@ function stripCommissionFromOrderRow(row, user) {
   return rest;
 }
 
+/**
+ * ✅ NOUVEAU: vérifier si une commande ne contient QUE les produits d'un vendeur
+ * (utile pour autoriser update status / cancel côté vendeur)
+ */
+async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
+  const [[r]] = await conn.query(
+    `
+    SELECT
+      SUM(CASE WHEN s.owner_id = ? THEN 1 ELSE 0 END) AS mine_count,
+      COUNT(*) AS total_count,
+      COUNT(DISTINCT s.owner_id) AS vendors_count
+    FROM order_items oi
+    JOIN products p ON p.id = oi.product_id
+    JOIN shops s    ON s.id = p.shop_id
+    WHERE oi.order_id = ?
+    `,
+    [vendorId, orderId],
+  );
+
+  const mine = Number(r?.mine_count || 0);
+  const total = Number(r?.total_count || 0);
+  const vendorsCount = Number(r?.vendors_count || 0);
+
+  if (!total) return false;
+  // mono-vendeur et c'est lui
+  return mine === total && vendorsCount === 1;
+}
+
 async function getOrderWithPerm(conn, id, user) {
   const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [id]);
   if (!orderRaw) return { status: 404, error: "Not found" };
 
   if (!isAdmin(user)) {
     if (isVendor(user)) {
+      // ✅ vendor peut VOIR si au moins 1 de ses produits est dedans
       const [[own]] = await conn.query(
         `
         SELECT 1
         FROM order_items oi
-        LEFT JOIN products p ON p.id = oi.product_id
-        LEFT JOIN shops s    ON s.id = p.shop_id
+        JOIN products p ON p.id = oi.product_id
+        JOIN shops s    ON s.id = p.shop_id
         WHERE oi.order_id = ? AND s.owner_id = ?
         LIMIT 1
         `,
@@ -151,8 +180,8 @@ async function getOrderWithPerm(conn, id, user) {
 
   const order = stripCommissionFromOrderRow(orderRaw, user);
 
-  const [items] = await conn.query(
-    `
+  // ✅ IMPORTANT: si vendor => ne renvoyer QUE ses lignes
+  let itemsSql = `
     SELECT 
       oi.*,
       p.name AS product_name,
@@ -169,11 +198,23 @@ async function getOrderWithPerm(conn, id, user) {
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
     LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-    WHERE oi.order_id = ?
-    ORDER BY oi.id ASC
-    `,
-    [id],
-  );
+    `;
+
+  const params = [];
+  if (isVendor(user) && !isAdmin(user)) {
+    itemsSql += `
+      LEFT JOIN shops s ON s.id = p.shop_id
+      WHERE oi.order_id = ? AND s.owner_id = ?
+      `;
+    params.push(id, user.id);
+  } else {
+    itemsSql += ` WHERE oi.order_id = ? `;
+    params.push(id);
+  }
+
+  itemsSql += ` ORDER BY oi.id ASC `;
+
+  const [items] = await conn.query(itemsSql, params);
 
   return { status: 200, order, items };
 }
@@ -526,13 +567,11 @@ function normPayStatus(s) {
   return null;
 }
 
-/** ✅ NEW: détecte virement */
 function isBankTransferMethod(m) {
   const v = String(m || "").trim().toUpperCase();
   return v === "BANK_TRANSFER" || v === "BANK" || v === "TRANSFER" || v === "VIREMENT";
 }
 
-/** ✅ UPDATED: PENDING si virement et pas totalement payé */
 function buildPaymentFromPayload(payment, orderTotal, currency) {
   const cur = String(currency || "MAD").toUpperCase();
   const p = payment && typeof payment === "object" ? payment : {};
@@ -563,7 +602,6 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
   };
 }
 
-/** ✅ toujours renvoyer payment_status/paid_amount/remaining_amount dans LIST (même si colonnes absentes) */
 function normalizePaymentForRow(row, orderTotal, currency, payCols) {
   const total = normMoney(orderTotal);
   const cur = String(currency || "MAD").toUpperCase();
@@ -589,7 +627,6 @@ function normalizePaymentForRow(row, orderTotal, currency, payCols) {
   const parsedMethod = paymentParsed?.method ?? null;
   const isBank = isBankTransferMethod(parsedMethod);
 
-  // ✅ virement et pas payé => PENDING
   if (isBank && status !== "PAID" && total > 0) {
     status = "PENDING";
   }
@@ -701,6 +738,7 @@ function buildStatusWhere(statuses) {
 
 /* =========================
  * LIST (filtre payment_status + multi status)
+ * ✅ Vendor: ne voit QUE ses commandes et items_amount = somme de SES items
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -739,12 +777,16 @@ router.get("/", authRequired, async (req, res) => {
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
 
-      const itemsAmount = Number(r.items_amount || 0);
-      const totalAmount = Number(r.total || itemsAmount);
-      const deliveryFee = Math.max(0, totalAmount - itemsAmount);
-      const currency = (r.currency || "MAD").toUpperCase();
+      const isVendorView = isVendor(user) && !isAdmin(user);
 
-      const paymentNorm = normalizePaymentForRow(r, totalAmount, currency, payCols);
+      const itemsAmount = Number(r.items_amount || 0);
+
+      // ✅ vendor voit "son montant" = somme de ses items. On met delivery_fee = 0 pour éviter confusion.
+      const totalAmount = isVendorView ? itemsAmount : Number(r.total || itemsAmount);
+      const deliveryFee = isVendorView ? 0 : Math.max(0, totalAmount - itemsAmount);
+
+      const currency = (r.currency || "MAD").toUpperCase();
+      const paymentNorm = normalizePaymentForRow(r, Number(r.total || itemsAmount), currency, payCols);
 
       const commissionDuumini = isCancelledStatus(r.status) ? null : normCommission(r.commission_duumini);
 
@@ -761,11 +803,12 @@ router.get("/", authRequired, async (req, res) => {
           delivery_fee: deliveryFee,
           amount: totalAmount,
           currency,
-          duumini_amount: commissionDuumini,
+          duumini_amount: isVendorView ? null : commissionDuumini,
         },
       };
     };
 
+    // mine => client
     if (mine) {
       const params = [req.user.id];
       let where = "o.user_id = ?";
@@ -815,6 +858,7 @@ router.get("/", authRequired, async (req, res) => {
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
+    // admin => tout
     if (isAdmin(req.user)) {
       let where = "1=1";
       const params = [];
@@ -863,6 +907,7 @@ router.get("/", authRequired, async (req, res) => {
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
+    // ✅ vendor => ne voit que SES commandes, items_amount = somme de SES lignes
     if (isVendor(req.user)) {
       let where = "s.owner_id = ?";
       const params = [req.user.id];
@@ -895,11 +940,18 @@ router.get("/", authRequired, async (req, res) => {
           u.first_name AS u_first,
           u.last_name  AS u_last,
           u.phone      AS u_phone,
+
+          -- ✅ somme UNIQUEMENT des items du vendeur
           (
-            SELECT SUM(oi_all.qty * oi_all.unit_price)
-            FROM order_items oi_all
-            WHERE oi_all.order_id = o.id
+            SELECT SUM(oi_mine.qty * oi_mine.unit_price)
+            FROM order_items oi_mine
+            JOIN products p_mine ON p_mine.id = oi_mine.product_id
+            JOIN shops s_mine    ON s_mine.id = p_mine.shop_id
+            WHERE oi_mine.order_id = o.id
+              AND s_mine.owner_id = ?
           ) AS items_amount,
+
+          -- ✅ cover UNIQUEMENT des produits du vendeur
           (
             SELECT pi.url
             FROM order_items oi2
@@ -911,6 +963,7 @@ router.get("/", authRequired, async (req, res) => {
             ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
             LIMIT 1
           ) AS first_product_cover
+
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
@@ -921,14 +974,14 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [req.user.id, req.user.id, ...params, limit, offset],
       );
 
       const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
-    // fallback: client normal
+    // fallback client normal
     const params = [req.user.id];
     let where = "o.user_id = ?";
 
@@ -1156,7 +1209,6 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         paid_amount: nextPaid,
       };
 
-      // ✅ ici, buildPaymentFromPayload gère PENDING si method=BANK_TRANSFER et pas payé
       const paymentObj = buildPaymentFromPayload(merged, total, currency);
 
       const sets = [];
@@ -1456,6 +1508,7 @@ router.post("/guest", async (req, res) => {
 
 /* =========================
  * Get one order
+ * ✅ vendor: items filtrés (uniquement ses lignes)
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1476,31 +1529,33 @@ router.get("/:id", authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
+    // items filtrés si vendor => amount = somme de ses lignes
     const itemsAmount = result.items.reduce((sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1), 0);
 
-    const totalAmount = Number(o.total || itemsAmount);
-    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+    const isVendorView = isVendor(req.user) && !isAdmin(req.user);
+    const totalAmount = isVendorView ? itemsAmount : Number(o.total || itemsAmount);
+    const deliveryFee = isVendorView ? 0 : Math.max(0, totalAmount - itemsAmount);
     const currency = (o.currency || "MAD").toUpperCase();
 
     const payCols = await getOrdersPayColsCached(getPool());
-    const paymentNorm = normalizePaymentForRow(o, totalAmount, currency, payCols);
+    const paymentNorm = normalizePaymentForRow(o, Number(o.total || itemsAmount), currency, payCols);
 
     const commissionDuumini = isCancelledStatus(o.status) ? null : normCommission(o.commission_duumini);
 
     res.json({
       ...o,
-      commission_duumini: commissionDuumini,
+      commission_duumini: isVendorView ? null : commissionDuumini,
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
       ...paymentNorm,
-      items: result.items,
+      items: result.items, // ✅ vendor => seulement ses items
       totals: {
         items_amount: itemsAmount,
         delivery_fee: deliveryFee,
         amount: totalAmount,
         currency,
-        duumini_amount: commissionDuumini,
+        duumini_amount: isVendorView ? null : commissionDuumini,
       },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
@@ -1513,6 +1568,7 @@ router.get("/:id", authRequired, async (req, res) => {
 
 /* =========================
  * Update status
+ * ✅ vendor: autorisé seulement si commande mono-vendeur (tous les items à lui)
  * =======================*/
 router.put("/:id/status", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1524,22 +1580,15 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
   try {
     if (!isAdmin(req.user)) {
-      const [[row]] = await pool.query(
-        `
-        SELECT s.owner_id
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        JOIN products p ON p.id = oi.product_id
-        JOIN shops s ON s.id = p.shop_id
-        WHERE o.id = ?
-        LIMIT 1
-        `,
-        [id],
-      );
+      if (!isVendor(req.user)) return res.status(403).json({ error: "Forbidden" });
 
-      if (!row) return res.status(404).json({ error: "Not found" });
-      if (!(isVendor(req.user) && String(row.owner_id) === String(req.user.id))) {
-        return res.status(403).json({ error: "Forbidden" });
+      const conn = await pool.getConnection();
+      try {
+        // ✅ vendor ne peut gérer que si commande = 100% ses produits
+        const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
+        if (!ok) return res.status(403).json({ error: "Forbidden (multi-vendor order)" });
+      } finally {
+        conn.release();
       }
     }
 
@@ -1562,6 +1611,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
 /* =========================
  * Cancel (restock)
+ * ✅ vendor: autorisé seulement si commande mono-vendeur
  * =======================*/
 router.post("/:id/cancel", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1577,6 +1627,15 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(result.status).json({ error: result.error });
     }
 
+    // ✅ vendor: doit posséder 100% des items
+    if (!isAdmin(req.user) && isVendor(req.user)) {
+      const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
+      if (!ok) {
+        await conn.rollback();
+        return res.status(403).json({ error: "Forbidden (multi-vendor order)" });
+      }
+    }
+
     const order = result.order;
     const blocked = ["DONE", "CANCELLED"].includes(order.status || "");
     if (blocked && !isAdmin(req.user)) {
@@ -1584,7 +1643,10 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(409).json({ error: "Cannot cancel at this stage" });
     }
 
-    const [items] = await conn.query(`SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`, [id]);
+    const [items] = await conn.query(
+      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
+      [id],
+    );
 
     for (const it of items) {
       const qty = Number(it.qty || 0);
