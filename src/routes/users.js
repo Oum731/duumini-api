@@ -6,23 +6,51 @@ const bcrypt = require("bcryptjs");
 
 const router = Router();
 
-/* ===== Helper ville (libre) ===== */
 function normalizeVille(ville) {
   if (ville == null) return null;
   const v = String(ville).trim();
   return v ? v : null;
 }
 
-/* ===== Middleware admin local ===== */
 function adminRequired(req, res, next) {
-  if (!req.user || req.user.role !== "ADMIN") {
+  if (!req.user || String(req.user.role || "").toUpperCase() !== "ADMIN") {
     return res.status(403).json({ error: "Forbidden" });
   }
   next();
 }
 
+function normalizeRole(role) {
+  const r = String(role || "").trim().toUpperCase();
+  const ROLES = ["MEMBER", "CLIENT", "VENDEUR", "FOURNISSEUR", "RESTAURANT", "LIVREUR", "ADMIN"];
+  return ROLES.includes(r) ? r : "MEMBER";
+}
+
+async function getMyShops(pool, userId) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, slug, city, owner_id, shop_type
+       FROM shops
+       WHERE owner_id=?
+       ORDER BY id ASC`,
+      [userId]
+    );
+    return rows || [];
+  } catch {
+    // Si shop_type n'existe pas encore, on retombe sur une sélection basique
+    const [rows] = await pool.query(
+      `SELECT id, name, slug, city, owner_id
+       FROM shops
+       WHERE owner_id=?
+       ORDER BY id ASC`,
+      [userId]
+    );
+    return (rows || []).map((s) => ({ ...s, shop_type: null }));
+  }
+}
+
 /**
  * GET /api/user/me
+ * - retourne aussi shops + impersonation si présente dans le token
  */
 router.get("/me", authRequired, async (req, res) => {
   const pool = getPool();
@@ -32,7 +60,22 @@ router.get("/me", authRequired, async (req, res) => {
        FROM users WHERE id=?`,
       [req.user.id]
     );
-    res.json(rows[0] || null);
+
+    const me = rows[0] || null;
+    if (!me) return res.json(null);
+
+    const shops = await getMyShops(pool, req.user.id);
+
+    const actor_admin_id = req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
+    const impersonate_shop_id = req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+
+    res.json({
+      ...me,
+      shops,
+      impersonation: impersonate_shop_id
+        ? { actor_admin_id, impersonate_shop_id }
+        : null,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -42,8 +85,7 @@ router.get("/me", authRequired, async (req, res) => {
  * PUT /api/user/me
  */
 router.put("/me", authRequired, async (req, res) => {
-  const { first_name, last_name, avatar, ville, commune, quartier, sexe, phone } =
-    req.body || {};
+  const { first_name, last_name, avatar, ville, commune, quartier, sexe, phone } = req.body || {};
   const pool = getPool();
 
   const fields = [];
@@ -106,7 +148,11 @@ router.put("/me", authRequired, async (req, res) => {
        FROM users WHERE id=?`,
       [req.user.id]
     );
-    res.json(rows[0] || null);
+
+    const me = rows[0] || null;
+    const shops = await getMyShops(pool, req.user.id);
+
+    res.json({ ...me, shops });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -120,6 +166,7 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page || "1", 10));
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize || "20", 10)));
   const q = (req.query.q || "").toString().trim();
+  const role = (req.query.role || "").toString().trim();
 
   const pool = getPool();
   const where = [];
@@ -129,6 +176,10 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const like = `%${q}%`;
     where.push(`(phone LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR role LIKE ?)`);
     params.push(like, like, like, like);
+  }
+  if (role) {
+    where.push(`UPPER(role)=UPPER(?)`);
+    params.push(role);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -164,8 +215,7 @@ router.post("/", authRequired, adminRequired, async (req, res) => {
   const { phone, password, first_name, last_name, role } = req.body || {};
   if (!phone || !password) return res.status(400).json({ error: "phone & password required" });
 
-  const ROLES = ["MEMBER", "VENDEUR", "LIVREUR", "ADMIN"];
-  const _role = ROLES.includes(role) ? role : "MEMBER";
+  const _role = normalizeRole(role);
 
   const pool = getPool();
   try {
@@ -187,8 +237,7 @@ router.post("/", authRequired, adminRequired, async (req, res) => {
  */
 router.put("/:id", authRequired, adminRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { phone, first_name, last_name, ville, commune, quartier, sexe, role } =
-    req.body || {};
+  const { phone, first_name, last_name, ville, commune, quartier, sexe, role } = req.body || {};
 
   const fields = [];
   const values = [];
@@ -223,10 +272,9 @@ router.put("/:id", authRequired, adminRequired, async (req, res) => {
     values.push(_sexe);
   }
   if (typeof role !== "undefined") {
-    const ROLES = ["MEMBER", "VENDEUR", "LIVREUR", "ADMIN"];
-    if (!ROLES.includes(role)) return res.status(400).json({ error: "Invalid role" });
+    const _role = normalizeRole(role);
     fields.push("role=?");
-    values.push(role);
+    values.push(_role);
   }
 
   if (!fields.length) return res.status(400).json({ error: "No fields" });
@@ -258,12 +306,11 @@ router.put("/:id", authRequired, adminRequired, async (req, res) => {
 router.patch("/:id/role", authRequired, adminRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const { role } = req.body || {};
-  const ROLES = ["MEMBER", "VENDEUR", "LIVREUR", "ADMIN"];
-  if (!ROLES.includes(role)) return res.status(400).json({ error: "Invalid role" });
-
+  const _role = normalizeRole(role);
   const pool = getPool();
+
   try {
-    await pool.query(`UPDATE users SET role=? WHERE id=?`, [role, id]);
+    await pool.query(`UPDATE users SET role=? WHERE id=?`, [_role, id]);
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe, created_at
        FROM users WHERE id=?`,

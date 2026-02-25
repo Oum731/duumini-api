@@ -3,10 +3,10 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const bcrypt = require("bcryptjs");
 const { signAccess, signRefresh, verifyRefresh } = require("../utils/jwt");
+const { authRequired, requireRole } = require("../middlewares/auth");
 
 const router = Router();
 
-/* ===== Helper ville (libre) ===== */
 function normalizeVille(ville) {
   if (ville == null) return null;
   const v = String(ville).trim();
@@ -17,17 +17,7 @@ function normalizeVille(ville) {
  * POST /api/auth/register
  */
 router.post("/register", async (req, res) => {
-  const {
-    phone,
-    password,
-    first_name,
-    last_name,
-    avatar,
-    ville,
-    commune,
-    quartier,
-    sexe,
-  } = req.body || {};
+  const { phone, password, first_name, last_name, avatar, ville, commune, quartier, sexe } = req.body || {};
 
   if (!phone || !password) {
     return res.status(400).json({ error: "phone & password required" });
@@ -123,6 +113,45 @@ router.post("/login", async (req, res) => {
 });
 
 /**
+ * POST /api/auth/impersonate (ADMIN)
+ * Body: { vendor_shop_id } OR { vendor_user_id }
+ * -> renvoie un access_token admin avec impersonate_shop_id
+ */
+router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res) => {
+  const pool = getPool();
+
+  try {
+    let vendor_shop_id = req.body?.vendor_shop_id != null ? Number(req.body.vendor_shop_id) : null;
+    const vendor_user_id = req.body?.vendor_user_id != null ? Number(req.body.vendor_user_id) : null;
+
+    if (vendor_user_id != null) {
+      const [shops] = await pool.query(
+        `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
+        [vendor_user_id]
+      );
+      if (!shops.length) return res.status(404).json({ error: "Vendor shop not found for this user" });
+      vendor_shop_id = Number(shops[0].id);
+    }
+
+    if (!Number.isFinite(vendor_shop_id) || vendor_shop_id <= 0) {
+      return res.status(400).json({ error: "vendor_shop_id required" });
+    }
+
+    const access_token = signAccess({
+      id: req.user.id,
+      phone: req.user.phone,
+      role: "ADMIN",
+      actor_admin_id: req.user.id,
+      impersonate_shop_id: vendor_shop_id,
+    });
+
+    return res.json({ access_token, impersonate_shop_id: vendor_shop_id });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/**
  * POST /api/auth/refresh
  */
 router.post("/refresh", async (req, res) => {
@@ -136,14 +165,14 @@ router.post("/refresh", async (req, res) => {
     const pool = getPool();
 
     const [rows] = await pool.query(
-      `SELECT id, role FROM users WHERE id=? LIMIT 1`,
+      `SELECT id, role, phone FROM users WHERE id=? LIMIT 1`,
       [payload.id]
     );
 
     const dbUser = rows && rows[0];
     if (!dbUser) return res.status(401).json({ error: "invalid refresh_token" });
 
-    const access_token = signAccess({ id: dbUser.id, role: dbUser.role });
+    const access_token = signAccess({ id: dbUser.id, role: dbUser.role, phone: dbUser.phone });
     return res.json({ access_token });
   } catch {
     return res.status(401).json({ error: "invalid refresh_token" });

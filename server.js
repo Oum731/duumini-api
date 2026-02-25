@@ -31,6 +31,27 @@ const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 const locations = require("./src/routes/locations");
 
+// ✅ NEW: Supply chain routes
+let deliveryZones = null;
+let supplierProducts = null;
+let supplierOrders = null;
+
+try {
+  deliveryZones = require("./src/routes/delivery_zones");
+} catch (e) {
+  console.warn("[delivery_zones] route missing:", e?.message || e);
+}
+try {
+  supplierProducts = require("./src/routes/supplier_products");
+} catch (e) {
+  console.warn("[supplier_products] route missing:", e?.message || e);
+}
+try {
+  supplierOrders = require("./src/routes/supplier_orders");
+} catch (e) {
+  console.warn("[supplier_orders] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Admin validation/publish for AI content (SEO-only)
 let adminContentAiRoutes = null;
 try {
@@ -136,11 +157,10 @@ const corsOrigins =
 
 function isOriginAllowed(origin) {
   if (corsOrigins === true) return true;
-  if (!origin) return true; // curl/server-to-server
+  if (!origin) return true;
   if (Array.isArray(corsOrigins)) {
     if (corsOrigins.includes(origin)) return true;
 
-    // Option: autoriser via suffix (ex: *.duumini.com) si tu mets ".duumini.com" dans CORS_ORIGINS
     const lower = origin.toLowerCase();
     for (const o of corsOrigins) {
       if (o.startsWith(".") && lower.endsWith(o.toLowerCase())) return true;
@@ -181,7 +201,7 @@ app.use(
 if (rateLimit) {
   const apiLimiter = rateLimit({
     windowMs: 60 * 1000,
-    limit: 240, // ~4 req/sec
+    limit: 240,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests" },
@@ -189,7 +209,7 @@ if (rateLimit) {
 
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 60, // 60 tentatives / 15 min
+    limit: 60,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many auth attempts" },
@@ -210,8 +230,7 @@ app.use(cookieParser());
  * Logs
  * ========================= */
 morgan.token("id", (req) => req.id || "-");
-const logFormatDev =
-  ":id :method :url :status :res[content-length] - :response-time ms";
+const logFormatDev = ":id :method :url :status :res[content-length] - :response-time ms";
 const logFormatProd = ":id :method :url :status - :response-time ms";
 
 if (env.NODE_ENV !== "production") {
@@ -229,11 +248,9 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads")
 app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 
 /* =========================
- * Healthcheck (rapide)
+ * Healthcheck
  * ========================= */
-app.get("/health", (_req, res) =>
-  res.status(200).json({ ok: true, ts: Date.now() })
-);
+app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 app.get("/api/health", (_req, res) =>
   res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
 );
@@ -268,6 +285,11 @@ app.use("/api/products", productRatingsRouter);
 
 app.use("/api/locations", locations);
 
+// ✅ Supply chain routes (si présents)
+if (deliveryZones) app.use("/api/delivery-zones", deliveryZones);
+if (supplierProducts) app.use("/api/supplier-products", supplierProducts);
+if (supplierOrders) app.use("/api/supplier-orders", supplierOrders);
+
 /* =========================
  * Partage (OG tags)
  * ========================= */
@@ -289,7 +311,6 @@ if (authRequired && isAdmin) {
         OPENAI_API_KEY: !!env.OPENAI_API_KEY,
         OPENAI_MODEL: env.OPENAI_MODEL || null,
       },
-      // ✅ Ads disabled intentionally; we keep the info visible for legacy env
       meta: {
         META_AD_ACCOUNT_ID: !!env.META_AD_ACCOUNT_ID,
         META_AD_ACCESS_TOKEN: !!env.META_AD_ACCESS_TOKEN,
@@ -310,7 +331,6 @@ app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
 app.use("/api/snapshots", require("./src/routes/snapshots"));
 
-// ✅ NEW: Admin validates/publishes AI content drafts
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
@@ -331,10 +351,7 @@ if (RUN_CRON === "1") {
 
 /* =========================
  * ✅ AI ADS ROUTES DISABLED
- * =========================
- * Tu as demandé: plus de pubs.
- * On garde /api/ads désactivé volontairement.
- */
+ * ========================= */
 app.use("/api/ads", (_req, res) => {
   return res.status(410).json({ error: "ads_ai_disabled" });
 });
@@ -359,7 +376,6 @@ app.use((err, req, res, next) => {
  * ========================= */
 const server = http.createServer(app);
 
-// timeouts (évite des connexions qui pendouillent)
 server.keepAliveTimeout = 65_000;
 server.headersTimeout = 70_000;
 server.requestTimeout = 120_000;
@@ -368,12 +384,7 @@ let io = null;
 try {
   const { attachSocket } = require("./src/ws");
   io = attachSocket(server);
-  let io = null;
-try {
-  const { attachSocket } = require("./src/ws");
-  io = attachSocket(server);
 
-  // ✅ injecte io dans notify.js
   try {
     const { setIO } = require("./src/services/notify");
     setIO(io);
@@ -381,10 +392,6 @@ try {
   } catch (e) {
     console.warn("[notify] setIO inject failed:", e?.message || e);
   }
-} catch (e) {
-  console.warn("[ws] socket attach skipped:", e?.message || e);
-}
-
 } catch (e) {
   console.warn("[ws] socket attach skipped:", e?.message || e);
 }
@@ -421,9 +428,5 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) =>
-  console.error("[unhandledRejection]", err)
-);
-process.on("uncaughtException", (err) =>
-  console.error("[uncaughtException]", err)
-);
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
