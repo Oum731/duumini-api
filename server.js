@@ -330,7 +330,7 @@ if (authRequired && isAdmin) {
 app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
 app.use("/api/snapshots", require("./src/routes/snapshots"));
-
+app.use("/api/geo", require("./routes/geo"));
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
