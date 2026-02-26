@@ -1,4 +1,4 @@
-// users.js
+// api/routes/users.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, requireRole } = require("../middlewares/auth");
@@ -10,6 +10,11 @@ function normalizeVille(ville) {
   if (ville == null) return null;
   const v = String(ville).trim();
   return v ? v : null;
+}
+
+function toPosInt(x) {
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
 function adminRequired(req, res, next) {
@@ -36,7 +41,6 @@ async function getMyShops(pool, userId) {
     );
     return rows || [];
   } catch {
-    // Si shop_type n'existe pas encore, on retombe sur une sélection basique
     const [rows] = await pool.query(
       `SELECT id, name, slug, city, owner_id
        FROM shops
@@ -50,30 +54,41 @@ async function getMyShops(pool, userId) {
 
 /**
  * GET /api/user/me
- * - retourne aussi shops + impersonation si présente dans le token
+ * ✅ IMPORTANT:
+ * - si admin impersonate un vendeur, req.user.effective_user_id != req.user.id
+ * - on retourne le "me" effectif (le vendeur), MAIS on garde aussi actor_admin_id + impersonate_shop_id
  */
 router.get("/me", authRequired, async (req, res) => {
   const pool = getPool();
   try {
+    const effectiveUserId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    if (!effectiveUserId) return res.json(null);
+
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe
        FROM users WHERE id=?`,
-      [req.user.id]
+      [effectiveUserId]
     );
 
     const me = rows[0] || null;
     if (!me) return res.json(null);
 
-    const shops = await getMyShops(pool, req.user.id);
+    const shops = await getMyShops(pool, effectiveUserId);
 
-    const actor_admin_id = req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
-    const impersonate_shop_id = req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+    const actor_admin_id =
+      req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
+
+    const impersonate_shop_id =
+      req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+
+    const impersonate_user_id =
+      req.user.impersonate_user_id != null ? Number(req.user.impersonate_user_id) : null;
 
     res.json({
       ...me,
       shops,
       impersonation: impersonate_shop_id
-        ? { actor_admin_id, impersonate_shop_id }
+        ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,
     });
   } catch (e) {
@@ -83,10 +98,14 @@ router.get("/me", authRequired, async (req, res) => {
 
 /**
  * PUT /api/user/me
+ * ✅ Si admin impersonate -> update le profil du vendeur (effective_user_id)
  */
 router.put("/me", authRequired, async (req, res) => {
   const { first_name, last_name, avatar, ville, commune, quartier, sexe, phone } = req.body || {};
   const pool = getPool();
+
+  const effectiveUserId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+  if (!effectiveUserId) return res.status(401).json({ error: "Unauthorized" });
 
   const fields = [];
   const values = [];
@@ -133,7 +152,7 @@ router.put("/me", authRequired, async (req, res) => {
     if (typeof phone !== "undefined") {
       const [dups] = await pool.query(
         "SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1",
-        [String(phone).trim(), req.user.id]
+        [String(phone).trim(), effectiveUserId]
       );
       if (dups && dups.length) {
         return res.status(409).json({ error: "Phone already exists" });
@@ -141,18 +160,33 @@ router.put("/me", authRequired, async (req, res) => {
     }
 
     const sql = `UPDATE users SET ${fields.join(", ")} WHERE id=?`;
-    await pool.query(sql, [...values, req.user.id]);
+    await pool.query(sql, [...values, effectiveUserId]);
 
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe
        FROM users WHERE id=?`,
-      [req.user.id]
+      [effectiveUserId]
     );
 
     const me = rows[0] || null;
-    const shops = await getMyShops(pool, req.user.id);
+    const shops = await getMyShops(pool, effectiveUserId);
 
-    res.json({ ...me, shops });
+    const actor_admin_id =
+      req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
+
+    const impersonate_shop_id =
+      req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+
+    const impersonate_user_id =
+      req.user.impersonate_user_id != null ? Number(req.user.impersonate_user_id) : null;
+
+    res.json({
+      ...me,
+      shops,
+      impersonation: impersonate_shop_id
+        ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
+        : null,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -186,10 +220,7 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   const offset = (page - 1) * pageSize;
 
   try {
-    const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) AS total FROM users ${whereSql}`,
-      params
-    );
+    const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM users ${whereSql}`, params);
 
     const [rows] = await pool.query(
       `
@@ -283,10 +314,10 @@ router.put("/:id", authRequired, adminRequired, async (req, res) => {
     const pool = getPool();
 
     if (typeof phone !== "undefined") {
-      const [dups] = await pool.query(
-        "SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1",
-        [String(phone).trim(), id]
-      );
+      const [dups] = await pool.query("SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1", [
+        String(phone).trim(),
+        id,
+      ]);
       if (dups && dups.length) return res.status(409).json({ error: "Phone already exists" });
     }
 

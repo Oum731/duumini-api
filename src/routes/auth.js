@@ -13,6 +13,11 @@ function normalizeVille(ville) {
   return v ? v : null;
 }
 
+function toPosInt(x) {
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
 /**
  * POST /api/auth/register
  */
@@ -114,16 +119,21 @@ router.post("/login", async (req, res) => {
 
 /**
  * POST /api/auth/impersonate (ADMIN)
- * Body: { vendor_shop_id } OR { vendor_user_id }
- * -> renvoie un access_token admin avec impersonate_shop_id
+ * Body:
+ *  - { vendor_shop_id } OR { vendor_user_id }
+ *
+ * ✅ Support vendeur OU restaurant:
+ * - on résout owner_id via shop_id si besoin
+ * - on renvoie access_token ADMIN + impersonate_shop_id + impersonate_user_id
  */
 router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res) => {
   const pool = getPool();
 
   try {
-    let vendor_shop_id = req.body?.vendor_shop_id != null ? Number(req.body.vendor_shop_id) : null;
-    const vendor_user_id = req.body?.vendor_user_id != null ? Number(req.body.vendor_user_id) : null;
+    let vendor_shop_id = toPosInt(req.body?.vendor_shop_id);
+    let vendor_user_id = toPosInt(req.body?.vendor_user_id);
 
+    // si user_id fourni -> trouver son shop
     if (vendor_user_id != null) {
       const [shops] = await pool.query(
         `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
@@ -133,8 +143,26 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
       vendor_shop_id = Number(shops[0].id);
     }
 
-    if (!Number.isFinite(vendor_shop_id) || vendor_shop_id <= 0) {
-      return res.status(400).json({ error: "vendor_shop_id required" });
+    if (!vendor_shop_id) return res.status(400).json({ error: "vendor_shop_id required" });
+
+    // shop existe ? + owner_id ?
+    const [sr] = await pool.query(
+      `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+      [vendor_shop_id]
+    );
+    const shop = sr && sr[0];
+    if (!shop) return res.status(404).json({ error: "Shop not found" });
+
+    if (!vendor_user_id && shop.owner_id) vendor_user_id = toPosInt(shop.owner_id);
+
+    // on vérifie que target user existe
+    if (vendor_user_id) {
+      const [ur] = await pool.query(
+        `SELECT id, role FROM users WHERE id=? LIMIT 1`,
+        [vendor_user_id]
+      );
+      const target = ur && ur[0];
+      if (!target) return res.status(404).json({ error: "Target user not found" });
     }
 
     const access_token = signAccess({
@@ -143,9 +171,14 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
       role: "ADMIN",
       actor_admin_id: req.user.id,
       impersonate_shop_id: vendor_shop_id,
+      impersonate_user_id: vendor_user_id || null,
     });
 
-    return res.json({ access_token, impersonate_shop_id: vendor_shop_id });
+    return res.json({
+      access_token,
+      impersonate_shop_id: vendor_shop_id,
+      impersonate_user_id: vendor_user_id || null,
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
