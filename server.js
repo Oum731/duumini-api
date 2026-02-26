@@ -133,7 +133,7 @@ if (helmet) {
     helmet({
       contentSecurityPolicy: false,
       crossOriginResourcePolicy: { policy: "cross-origin" },
-    })
+    }),
   );
 }
 
@@ -187,12 +187,16 @@ app.use(
       "Cache-Control",
       "Pragma",
       "X-Request-Id",
+
+      // ✅ Duumini custom headers
+      "x-duumini-city",
+      "X-Duumini-City",
     ],
     exposedHeaders: ["Content-Type", "Content-Length", "X-Request-Id"],
     preflightContinue: false,
     optionsSuccessStatus: 204,
     maxAge: 86400,
-  })
+  }),
 );
 
 /* =========================
@@ -230,7 +234,8 @@ app.use(cookieParser());
  * Logs
  * ========================= */
 morgan.token("id", (req) => req.id || "-");
-const logFormatDev = ":id :method :url :status :res[content-length] - :response-time ms";
+const logFormatDev =
+  ":id :method :url :status :res[content-length] - :response-time ms";
 const logFormatProd = ":id :method :url :status - :response-time ms";
 
 if (env.NODE_ENV !== "production") {
@@ -244,15 +249,20 @@ if (env.NODE_ENV !== "production") {
  * ========================= */
 app.use("/media", express.static("media", { maxAge: "7d", index: false }));
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
+const UPLOAD_DIR =
+  process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 
 /* =========================
  * Healthcheck
  * ========================= */
-app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
+app.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true, ts: Date.now() }),
+);
 app.get("/api/health", (_req, res) =>
-  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
+  res
+    .status(200)
+    .json({ ok: true, pid: process.pid, uptime: process.uptime() }),
 );
 
 /* =========================
@@ -402,7 +412,9 @@ const RUN_WORKER =
   (env.NODE_ENV === "production" ? "1" : "0");
 if (RUN_WORKER === "1" && io) {
   try {
-    const { startNotificationWorker } = require("./src/workers/notificationWorker");
+    const {
+      startNotificationWorker,
+    } = require("./src/workers/notificationWorker");
     startNotificationWorker(io);
     console.log("[worker] notificationWorker started");
   } catch (e) {
@@ -428,5 +440,9 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+process.on("unhandledRejection", (err) =>
+  console.error("[unhandledRejection]", err),
+);
+process.on("uncaughtException", (err) =>
+  console.error("[uncaughtException]", err),
+);
