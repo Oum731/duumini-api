@@ -6,7 +6,13 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { authRequired, requireRole, isVendor, isAdmin } = require("../middlewares/auth");
+const {
+  authRequired,
+  requireRole,
+  isVendor,
+  isAdmin,
+  isRestaurant,
+} = require("../middlewares/auth");
 
 const cloudinary = require("cloudinary").v2;
 const { env } = require("../lib/env");
@@ -90,6 +96,23 @@ function parseBoolQuery(req, key, defaultValue = 0) {
 }
 
 /* =========================================================
+ * Acting user helpers (impersonation safe)
+ * ========================================================= */
+function actingUserId(req) {
+  const u = req?.user || null;
+  const id = Number(u?.effective_user_id || u?.id || 0);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+function actingShopId(req) {
+  const u = req?.user || null;
+  const id = Number(u?.effective_shop_id || u?.impersonate_shop_id || 0);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+function isActingVendorOrRestaurant(req) {
+  return isVendor(req?.user) || isRestaurant(req?.user);
+}
+
+/* =========================================================
  * Drinks (Boissons) helpers (NO breaking change)
  * - category slug: 'boissons'
  * - fallback id: 8
@@ -105,9 +128,10 @@ async function getDrinkCategoryIdCached(pool) {
 
   const conn = await pool.getConnection();
   try {
-    const [rows] = await conn.query(`SELECT id FROM categories WHERE LOWER(TRIM(slug))=? LIMIT 1`, [
-      DRINK_CATEGORY_SLUG,
-    ]);
+    const [rows] = await conn.query(
+      `SELECT id FROM categories WHERE LOWER(TRIM(slug))=? LIMIT 1`,
+      [DRINK_CATEGORY_SLUG]
+    );
     const id = Number(rows?.[0]?.id || 0);
     _drinkCatId = id > 0 ? id : DRINK_CATEGORY_ID_FALLBACK;
     _drinkCatLoaded = true;
@@ -207,6 +231,45 @@ function addSupplierAggToRow(row) {
   if (!Object.prototype.hasOwnProperty.call(row, "supplier_cost")) row.supplier_cost = null;
   if (!Object.prototype.hasOwnProperty.call(row, "supplier_last_supply_at")) row.supplier_last_supply_at = null;
   return row;
+}
+
+/* =========================================================
+ * Shop type detection (NO breaking if column missing)
+ * ========================================================= */
+let _shopTypeColLoaded = false;
+let _shopTypeCol = null;
+
+async function detectShopTypeColumn(conn) {
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'shops'
+        AND COLUMN_NAME = 'shop_type'
+      LIMIT 1`
+  );
+  return rows?.length ? "shop_type" : null;
+}
+
+async function getShopTypeColCached(pool) {
+  if (_shopTypeColLoaded) return _shopTypeCol;
+  const conn = await pool.getConnection();
+  try {
+    _shopTypeCol = await detectShopTypeColumn(conn);
+    _shopTypeColLoaded = true;
+    return _shopTypeCol;
+  } finally {
+    conn.release();
+  }
+}
+
+function normalizeShopType(x) {
+  const v = String(x || "").trim().toUpperCase();
+  if (!v) return null;
+  if (v === "VENDOR" || v === "VENDEUR" || v === "SHOP") return "VENDOR";
+  if (v === "SUPPLIER" || v === "FOURNISSEUR") return "SUPPLIER";
+  if (v === "RESTAURANT") return "RESTAURANT";
+  return v;
 }
 
 /* =========================================================
@@ -538,9 +601,14 @@ async function assertCanMutateProduct(conn, reqUser, productId) {
   );
   if (!prod) return { ok: false, status: 404, error: "Not found" };
 
-  if (isVendor(reqUser) && String(prod.owner_id) !== String(reqUser.id)) {
-    return { ok: false, status: 403, error: "Forbidden" };
+  const actingId = Number(reqUser?.effective_user_id || reqUser?.id || 0);
+
+  if (isVendor(reqUser) || isRestaurant(reqUser)) {
+    if (String(prod.owner_id) !== String(actingId)) {
+      return { ok: false, status: 403, error: "Forbidden" };
+    }
   }
+
   return { ok: true, prod };
 }
 
@@ -586,9 +654,9 @@ async function attachVariantsToProducts(pool, items, opts = {}) {
   });
 }
 
-/**
- * ✅ LIST PRODUCTS (supports vendor ownerId filtering)
- */
+/* =========================================================
+ * LIST PRODUCTS (supports shop_type filtering + ownerId)
+ * ========================================================= */
 async function listProducts(pool, opts) {
   const {
     limit,
@@ -606,6 +674,9 @@ async function listProducts(pool, opts) {
     ownerId,
     onlyDrinks,
     excludeDrinks,
+
+    // ✅ new: catalogue mode
+    catalogueMode, // "PUBLIC_CLIENT" | "SUPPLIER_ONLY" | null
   } = opts || {};
 
   const whereParts = [];
@@ -690,9 +761,22 @@ async function listProducts(pool, opts) {
     params.push(drinkCatId);
   }
 
+  // ✅ shop_type filtering (NO breaking if missing)
+  const shopTypeCol = await getShopTypeColCached(pool);
+  if (shopTypeCol) {
+    if (catalogueMode === "PUBLIC_CLIENT") {
+      // Clients: venders + restaurants
+      whereParts.push(
+        `(UPPER(COALESCE(s.${shopTypeCol}, 'VENDOR')) IN ('VENDOR','VENDEUR','SHOP','RESTAURANT'))`
+      );
+    } else if (catalogueMode === "SUPPLIER_ONLY") {
+      // Vendors/Restaurants: supplier catalogue
+      whereParts.push(`(UPPER(COALESCE(s.${shopTypeCol}, '')) IN ('SUPPLIER','FOURNISSEUR'))`);
+    }
+  }
+
   const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
 
-  // supplier agg (optional)
   const supplierMeta = await getSupplierMetaCached(pool);
   const supplierAgg = supplierAggSelect(supplierMeta);
 
@@ -715,7 +799,8 @@ async function listProducts(pool, opts) {
       s.name AS shop_name,
       s.logo AS shop_logo,
       s.cover AS shop_cover,
-      s.city AS shop_city,
+      s.city AS shop_city
+      ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
       c.name AS category_name,
       c.slug AS category_slug,
@@ -766,6 +851,8 @@ async function listProducts(pool, opts) {
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
 
+      shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
+
       supplier_stock: r.supplier_stock == null ? null : Number(r.supplier_stock),
       supplier_cost: r.supplier_cost == null ? null : Number(r.supplier_cost),
       supplier_last_supply_at: r.supplier_last_supply_at ?? null,
@@ -805,9 +892,9 @@ function pickFilters(req) {
   };
 }
 
-/**
- * PUBLIC LIST (catalogue)
- */
+/* =========================================================
+ * PUBLIC LIST (catalogue client) => vendors + restaurants
+ * ========================================================= */
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActive = parseOnlyActive(req);
@@ -846,6 +933,7 @@ async function listHandler(req, res, next) {
       ownerId: null,
       onlyDrinks,
       excludeDrinks,
+      catalogueMode: "PUBLIC_CLIENT",
     });
 
     res.json({
@@ -880,6 +968,7 @@ async function listFoodHandler(req, res, next) {
       includeVariants: false,
       onlyWithVariants: 0,
       ownerId: null,
+      catalogueMode: "PUBLIC_CLIENT",
     });
 
     res.json({
@@ -914,6 +1003,7 @@ async function listMarketHandler(req, res, next) {
       includeVariants: false,
       onlyWithVariants: 0,
       ownerId: null,
+      catalogueMode: "PUBLIC_CLIENT",
     });
 
     res.json({
@@ -958,6 +1048,7 @@ async function listShopDrinksHandler(req, res, next) {
       includeVariants: false,
       onlyWithVariants: 0,
       ownerId: null,
+      catalogueMode: "PUBLIC_CLIENT",
     });
 
     res.json({
@@ -969,9 +1060,67 @@ async function listShopDrinksHandler(req, res, next) {
   }
 }
 
-/**
- * ✅ MANAGE LIST (admin/vendor)
- */
+/* =========================================================
+ * ✅ SUPPLIER CATALOGUE (vendors/restaurants/admin only)
+ * - vendors/restaurants voient uniquement les produits des fournisseurs
+ * - admin peut voir aussi (et en impersonation ça marche)
+ * GET /api/products/suppliers?onlyActive=1&q=...
+ * ========================================================= */
+async function listSuppliersCatalogueHandler(req, res, next) {
+  const { page, pageSize, offset, limit } = getPagination(req);
+  const onlyActive = parseOnlyActive(req);
+  const {
+    categoryId,
+    subCategoryId,
+    shopId,
+    q,
+    vertical,
+    includeVariants,
+    onlyWithVariants,
+    onlyDrinks,
+    excludeDrinks,
+  } = pickFilters(req);
+
+  const pool = getPool();
+  try {
+    const citiesCol = await getCitiesColCached(pool);
+
+    const v = normalizeVertical(vertical, null);
+    const include = includeVariants === 1 ? true : v === "FASHION" ? true : false;
+
+    const { rows, total } = await listProducts(pool, {
+      limit,
+      offset,
+      channel: null,
+      onlyActive,
+      onlyPromos: false,
+      categoryId,
+      subCategoryId,
+      shopId,
+      q,
+      vertical,
+      includeVariants: include,
+      onlyWithVariants,
+      ownerId: null,
+      onlyDrinks,
+      excludeDrinks,
+      catalogueMode: "SUPPLIER_ONLY",
+    });
+
+    res.json({
+      items: withCities(rows, citiesCol),
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/* =========================================================
+ * ✅ MANAGE LIST (admin/vendor/restaurant)
+ * - vendeur/resto => uniquement ses produits (ownerId=effective_user_id)
+ * - admin => peut filtrer shopId; si impersonation => comme vendeur/resto
+ * ========================================================= */
 async function listManageHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
   const onlyActive = parseOnlyActive(req);
@@ -994,8 +1143,11 @@ async function listManageHandler(req, res, next) {
     const v = normalizeVertical(vertical, null);
     const include = includeVariants === 1 ? true : v === "FASHION" ? true : false;
 
-    const ownerId = isVendor(req.user) ? req.user.id : null;
-    const safeShopId = isVendor(req.user) ? null : shopId;
+    const actorId = actingUserId(req);
+    const ownerId = isActingVendorOrRestaurant(req) ? actorId : null;
+
+    // si vendeur/resto => ignore shopId param (pour éviter d’aller voir autre shop)
+    const safeShopId = isActingVendorOrRestaurant(req) ? null : shopId;
 
     const { rows, total } = await listProducts(pool, {
       limit,
@@ -1013,6 +1165,7 @@ async function listManageHandler(req, res, next) {
       ownerId,
       onlyDrinks,
       excludeDrinks,
+      catalogueMode: null,
     });
 
     res.json({
@@ -1034,6 +1187,7 @@ async function getManageByIdHandler(req, res, next) {
     const citiesCol = await getCitiesColCached(pool);
     const supplierMeta = await getSupplierMetaCached(pool);
     const supplierAgg = supplierAggSelect(supplierMeta);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rows] = await conn.query(
       `SELECT
@@ -1042,7 +1196,8 @@ async function getManageByIdHandler(req, res, next) {
          s.name AS shop_name,
          s.logo AS shop_logo,
          s.cover AS shop_cover,
-         s.city AS shop_city,
+         s.city AS shop_city
+         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
          c.name AS category_name,
          c.slug AS category_slug,
@@ -1070,7 +1225,8 @@ async function getManageByIdHandler(req, res, next) {
     const rawProduct = rows[0];
     if (!rawProduct) return res.status(404).json({ error: "Not found" });
 
-    if (isVendor(req.user) && String(rawProduct.owner_id) !== String(req.user.id)) {
+    const actorId = actingUserId(req);
+    if (isActingVendorOrRestaurant(req) && String(rawProduct.owner_id) !== String(actorId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -1104,7 +1260,10 @@ async function getManageByIdHandler(req, res, next) {
     addSupplierAggToRow(rawProduct);
 
     const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price = rawProduct.min_price == null || rawProduct.min_price === "" ? null : Number(rawProduct.min_price);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
 
     const base = stripDuuminiRateFromProduct(rawProduct);
     const product = withPromoComputed({
@@ -1112,6 +1271,7 @@ async function getManageByIdHandler(req, res, next) {
       has_variants: variants_count > 0,
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
+      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
 
       supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
       supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
@@ -1141,6 +1301,7 @@ async function getManageBySlugHandler(req, res, next) {
     const citiesCol = await getCitiesColCached(pool);
     const supplierMeta = await getSupplierMetaCached(pool);
     const supplierAgg = supplierAggSelect(supplierMeta);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rows] = await conn.query(
       `SELECT
@@ -1149,7 +1310,8 @@ async function getManageBySlugHandler(req, res, next) {
          s.name AS shop_name,
          s.logo AS shop_logo,
          s.cover AS shop_cover,
-         s.city AS shop_city,
+         s.city AS shop_city
+         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
          c.name AS category_name,
          c.slug AS category_slug,
@@ -1176,7 +1338,8 @@ async function getManageBySlugHandler(req, res, next) {
     const rawProduct = rows[0];
     if (!rawProduct) return res.status(404).json({ error: "Not found" });
 
-    if (isVendor(req.user) && String(rawProduct.owner_id) !== String(req.user.id)) {
+    const actorId = actingUserId(req);
+    if (isActingVendorOrRestaurant(req) && String(rawProduct.owner_id) !== String(actorId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -1210,7 +1373,10 @@ async function getManageBySlugHandler(req, res, next) {
     addSupplierAggToRow(rawProduct);
 
     const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price = rawProduct.min_price == null || rawProduct.min_price === "" ? null : Number(rawProduct.min_price);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
 
     const base = stripDuuminiRateFromProduct(rawProduct);
     const product = withPromoComputed({
@@ -1218,6 +1384,7 @@ async function getManageBySlugHandler(req, res, next) {
       has_variants: variants_count > 0,
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
+      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
 
       supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
       supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
@@ -1251,12 +1418,35 @@ router.get("/fashion", async (req, res, next) => {
 // ✅ DRINKS (public) - list drinks for a shop
 router.get("/drinks", listShopDrinksHandler);
 
-// ✅ MANAGE routes (secure)
-router.get("/manage", authRequired, requireRole("VENDEUR", "ADMIN"), listManageHandler);
-router.get("/manage/slug/:slug", authRequired, requireRole("VENDEUR", "ADMIN"), getManageBySlugHandler);
-router.get("/manage/:id", authRequired, requireRole("VENDEUR", "ADMIN"), getManageByIdHandler);
+// ✅ SUPPLIER catalogue (secure)
+router.get(
+  "/suppliers",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  listSuppliersCatalogueHandler
+);
 
-// ✅ PUBLIC catalogue routes
+// ✅ MANAGE routes (secure)
+router.get(
+  "/manage",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  listManageHandler
+);
+router.get(
+  "/manage/slug/:slug",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  getManageBySlugHandler
+);
+router.get(
+  "/manage/:id",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  getManageByIdHandler
+);
+
+// ✅ PUBLIC catalogue routes (clients)
 router.get("/", listHandler);
 router.get("/african-food", listFoodHandler);
 router.get("/african-market", listMarketHandler);
@@ -1297,6 +1487,7 @@ router.get("/promotions", async (req, res, next) => {
         includeVariants === 1 ? true : normalizeVertical(vertical, null) === "FASHION",
       onlyWithVariants: 0,
       ownerId: null,
+      catalogueMode: "PUBLIC_CLIENT",
     });
 
     res.json(withCities(rows, citiesCol).slice(0, limit));
@@ -1311,6 +1502,7 @@ router.get("/top-ordered", async (req, res, next) => {
 
   try {
     const citiesCol = await getCitiesColCached(pool);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rowsRaw] = await pool.query(
       `
@@ -1319,7 +1511,8 @@ router.get("/top-ordered", async (req, res, next) => {
         s.name AS shop_name,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
-        s.city AS shop_city,
+        s.city AS shop_city
+        ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
         c.name AS category_name,
         c.slug AS category_slug,
@@ -1349,7 +1542,14 @@ router.get("/top-ordered", async (req, res, next) => {
       [limit]
     );
 
-    const mapped = (rowsRaw || []).map((r) => withPromoComputed(stripDuuminiRateFromProduct(r)));
+    const mapped = (rowsRaw || []).map((r) => {
+      const base = withPromoComputed(stripDuuminiRateFromProduct(r));
+      return {
+        ...base,
+        shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
+      };
+    });
+
     res.json(withCities(mapped, citiesCol));
   } catch (e) {
     next(e);
@@ -1363,6 +1563,7 @@ router.get("/top-rated", async (req, res, next) => {
 
   try {
     const citiesCol = await getCitiesColCached(pool);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rowsRaw] = await pool.query(
       `
@@ -1371,7 +1572,8 @@ router.get("/top-rated", async (req, res, next) => {
         s.name AS shop_name,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
-        s.city AS shop_city,
+        s.city AS shop_city
+        ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
         c.name AS category_name,
         c.slug AS category_slug,
@@ -1400,7 +1602,14 @@ router.get("/top-rated", async (req, res, next) => {
       [minCount, limit]
     );
 
-    const mapped = (rowsRaw || []).map((r) => withPromoComputed(stripDuuminiRateFromProduct(r)));
+    const mapped = (rowsRaw || []).map((r) => {
+      const base = withPromoComputed(stripDuuminiRateFromProduct(r));
+      return {
+        ...base,
+        shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
+      };
+    });
+
     res.json(withCities(mapped, citiesCol));
   } catch (e) {
     next(e);
@@ -1409,7 +1618,7 @@ router.get("/top-rated", async (req, res, next) => {
 
 /* =========================
  * VARIANTS API
- * =======================*/
+ * ======================= */
 router.get("/:id/variants", async (req, res, next) => {
   const productId = parseIdParam(req.params.id);
   if (!productId) return next();
@@ -1432,7 +1641,7 @@ router.get("/:id/variants", async (req, res, next) => {
 router.put(
   "/variants/:variantId",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   express.json(),
   async (req, res, next) => {
     const variantId = parseIdParam(req.params.variantId);
@@ -1450,7 +1659,9 @@ router.put(
         [variantId]
       );
       if (!v) return res.status(404).json({ error: "Not found" });
-      if (isVendor(req.user) && String(v.owner_id) !== String(req.user.id)) {
+
+      const actorId = actingUserId(req);
+      if (isActingVendorOrRestaurant(req) && String(v.owner_id) !== String(actorId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1513,7 +1724,7 @@ router.put(
 router.delete(
   "/variants/:variantId",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   async (req, res, next) => {
     const variantId = parseIdParam(req.params.variantId);
     if (!variantId) return next();
@@ -1530,7 +1741,9 @@ router.delete(
         [variantId]
       );
       if (!v) return res.status(404).json({ error: "Not found" });
-      if (isVendor(req.user) && String(v.owner_id) !== String(req.user.id)) {
+
+      const actorId = actingUserId(req);
+      if (isActingVendorOrRestaurant(req) && String(v.owner_id) !== String(actorId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1547,7 +1760,7 @@ router.delete(
 router.post(
   "/:id/variants",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   express.json(),
   async (req, res, next) => {
     const productId = parseIdParam(req.params.id);
@@ -1623,6 +1836,7 @@ router.get("/slug/:slug", async (req, res, next) => {
     const citiesCol = await getCitiesColCached(pool);
     const supplierMeta = await getSupplierMetaCached(pool);
     const supplierAgg = supplierAggSelect(supplierMeta);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rows] = await conn.query(
       `SELECT
@@ -1630,7 +1844,8 @@ router.get("/slug/:slug", async (req, res, next) => {
          s.name AS shop_name,
          s.logo AS shop_logo,
          s.cover AS shop_cover,
-         s.city AS shop_city,
+         s.city AS shop_city
+         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
          c.name AS category_name,
          c.slug AS category_slug,
@@ -1687,7 +1902,10 @@ router.get("/slug/:slug", async (req, res, next) => {
     addSupplierAggToRow(rawProduct);
 
     const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price = rawProduct.min_price == null || rawProduct.min_price === "" ? null : Number(rawProduct.min_price);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
 
     const base = stripDuuminiRateFromProduct(rawProduct);
     const product = withPromoComputed({
@@ -1695,6 +1913,7 @@ router.get("/slug/:slug", async (req, res, next) => {
       has_variants: variants_count > 0,
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
+      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
 
       supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
       supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
@@ -1725,6 +1944,7 @@ router.get("/:id", async (req, res, next) => {
     const citiesCol = await getCitiesColCached(pool);
     const supplierMeta = await getSupplierMetaCached(pool);
     const supplierAgg = supplierAggSelect(supplierMeta);
+    const shopTypeCol = await getShopTypeColCached(pool);
 
     const [rows] = await conn.query(
       `SELECT
@@ -1732,7 +1952,8 @@ router.get("/:id", async (req, res, next) => {
          s.name AS shop_name,
          s.logo AS shop_logo,
          s.cover AS shop_cover,
-         s.city AS shop_city,
+         s.city AS shop_city
+         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
 
          c.name AS category_name,
          c.slug AS category_slug,
@@ -1790,7 +2011,10 @@ router.get("/:id", async (req, res, next) => {
     addSupplierAggToRow(rawProduct);
 
     const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price = rawProduct.min_price == null || rawProduct.min_price === "" ? null : Number(rawProduct.min_price);
+    const min_price =
+      rawProduct.min_price == null || rawProduct.min_price === ""
+        ? null
+        : Number(rawProduct.min_price);
 
     const base = stripDuuminiRateFromProduct(rawProduct);
     const product = withPromoComputed({
@@ -1798,6 +2022,7 @@ router.get("/:id", async (req, res, next) => {
       has_variants: variants_count > 0,
       min_price: Number.isFinite(min_price) ? min_price : null,
       variants_count,
+      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
 
       supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
       supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
@@ -1821,7 +2046,7 @@ router.get("/:id", async (req, res, next) => {
 router.post(
   "/",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   upload.array("images[]", 8),
   async (req, res, next) => {
     const {
@@ -1855,15 +2080,31 @@ router.post(
       const citiesCol = await getCitiesColCached(pool);
 
       let finalShopId = null;
-      const role = String(req.user?.role || "").toUpperCase();
 
-      if (role === "VENDEUR") {
-        const [[shop]] = await conn.query(`SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`, [
-          req.user.id,
-        ]);
-        if (!shop) return res.status(400).json({ error: "Aucune boutique associée à ce vendeur" });
-        finalShopId = Number(shop.id);
-      } else if (role === "ADMIN") {
+      const actorId = actingUserId(req);
+      const forcedShopId = actingShopId(req);
+
+      if (isActingVendorOrRestaurant(req)) {
+        // ✅ si impersonation shop_id fourni => priorité
+        if (forcedShopId) {
+          const [[shop]] = await conn.query(
+            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            [forcedShopId]
+          );
+          if (!shop) return res.status(400).json({ error: "Boutique invalide (impersonate_shop_id)" });
+          if (String(shop.owner_id) !== String(actorId)) {
+            return res.status(403).json({ error: "Forbidden" });
+          }
+          finalShopId = Number(shop.id);
+        } else {
+          const [[shop]] = await conn.query(
+            `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
+            [actorId]
+          );
+          if (!shop) return res.status(400).json({ error: "Aucune boutique associée à ce compte" });
+          finalShopId = Number(shop.id);
+        }
+      } else if (isAdmin(req.user)) {
         const sid = Number(shop_id) || 0;
         if (!sid) return res.status(400).json({ error: "shop_id requis pour la création par un admin" });
         const [[shop]] = await conn.query(`SELECT id FROM shops WHERE id=? LIMIT 1`, [sid]);
@@ -1875,7 +2116,6 @@ router.post(
 
       if (!name || price == null) return res.status(400).json({ error: "name et price requis" });
 
-      // ✅ Drinks: allow category=boissons without sub_category
       const drinkCatId = await getDrinkCategoryIdCached(pool);
       const catIdNum = category_id ? Number(category_id) : null;
       const isDrink = isDrinkCategoryId(catIdNum, drinkCatId);
@@ -1999,9 +2239,10 @@ router.post(
 
       const channel = finalVertical === "FOOD" ? "african-food" : "african-market";
 
-      // notifications queue
       try {
-        const [userRows] = await pool.query(`SELECT DISTINCT user_id FROM user_devices WHERE provider = 'pushy'`);
+        const [userRows] = await pool.query(
+          `SELECT DISTINCT user_id FROM user_devices WHERE provider = 'pushy'`
+        );
         if (userRows.length) {
           const payload = {
             title: "Nouveau produit disponible",
@@ -2021,7 +2262,6 @@ router.post(
         }
       } catch {}
 
-      // ws emit
       try {
         const { getIO, emitToShops } = require("../ws");
         const io = getIO && getIO();
@@ -2049,7 +2289,7 @@ router.post(
 router.put(
   "/:id",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   upload.array("images[]", 8),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
@@ -2093,7 +2333,8 @@ router.put(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
+      const actorId = actingUserId(req);
+      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2274,7 +2515,7 @@ router.put(
 router.put(
   "/:id/images",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   upload.array("images[]", 8),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
@@ -2292,7 +2533,8 @@ router.put(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
+      const actorId = actingUserId(req);
+      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2342,7 +2584,7 @@ router.put(
 router.delete(
   "/:id",
   authRequired,
-  requireRole("VENDEUR", "ADMIN"),
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   async (req, res, next) => {
     const id = parseIdParam(req.params.id);
     if (!id) return next();
@@ -2359,7 +2601,8 @@ router.delete(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      if (isVendor(req.user) && String(prod.owner_id) !== String(req.user.id)) {
+      const actorId = actingUserId(req);
+      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2370,7 +2613,6 @@ router.delete(
 
       await conn.beginTransaction();
 
-      // If supplier tables exist, delete supplier_products linked rows (no error if table missing)
       try {
         const meta = await getSupplierMetaCached(pool);
         if (meta?.enabled) {
