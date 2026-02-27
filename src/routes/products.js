@@ -79,10 +79,21 @@ function safeJsonParse(x, fallback = null) {
   }
 }
 
+/**
+ * ✅ Vertical strict
+ * - ton DB: sub_categories.vertical existe (confirmé)
+ * - FOOD = plats + boissons
+ */
 function normalizeVertical(value, fallback = null) {
   if (value == null) return fallback;
-  const v = String(value || "").trim().toUpperCase();
-  if (v === "FOOD" || v === "MARKET" || v === "FASHION") return v;
+
+  const raw = String(value || "").trim();
+  const noAccent = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const v = noAccent.trim().toUpperCase();
+
+  if (v === "FOOD") return "FOOD";
+  if (v === "MARKET" || v === "MARCHE" || v === "MARCHÉ") return "MARKET";
+  if (v === "FASHION") return "FASHION";
   return fallback;
 }
 
@@ -509,6 +520,9 @@ function stripDuuminiRateFromProduct(row) {
   return { ...rest, price: clientPrice, vendor_price: vendorNet };
 }
 
+/**
+ * ✅ sub_categories.vertical existe => on récupère vertical ici
+ */
 async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   const sid = Number(sub_category_id) || 0;
   if (!sid) return null;
@@ -674,23 +688,24 @@ async function listProducts(pool, opts) {
     ownerId,
     onlyDrinks,
     excludeDrinks,
-
-    // ✅ new: catalogue mode
     catalogueMode, // "PUBLIC_CLIENT" | "SUPPLIER_ONLY" | null
   } = opts || {};
 
   const whereParts = [];
   const params = [];
 
+  // ✅ IMPORTANT: on ne se base PLUS sur sc.slug='food'
+  // - african-food => p.vertical='FOOD' (inclut plats + boissons)
+  // - african-market => p.vertical='MARKET'
   const v = normalizeVertical(vertical, null);
   if (v) {
     whereParts.push("p.vertical = ?");
     params.push(v);
   } else {
     if (channel === "african-food") {
-      whereParts.push(`LOWER(TRIM(COALESCE(sc.slug,''))) = 'food'`);
+      whereParts.push("p.vertical = 'FOOD'");
     } else if (channel === "african-market") {
-      whereParts.push(`(LOWER(TRIM(COALESCE(sc.slug,''))) <> 'food' OR sc.slug IS NULL)`);
+      whereParts.push("p.vertical = 'MARKET'");
     } else {
       whereParts.push("1=1");
     }
@@ -765,12 +780,10 @@ async function listProducts(pool, opts) {
   const shopTypeCol = await getShopTypeColCached(pool);
   if (shopTypeCol) {
     if (catalogueMode === "PUBLIC_CLIENT") {
-      // Clients: venders + restaurants
       whereParts.push(
         `(UPPER(COALESCE(s.${shopTypeCol}, 'VENDOR')) IN ('VENDOR','VENDEUR','SHOP','RESTAURANT'))`
       );
     } else if (catalogueMode === "SUPPLIER_ONLY") {
-      // Vendors/Restaurants: supplier catalogue
       whereParts.push(`(UPPER(COALESCE(s.${shopTypeCol}, '')) IN ('SUPPLIER','FOURNISSEUR'))`);
     }
   }
@@ -1062,9 +1075,6 @@ async function listShopDrinksHandler(req, res, next) {
 
 /* =========================================================
  * ✅ SUPPLIER CATALOGUE (vendors/restaurants/admin only)
- * - vendors/restaurants voient uniquement les produits des fournisseurs
- * - admin peut voir aussi (et en impersonation ça marche)
- * GET /api/products/suppliers?onlyActive=1&q=...
  * ========================================================= */
 async function listSuppliersCatalogueHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -1118,8 +1128,6 @@ async function listSuppliersCatalogueHandler(req, res, next) {
 
 /* =========================================================
  * ✅ MANAGE LIST (admin/vendor/restaurant)
- * - vendeur/resto => uniquement ses produits (ownerId=effective_user_id)
- * - admin => peut filtrer shopId; si impersonation => comme vendeur/resto
  * ========================================================= */
 async function listManageHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -1146,7 +1154,6 @@ async function listManageHandler(req, res, next) {
     const actorId = actingUserId(req);
     const ownerId = isActingVendorOrRestaurant(req) ? actorId : null;
 
-    // si vendeur/resto => ignore shopId param (pour éviter d’aller voir autre shop)
     const safeShopId = isActingVendorOrRestaurant(req) ? null : shopId;
 
     const { rows, total } = await listProducts(pool, {
@@ -2085,7 +2092,6 @@ router.post(
       const forcedShopId = actingShopId(req);
 
       if (isActingVendorOrRestaurant(req)) {
-        // ✅ si impersonation shop_id fourni => priorité
         if (forcedShopId) {
           const [[shop]] = await conn.query(
             `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
@@ -2130,15 +2136,19 @@ router.post(
         }
       }
 
+      // ✅ vertical final:
+      // - boissons => FOOD
+      // - sinon => si body.vertical OK => body
+      // - sinon => si sub_category.vertical existe => celle-là
+      // - sinon => fallback MARKET
       const incomingVertical = normalizeVertical(vertical, null);
 
-      let finalVertical = incomingVertical;
-      if (!finalVertical) {
-        if (isDrink) finalVertical = "FOOD";
-        else {
-          const fallbackVertical = String(resolvedSub?.slug || "").toLowerCase() === "food" ? "FOOD" : "MARKET";
-          finalVertical = fallbackVertical;
-        }
+      let finalVertical = null;
+      if (isDrink) finalVertical = "FOOD";
+      else if (incomingVertical) finalVertical = incomingVertical;
+      else {
+        const subV = normalizeVertical(resolvedSub?.vertical, null);
+        finalVertical = subV || "MARKET";
       }
 
       const duuminiRate = finalVertical === "FOOD" ? 0.18 : 0.11;
@@ -2375,13 +2385,27 @@ router.put(
         promo_free_delivery,
       });
 
+      // ✅ vertical update:
+      // - boissons => FOOD (forcé)
+      // - sinon => si body.vertical valide => body
+      // - sinon => si sub_category résolue => sub_category.vertical
+      // - sinon => ne touche pas (null => COALESCE garde l'existant)
       const vertIncoming = normalizeVertical(vertical, null);
-      const vertFinal = targetIsDrink ? vertIncoming || "FOOD" : vertIncoming;
+      const subV = normalizeVertical(resolvedSub?.vertical, null);
 
+      const vertFinal = targetIsDrink ? "FOOD" : vertIncoming || subV || null;
+
+      // ✅ duumini rate:
+      // - FOOD => 0.18
+      // - MARKET/FASHION => 0.11
       const duuminiRateParam = targetIsDrink
         ? 0.18
         : resolvedSub
-        ? String(resolvedSub?.slug || "").toLowerCase() === "food"
+        ? normalizeVertical(resolvedSub.vertical, "MARKET") === "FOOD"
+          ? 0.18
+          : 0.11
+        : vertIncoming
+        ? vertIncoming === "FOOD"
           ? 0.18
           : 0.11
         : null;

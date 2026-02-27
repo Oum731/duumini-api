@@ -10,7 +10,6 @@ const router = Router();
  * Helpers
  * =======================*/
 
-/** slugify robuste (utf8 -> ascii, espaces -> -, fallback unique) */
 function slugify(str) {
   const out =
     String(str || "")
@@ -63,10 +62,7 @@ async function getCategoriesColumns(pool) {
     const verticalCol = await detectColumn(conn, "categories", ["vertical"]);
     const isActiveCol = await detectColumn(conn, "categories", ["is_active", "active", "enabled"]);
 
-    _catsColumns = {
-      verticalCol, // optional
-      isActiveCol, // optional
-    };
+    _catsColumns = { verticalCol, isActiveCol };
     _catsColumnsLoaded = true;
     return _catsColumns;
   } finally {
@@ -74,22 +70,29 @@ async function getCategoriesColumns(pool) {
   }
 }
 
-function normalizeVertical(v) {
-  const s = String(v || "").trim().toLowerCase();
-  if (!s) return null;
+/**
+ * ✅ Vertical strict
+ * - accepte FOOD | MARKET | FASHION
+ * - accepte alias: marché/marche -> MARKET
+ * - retourne null si inconnu
+ */
+function normalizeVertical(value, fallback = null) {
+  if (value == null) return fallback;
 
-  // Quelques alias utiles
-  if (s === "food" || s === "african-food") return "african-food";
-  if (s === "market" || s === "african-market") return "african-market";
-  if (s === "fashion" || s === "fashionstyle") return "fashionstyle";
+  const raw = String(value || "").trim();
+  const noAccent = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const v = noAccent.trim().toUpperCase();
 
-  return s; // on accepte toute valeur custom
+  if (v === "FOOD") return "FOOD";
+  if (v === "MARKET" || v === "MARCHE" || v === "MARCHÉ") return "MARKET";
+  if (v === "FASHION") return "FASHION";
+
+  return fallback;
 }
 
 function pickRequestedVertical(req) {
-  const v = req.query.vertical ?? req.query.channel ?? req.query.type ?? null;
-  const norm = normalizeVertical(v);
-  return norm;
+  const v = req.query.vertical ?? req.query.v ?? req.query.type ?? req.query.channel ?? null;
+  return normalizeVertical(v, null);
 }
 
 async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
@@ -99,7 +102,10 @@ async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
   while (true) {
     const params = ignoreId ? [finalSlug, Number(ignoreId)] : [finalSlug];
     const where = ignoreId ? "slug=? AND id<>?" : "slug=?";
-    const [[{ count }]] = await pool.query(`SELECT COUNT(*) AS count FROM categories WHERE ${where}`, params);
+    const [[{ count }]] = await pool.query(
+      `SELECT COUNT(*) AS count FROM categories WHERE ${where}`,
+      params
+    );
     if (count === 0) break;
     finalSlug = `${baseSlug}-${suffix++}`;
   }
@@ -111,7 +117,7 @@ async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
  * - pagination
  * - filtres optionnels :
  *    ?q=...              (recherche)
- *    ?vertical=...       (si la colonne existe)
+ *    ?vertical=FOOD|MARKET|FASHION
  *    ?onlyActive=1       (si colonne is_active/active/enabled existe)
  * - un non-admin ne voit pas les inactives si colonne existe
  * =======================*/
@@ -129,9 +135,9 @@ router.get("/", async (req, res) => {
     const whereParts = ["1=1"];
     const params = [];
 
-    // Filtre vertical si colonne existe
+    // ✅ Filtre vertical strict (si colonne existe)
     if (cols.verticalCol && reqVertical) {
-      whereParts.push(`LOWER(TRIM(COALESCE(${cols.verticalCol},''))) = ?`);
+      whereParts.push(`UPPER(TRIM(COALESCE(${cols.verticalCol},''))) = ?`);
       params.push(reqVertical);
     }
 
@@ -147,11 +153,8 @@ router.get("/", async (req, res) => {
     const hasActiveCol = !!cols.isActiveCol;
 
     if (hasActiveCol) {
-      // si non connecté, on suppose non-admin
       const enforceActiveForPublic = !isAdminUser;
-      const wantOnlyActive =
-        onlyActive === null ? enforceActiveForPublic : onlyActive === 1;
-
+      const wantOnlyActive = onlyActive === null ? enforceActiveForPublic : onlyActive === 1;
       if (wantOnlyActive) whereParts.push(`${cols.isActiveCol} = 1`);
     }
 
@@ -178,7 +181,7 @@ router.get("/", async (req, res) => {
  * Body:
  *  - name: string (obligatoire)
  *  - slug?: string (optionnel)
- *  - vertical?: string (optionnel si colonne existe)
+ *  - vertical?: FOOD|MARKET|FASHION (optionnel si colonne existe)
  *  - is_active?: 0|1 (optionnel si colonne existe)
  * =======================*/
 router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
@@ -195,7 +198,15 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const baseSlug = rawSlug ? slugify(rawSlug) : slugify(name);
     const finalSlug = await ensureUniqueSlug(pool, baseSlug);
 
-    const vertical = cols.verticalCol ? normalizeVertical(req.body?.vertical) : null;
+    // ✅ vertical strict
+    let vertical = null;
+    if (cols.verticalCol) {
+      vertical = normalizeVertical(req.body?.vertical, null);
+      if (req.body?.vertical !== undefined && !vertical) {
+        return res.status(400).json({ error: "vertical invalid (FOOD|MARKET|FASHION)" });
+      }
+    }
+
     const active = cols.isActiveCol ? parseBoolFlag(req.body?.is_active, 1) : null;
 
     const fields = ["name", "slug"];
@@ -211,7 +222,9 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
       values.push(active == null ? 1 : active);
     }
 
-    const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields.map(() => "?").join(", ")})`;
+    const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields
+      .map(() => "?")
+      .join(", ")})`;
 
     const [r] = await conn.query(sql, values);
 
@@ -265,8 +278,11 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
       patch.slug = await ensureUniqueSlug(pool, baseSlug, id);
     }
 
+    // ✅ vertical strict
     if (cols.verticalCol && req.body?.vertical !== undefined) {
-      patch[cols.verticalCol] = normalizeVertical(req.body?.vertical);
+      const v = normalizeVertical(req.body?.vertical, null);
+      if (!v) return res.status(400).json({ error: "vertical invalid (FOOD|MARKET|FASHION)" });
+      patch[cols.verticalCol] = v;
     }
 
     if (cols.isActiveCol && req.body?.is_active !== undefined) {
@@ -276,7 +292,7 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
     }
 
     const keys = Object.keys(patch);
-    if (!keys.length) return res.json({ ok: true }); // nothing to update
+    if (!keys.length) return res.json({ ok: true });
 
     const setSql = keys.map((k) => `${k}=?`).join(", ");
     const params = keys.map((k) => patch[k]);
@@ -320,9 +336,7 @@ router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
           message: "Impossible de supprimer: des sous-catégories existent pour cette catégorie.",
         });
       }
-    } catch {
-      // si table sub_categories n'existe pas dans un env, ignore
-    }
+    } catch {}
 
     // Empêche suppression si des produits existent
     try {
@@ -336,9 +350,7 @@ router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
           message: "Impossible de supprimer: des produits utilisent cette catégorie.",
         });
       }
-    } catch {
-      // si table products n'existe pas dans un env, ignore
-    }
+    } catch {}
 
     await conn.query(`DELETE FROM categories WHERE id=?`, [id]);
 
