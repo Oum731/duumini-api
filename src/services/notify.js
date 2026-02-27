@@ -5,30 +5,53 @@ const { sendPush } = require("./pushy");
 let ioRef = null;
 
 /**
- * Injecte l'instance Socket.IO (appelé depuis server.js)
+ * Injecte l'instance Socket.IO (appelé depuis server.js / worker)
  */
 function setIO(io) {
-  ioRef = io;
+  ioRef = io || null;
 }
 
 /**
  * Envoie un event WS à un user
+ * ✅ Retourne true seulement si l'émission a été tentée sans erreur
  */
 function wsToUser(userId, event, payload) {
   if (!ioRef) return false;
-  ioRef.broadcastToUser(userId, event, payload);
-  return true;
+
+  try {
+    // Compat: si attachSocket a défini broadcastToUser, on l'utilise
+    if (typeof ioRef.broadcastToUser === "function") {
+      ioRef.broadcastToUser(userId, event, payload);
+      return true;
+    }
+
+    // Fallback standard Socket.IO (rooms)
+    ioRef.to(`user:${userId}`).emit(event, payload);
+    return true;
+  } catch (e) {
+    console.error("[WS] wsToUser error:", e?.message || e);
+    return false;
+  }
 }
 
 /**
  * Récupère la liste des tokens push d'un user
  */
 async function getUserPushTokens(userId) {
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) return [];
+
   const [rows] = await getPool().query(
     "SELECT push_token, provider FROM user_devices WHERE user_id = ?",
-    [userId]
+    [uid],
   );
-  return rows.map((r) => ({ token: r.push_token, provider: r.provider }));
+
+  return (rows || [])
+    .map((r) => ({
+      token: r?.push_token ? String(r.push_token) : "",
+      provider: r?.provider ? String(r.provider).toLowerCase() : "",
+    }))
+    .filter((t) => t.token);
 }
 
 /**
@@ -36,6 +59,7 @@ async function getUserPushTokens(userId) {
  */
 async function pushToUser(userId, payload, notification = null) {
   const tokens = await getUserPushTokens(userId);
+
   const pushyTokens = tokens
     .filter((t) => t.provider === "pushy")
     .map((t) => t.token);
@@ -44,14 +68,14 @@ async function pushToUser(userId, payload, notification = null) {
     return { ok: false, reason: "no_device" };
   }
 
-  const data = { type: payload.type || "GENERIC", payload };
+  const data = { type: payload?.type || "GENERIC", payload };
 
   try {
     const res = await sendPush(pushyTokens, data, notification);
     return { ok: true, res };
   } catch (e) {
-    console.error("[Push] Error sending push", e);
-    return { ok: false, error: String(e) };
+    console.error("[Push] Error sending push:", e?.message || e);
+    return { ok: false, error: String(e?.message || e) };
   }
 }
 
@@ -59,28 +83,30 @@ async function pushToUser(userId, payload, notification = null) {
  * notifyUser :
  *  - envoie un event WS "notify" à l'utilisateur
  *  - en option (par défaut) envoie aussi une push via Pushy
+ *
+ * ✅ IMPORTANT: retourne ws:true seulement si WS a réellement été émis sans erreur
  */
 async function notifyUser(userId, type, payload, opts = {}) {
-  const body = { type, ...payload };
+  const safePayload = payload && typeof payload === "object" ? payload : {};
+  const body = { type, ...safePayload };
 
   // WS temps réel
-  wsToUser(userId, "notify", body);
+  const wsOk = wsToUser(userId, "notify", body);
 
   // Push désactivée explicitement ?
-  if (opts.push === false) {
-    return { ws: true, push: false };
+  if (opts && opts.push === false) {
+    return { ws: wsOk, push: false };
   }
 
   // Push Pushy
-  const title = opts.title || payload.title || "Notification";
-  const bodyText = opts.body || payload.body || "";
-  const notif =
-    title || bodyText
-      ? { title, body: bodyText }
-      : null;
+  const title = (opts && opts.title) || safePayload.title || "Notification";
+  const bodyText = (opts && opts.body) || safePayload.body || "";
 
-  const r = await pushToUser(userId, { type, ...payload }, notif);
-  return { ws: true, push: r.ok, pushInfo: r };
+  // Si notif vide, on peut quand même envoyer du "data-only" (selon ton sendPush)
+  const notif = title || bodyText ? { title, body: bodyText } : null;
+
+  const r = await pushToUser(userId, { type, ...safePayload }, notif);
+  return { ws: wsOk, push: r.ok, pushInfo: r };
 }
 
 module.exports = { setIO, notifyUser };

@@ -1,7 +1,7 @@
 // src/routes/orders.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole, isAdmin, isVendor } = require("../middlewares/auth");
+const { authRequired, isAdmin, isVendor } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { sendWhatsAppOrderConfirmation } = require("../services/twilio");
 const { env } = require("../lib/env");
@@ -40,12 +40,7 @@ function buildAddressObj(input = {}) {
       ? { lat: Number(input.gps.lat), lng: Number(input.gps.lng) }
       : null;
 
-  return {
-    city: ville,
-    commune,
-    district: quartier,
-    gps,
-  };
+  return { city: ville, commune, district: quartier, gps };
 }
 
 function buildGeoLink(gps) {
@@ -111,7 +106,6 @@ function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
   return +(+totalClientLine * rate).toFixed(2);
 }
 
-/** ✅ cast commission_duumini (DECIMAL->string) to Number for JSON */
 function normCommission(x) {
   if (x === null || x === undefined || x === "") return null;
   const n = Number(x);
@@ -127,8 +121,7 @@ function stripCommissionFromOrderRow(row, user) {
 }
 
 /**
- * ✅ NOUVEAU: vérifier si une commande ne contient QUE les produits d'un vendeur
- * (utile pour autoriser update status / cancel côté vendeur)
+ * ✅ vérifier si une commande ne contient QUE les produits d'un vendeur
  */
 async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
   const [[r]] = await conn.query(
@@ -150,7 +143,6 @@ async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
   const vendorsCount = Number(r?.vendors_count || 0);
 
   if (!total) return false;
-  // mono-vendeur et c'est lui
   return mine === total && vendorsCount === 1;
 }
 
@@ -160,7 +152,6 @@ async function getOrderWithPerm(conn, id, user) {
 
   if (!isAdmin(user)) {
     if (isVendor(user)) {
-      // ✅ vendor peut VOIR si au moins 1 de ses produits est dedans
       const [[own]] = await conn.query(
         `
         SELECT 1
@@ -180,7 +171,6 @@ async function getOrderWithPerm(conn, id, user) {
 
   const order = stripCommissionFromOrderRow(orderRaw, user);
 
-  // ✅ IMPORTANT: si vendor => ne renvoyer QUE ses lignes
   let itemsSql = `
     SELECT 
       oi.*,
@@ -198,14 +188,14 @@ async function getOrderWithPerm(conn, id, user) {
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
     LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-    `;
+  `;
 
   const params = [];
   if (isVendor(user) && !isAdmin(user)) {
     itemsSql += `
       LEFT JOIN shops s ON s.id = p.shop_id
       WHERE oi.order_id = ? AND s.owner_id = ?
-      `;
+    `;
     params.push(id, user.id);
   } else {
     itemsSql += ` WHERE oi.order_id = ? `;
@@ -215,7 +205,6 @@ async function getOrderWithPerm(conn, id, user) {
   itemsSql += ` ORDER BY oi.id ASC `;
 
   const [items] = await conn.query(itemsSql, params);
-
   return { status: 200, order, items };
 }
 
@@ -227,7 +216,7 @@ async function getAdminUserIds() {
       WHERE role = 'ADMIN'
         AND (is_active = 1 OR is_active IS NULL)`,
   );
-  return rows.map((r) => r.id);
+  return (rows || []).map((r) => r.id);
 }
 
 async function getVendorsForOrder(orderId) {
@@ -243,23 +232,24 @@ async function getVendorsForOrder(orderId) {
     `,
     [orderId],
   );
-  return rows.map((r) => r.user_id);
+  return (rows || []).map((r) => r.user_id);
 }
 
 async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   const [adminIds, vendorIds] = await Promise.all([getAdminUserIds(), getVendorsForOrder(orderId)]);
-  const allUserIds = Array.from(new Set([...adminIds, ...vendorIds]));
+  const allUserIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
   if (!allUserIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
   const displayCode = buildDisplayCode(orderId);
+  const totalNum = Number(total || 0);
 
   const payloadObj = {
     title: `Nouvelle commande ${displayCode}`,
-    body: `Un client vient de passer une commande ${displayCode} de ${total} ${cur}.`,
+    body: `Un client vient de passer une commande ${displayCode} de ${totalNum} ${cur}.`,
     order_id: orderId,
     display_code: displayCode,
-    total,
+    total: totalNum,
     currency: cur,
     status: "OPEN",
   };
@@ -274,6 +264,39 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     `,
     [values],
   );
+}
+
+/**
+ * ✅ NOUVEAU: push “temps réel” WS uniquement (pas de push) pour admins + vendeurs
+ * -> évite d’attendre le worker, et évite les doublons push
+ */
+async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
+  let notifyUser;
+  try {
+    ({ notifyUser } = require("../services/notify"));
+  } catch {
+    return;
+  }
+
+  const [adminIds, vendorIds] = await Promise.all([getAdminUserIds(), getVendorsForOrder(orderId)]);
+  const userIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
+  if (!userIds.length) return;
+
+  const cur = (currency || "MAD").toUpperCase();
+  const displayCode = buildDisplayCode(orderId);
+  const totalNum = Number(total || 0);
+
+  const payloadObj = {
+    title: `Nouvelle commande ${displayCode}`,
+    body: `Un client vient de passer une commande ${displayCode} de ${totalNum} ${cur}.`,
+    order_id: orderId,
+    display_code: displayCode,
+    total: totalNum,
+    currency: cur,
+    status: "OPEN",
+  };
+
+  await Promise.all(userIds.map((uid) => notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false })));
 }
 
 async function enqueueOrderStatusForClient(orderId, status) {
@@ -313,21 +336,13 @@ async function enqueueOrderStatusForClient(orderId, status) {
 /* =========================
  * WhatsApp admin
  * =======================*/
-async function sendAdminWhatsAppForOrder({
-  pool,
-  orderId,
-  displayCode,
-  orderTotal,
-  currency,
-  addressObj,
-  contactObj,
-  items,
-}) {
+async function sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }) {
   const hasFrom = !!(env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM);
   if (!hasFrom) return;
   if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) return;
 
   let details = "";
+
   try {
     const [rows] = await pool.query(
       `
@@ -448,7 +463,6 @@ function computePromoPrice(basePrice, promoEligible, type, value) {
 
   if (!Number.isFinite(out)) return null;
   if (out < 0) out = 0;
-
   return +out.toFixed(2);
 }
 
@@ -461,7 +475,6 @@ function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   const eligible = Number(p?.promo_eligible || 0) === 1;
   const promoValue = Number(p?.promo_discount_value);
   const hasValue = Number.isFinite(promoValue) && promoValue > 0;
-
   const promoType = normalizePromoType(p?.promo_discount_type || "PERCENT");
 
   if (!eligible || !hasValue) {
@@ -560,7 +573,6 @@ function normMoney(x) {
   return +n.toFixed(2);
 }
 
-/** ✅ UPDATED: accepte PENDING */
 function normPayStatus(s) {
   const v = String(s || "").trim().toUpperCase();
   if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") return v;
@@ -627,9 +639,7 @@ function normalizePaymentForRow(row, orderTotal, currency, payCols) {
   const parsedMethod = paymentParsed?.method ?? null;
   const isBank = isBankTransferMethod(parsedMethod);
 
-  if (isBank && status !== "PAID" && total > 0) {
-    status = "PENDING";
-  }
+  if (isBank && status !== "PAID" && total > 0) status = "PENDING";
 
   const paymentObj = paymentParsed
     ? {
@@ -737,8 +747,7 @@ function buildStatusWhere(statuses) {
 }
 
 /* =========================
- * LIST (filtre payment_status + multi status)
- * ✅ Vendor: ne voit QUE ses commandes et items_amount = somme de SES items
+ * LIST
  * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -776,18 +785,14 @@ router.get("/", authRequired, async (req, res) => {
           : buildContactFromUser({ first_name: r.u_first, last_name: r.u_last, phone: r.u_phone });
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
-
       const isVendorView = isVendor(user) && !isAdmin(user);
 
       const itemsAmount = Number(r.items_amount || 0);
-
-      // ✅ vendor voit "son montant" = somme de ses items. On met delivery_fee = 0 pour éviter confusion.
       const totalAmount = isVendorView ? itemsAmount : Number(r.total || itemsAmount);
       const deliveryFee = isVendorView ? 0 : Math.max(0, totalAmount - itemsAmount);
 
       const currency = (r.currency || "MAD").toUpperCase();
       const paymentNorm = normalizePaymentForRow(r, Number(r.total || itemsAmount), currency, payCols);
-
       const commissionDuumini = isCancelledStatus(r.status) ? null : normCommission(r.commission_duumini);
 
       return {
@@ -907,7 +912,7 @@ router.get("/", authRequired, async (req, res) => {
       return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
     }
 
-    // ✅ vendor => ne voit que SES commandes, items_amount = somme de SES lignes
+    // vendor => commandes contenant ses produits
     if (isVendor(req.user)) {
       let where = "s.owner_id = ?";
       const params = [req.user.id];
@@ -940,8 +945,6 @@ router.get("/", authRequired, async (req, res) => {
           u.first_name AS u_first,
           u.last_name  AS u_last,
           u.phone      AS u_phone,
-
-          -- ✅ somme UNIQUEMENT des items du vendeur
           (
             SELECT SUM(oi_mine.qty * oi_mine.unit_price)
             FROM order_items oi_mine
@@ -950,8 +953,6 @@ router.get("/", authRequired, async (req, res) => {
             WHERE oi_mine.order_id = o.id
               AND s_mine.owner_id = ?
           ) AS items_amount,
-
-          -- ✅ cover UNIQUEMENT des produits du vendeur
           (
             SELECT pi.url
             FROM order_items oi2
@@ -963,7 +964,6 @@ router.get("/", authRequired, async (req, res) => {
             ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
             LIMIT 1
           ) AS first_product_cover
-
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         JOIN products p     ON p.id = oi.product_id
@@ -1095,7 +1095,6 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       }
 
       base_unit_price = v.price_override != null && v.price_override !== "" ? Number(v.price_override) : Number(p.price || 0);
-
       stockSource = "VARIANT";
       current_stock = v.stock;
       variant_meta = { variant_id: v.id, size: v.size || null, color: v.color || null, sku: v.sku || null };
@@ -1134,15 +1133,14 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 router.put("/:id/payment", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
-
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const pool = getPool();
 
   try {
     const payCols = await getOrdersPayColsCached(pool);
-
     const hasAny = payCols?.payment || payCols?.payment_status || payCols?.paid_amount || payCols?.remaining_amount;
+
     if (!hasAny) {
       return res.status(409).json({
         code: "PAYMENT_COLUMNS_MISSING",
@@ -1191,9 +1189,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       const currency = (o.currency || "MAD").toUpperCase();
 
       const currentPayment = safeParseJSON(o.payment) || {};
-      const currentPaid = Number.isFinite(Number(o.paid_amount))
-        ? Number(o.paid_amount)
-        : Number(currentPayment.paid_amount || 0) || 0;
+      const currentPaid = Number.isFinite(Number(o.paid_amount)) ? Number(o.paid_amount) : Number(currentPayment.paid_amount || 0) || 0;
 
       let nextPaid = currentPaid;
       if (mode === "ADD") nextPaid = currentPaid + Number(add_amount || 0);
@@ -1232,7 +1228,6 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       }
 
       sets.push("updated_at = NOW()");
-
       await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [...vals, id]);
 
       await conn.commit();
@@ -1288,28 +1283,21 @@ router.post("/", authRequired, async (req, res) => {
 
     const cols = ["user_id", "status", "address", "contact", "geo_link", "total", "commission_duumini", "currency", "created_at", "updated_at"];
     const placeholders = ["?", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
-    const vals = [req.user.id, "OPEN", JSON.stringify(addressObj), JSON.stringify(contactObj), geoLink, orderTotal, +totalCommission.toFixed(2), currency];
+    const vals = [
+      req.user.id,
+      "OPEN",
+      JSON.stringify(addressObj),
+      JSON.stringify(contactObj),
+      geoLink,
+      orderTotal,
+      +totalCommission.toFixed(2),
+      currency,
+    ];
 
-    if (payCols?.payment) {
-      cols.push("payment");
-      placeholders.push("?");
-      vals.push(JSON.stringify(paymentObj));
-    }
-    if (payCols?.payment_status) {
-      cols.push("payment_status");
-      placeholders.push("?");
-      vals.push(paymentObj.status);
-    }
-    if (payCols?.paid_amount) {
-      cols.push("paid_amount");
-      placeholders.push("?");
-      vals.push(paymentObj.paid_amount);
-    }
-    if (payCols?.remaining_amount) {
-      cols.push("remaining_amount");
-      placeholders.push("?");
-      vals.push(paymentObj.remaining_amount);
-    }
+    if (payCols?.payment) { cols.push("payment"); placeholders.push("?"); vals.push(JSON.stringify(paymentObj)); }
+    if (payCols?.payment_status) { cols.push("payment_status"); placeholders.push("?"); vals.push(paymentObj.status); }
+    if (payCols?.paid_amount) { cols.push("paid_amount"); placeholders.push("?"); vals.push(paymentObj.paid_amount); }
+    if (payCols?.remaining_amount) { cols.push("remaining_amount"); placeholders.push("?"); vals.push(paymentObj.remaining_amount); }
 
     const [r] = await conn.query(`INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`, vals);
     const orderId = r.insertId;
@@ -1363,12 +1351,27 @@ router.post("/", authRequired, async (req, res) => {
 
     await conn.commit();
 
+    // ✅ Queue (push via worker)
     try { await enqueueOrderCreatedNotifications(orderId, orderTotal, currency); } catch {}
+
+    // ✅ Client immédiat (WS + push si device)
     try {
       const { notifyUser } = require("../services/notify");
-      await notifyUser(req.user.id, "ORDER_CREATED", { order_id: orderId, display_code: displayCode, total: orderTotal });
+      await notifyUser(req.user.id, "ORDER_CREATED", {
+        title: `Commande ${displayCode} créée`,
+        body: `Votre commande ${displayCode} a été créée. Total: ${Number(orderTotal || 0)} ${currency}.`,
+        order_id: orderId,
+        display_code: displayCode,
+        total: Number(orderTotal || 0),
+        currency,
+        status: "OPEN",
+      });
     } catch {}
 
+    // ✅ Admin/Vendeurs immédiat (WS only)
+    try { await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency); } catch {}
+
+    // WhatsApp admin (optionnel)
     sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }).catch(() => {});
 
     res.status(201).json({
@@ -1485,6 +1488,7 @@ router.post("/guest", async (req, res) => {
     await conn.commit();
 
     try { await enqueueOrderCreatedNotifications(orderId, orderTotal, currency); } catch {}
+    try { await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency); } catch {}
 
     sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }).catch(() => {});
 
@@ -1508,7 +1512,6 @@ router.post("/guest", async (req, res) => {
 
 /* =========================
  * Get one order
- * ✅ vendor: items filtrés (uniquement ses lignes)
  * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1529,7 +1532,6 @@ router.get("/:id", authRequired, async (req, res) => {
         ? contactFromOrder
         : buildContactFromUser(u);
 
-    // items filtrés si vendor => amount = somme de ses lignes
     const itemsAmount = result.items.reduce((sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1), 0);
 
     const isVendorView = isVendor(req.user) && !isAdmin(req.user);
@@ -1549,7 +1551,7 @@ router.get("/:id", authRequired, async (req, res) => {
       contact,
       address: addr,
       ...paymentNorm,
-      items: result.items, // ✅ vendor => seulement ses items
+      items: result.items,
       totals: {
         items_amount: itemsAmount,
         delivery_fee: deliveryFee,
@@ -1568,7 +1570,6 @@ router.get("/:id", authRequired, async (req, res) => {
 
 /* =========================
  * Update status
- * ✅ vendor: autorisé seulement si commande mono-vendeur (tous les items à lui)
  * =======================*/
 router.put("/:id/status", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1584,7 +1585,6 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
       const conn = await pool.getConnection();
       try {
-        // ✅ vendor ne peut gérer que si commande = 100% ses produits
         const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
         if (!ok) return res.status(403).json({ error: "Forbidden (multi-vendor order)" });
       } finally {
@@ -1596,10 +1596,18 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
     const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id=?`, [id]);
     if (order && order.user_id) {
+      const displayCode = buildDisplayCode(id);
+
       try { await enqueueOrderStatusForClient(id, status); } catch {}
       try {
         const { notifyUser } = require("../services/notify");
-        await notifyUser(order.user_id, "ORDER_STATUS", { order_id: id, display_code: buildDisplayCode(id), status });
+        await notifyUser(order.user_id, "ORDER_STATUS", {
+          title: `Commande ${displayCode} mise à jour`,
+          body: `Le statut de votre commande ${displayCode} est passé à ${status}.`,
+          order_id: id,
+          display_code: displayCode,
+          status,
+        });
       } catch {}
     }
 
@@ -1611,7 +1619,6 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
 /* =========================
  * Cancel (restock)
- * ✅ vendor: autorisé seulement si commande mono-vendeur
  * =======================*/
 router.post("/:id/cancel", authRequired, async (req, res) => {
   const id = Number(req.params.id);
@@ -1627,7 +1634,6 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(result.status).json({ error: result.error });
     }
 
-    // ✅ vendor: doit posséder 100% des items
     if (!isAdmin(req.user) && isVendor(req.user)) {
       const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
       if (!ok) {
@@ -1672,9 +1678,18 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     try {
       if (order.user_id) {
+        const displayCode = buildDisplayCode(id);
+
         await enqueueOrderStatusForClient(id, "CANCELLED");
+
         const { notifyUser } = require("../services/notify");
-        await notifyUser(order.user_id, "ORDER_STATUS", { order_id: id, display_code: buildDisplayCode(id), status: "CANCELLED" });
+        await notifyUser(order.user_id, "ORDER_STATUS", {
+          title: `Commande ${displayCode} annulée`,
+          body: `Votre commande ${displayCode} a été annulée.`,
+          order_id: id,
+          display_code: displayCode,
+          status: "CANCELLED",
+        });
       }
     } catch {}
 
