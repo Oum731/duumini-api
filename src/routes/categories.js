@@ -18,14 +18,7 @@ function slugify(str) {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
-
   return out || Date.now().toString(36);
-}
-
-function toPositiveInt(value, defaultValue) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return defaultValue;
-  return Math.floor(n);
 }
 
 function parseBoolFlag(value, defaultValue = null) {
@@ -71,15 +64,17 @@ async function getCategoriesColumns(pool) {
 }
 
 /**
- * ✅ Vertical strict
- * - accepte FOOD | MARKET | FASHION
- * - accepte alias: marché/marche -> MARKET
- * - retourne null si inconnu
+ * ✅ Vertical strict + alias
+ * - FOOD | MARKET | FASHION
+ * - alias: marché/marche -> MARKET
+ * - alias: african-food -> FOOD, african-market -> MARKET, fashionstyle -> FASHION
  */
-function normalizeVertical(value, fallback = null) {
-  if (value == null) return fallback;
+function normalizeVertical(value) {
+  if (value == null) return null;
 
   const raw = String(value || "").trim();
+  if (!raw) return null;
+
   const noAccent = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const v = noAccent.trim().toUpperCase();
 
@@ -87,12 +82,17 @@ function normalizeVertical(value, fallback = null) {
   if (v === "MARKET" || v === "MARCHE" || v === "MARCHÉ") return "MARKET";
   if (v === "FASHION") return "FASHION";
 
-  return fallback;
+  const low = v.toLowerCase();
+  if (low === "african-food") return "FOOD";
+  if (low === "african-market") return "MARKET";
+  if (low === "fashionstyle") return "FASHION";
+
+  return null;
 }
 
 function pickRequestedVertical(req) {
   const v = req.query.vertical ?? req.query.v ?? req.query.type ?? req.query.channel ?? null;
-  return normalizeVertical(v, null);
+  return normalizeVertical(v);
 }
 
 async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
@@ -114,12 +114,6 @@ async function ensureUniqueSlug(pool, baseSlug, ignoreId = null) {
 
 /* =========================
  * GET /api/categories
- * - pagination
- * - filtres optionnels :
- *    ?q=...              (recherche)
- *    ?vertical=FOOD|MARKET|FASHION
- *    ?onlyActive=1       (si colonne is_active/active/enabled existe)
- * - un non-admin ne voit pas les inactives si colonne existe
  * =======================*/
 router.get("/", async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -135,20 +129,17 @@ router.get("/", async (req, res) => {
     const whereParts = ["1=1"];
     const params = [];
 
-    // ✅ Filtre vertical strict (si colonne existe)
     if (cols.verticalCol && reqVertical) {
       whereParts.push(`UPPER(TRIM(COALESCE(${cols.verticalCol},''))) = ?`);
       params.push(reqVertical);
     }
 
-    // Filtre recherche
     if (q) {
       whereParts.push(`(LOWER(name) LIKE ? OR LOWER(slug) LIKE ?)`);
       const like = `%${q}%`;
       params.push(like, like);
     }
 
-    // Gestion "actif" (si colonne existe)
     const isAdminUser = isAdmin && isAdmin(req.user);
     const hasActiveCol = !!cols.isActiveCol;
 
@@ -178,11 +169,6 @@ router.get("/", async (req, res) => {
 
 /* =========================
  * POST /api/categories (ADMIN)
- * Body:
- *  - name: string (obligatoire)
- *  - slug?: string (optionnel)
- *  - vertical?: FOOD|MARKET|FASHION (optionnel si colonne existe)
- *  - is_active?: 0|1 (optionnel si colonne existe)
  * =======================*/
 router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   const pool = getPool();
@@ -198,13 +184,19 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const baseSlug = rawSlug ? slugify(rawSlug) : slugify(name);
     const finalSlug = await ensureUniqueSlug(pool, baseSlug);
 
-    // ✅ vertical strict
+    // ✅ vertical: on ne laisse jamais NULL si colonne existe
     let vertical = null;
     if (cols.verticalCol) {
-      vertical = normalizeVertical(req.body?.vertical, null);
-      if (req.body?.vertical !== undefined && !vertical) {
+      const provided = req.body?.vertical !== undefined;
+      vertical = normalizeVertical(req.body?.vertical);
+
+      // si vertical fourni mais invalide -> 400
+      if (provided && !vertical) {
         return res.status(400).json({ error: "vertical invalid (FOOD|MARKET|FASHION)" });
       }
+
+      // si pas fourni -> default safe (évite NOT NULL / enum)
+      if (!vertical) vertical = "MARKET";
     }
 
     const active = cols.isActiveCol ? parseBoolFlag(req.body?.is_active, 1) : null;
@@ -222,10 +214,7 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
       values.push(active == null ? 1 : active);
     }
 
-    const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields
-      .map(() => "?")
-      .join(", ")})`;
-
+    const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields.map(() => "?").join(", ")})`;
     const [r] = await conn.query(sql, values);
 
     res.status(201).json({
@@ -245,11 +234,6 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
 
 /* =========================
  * PUT /api/categories/:id (ADMIN)
- * Body (tous optionnels):
- *  - name
- *  - slug
- *  - vertical (si colonne existe)
- *  - is_active (si colonne existe)
  * =======================*/
 router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
   const id = Number(req.params.id);
@@ -278,9 +262,8 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
       patch.slug = await ensureUniqueSlug(pool, baseSlug, id);
     }
 
-    // ✅ vertical strict
     if (cols.verticalCol && req.body?.vertical !== undefined) {
-      const v = normalizeVertical(req.body?.vertical, null);
+      const v = normalizeVertical(req.body?.vertical);
       if (!v) return res.status(400).json({ error: "vertical invalid (FOOD|MARKET|FASHION)" });
       patch[cols.verticalCol] = v;
     }
@@ -311,7 +294,6 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
 
 /* =========================
  * DELETE /api/categories/:id (ADMIN)
- * - bloque la suppression si utilisée par products/sub_categories
  * =======================*/
 router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
   const id = Number(req.params.id);
@@ -324,7 +306,6 @@ router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
     const [[row]] = await conn.query(`SELECT id FROM categories WHERE id=? LIMIT 1`, [id]);
     if (!row) return res.status(404).json({ error: "Not found" });
 
-    // Empêche suppression si des sous-catégories existent
     try {
       const [[{ scCount }]] = await conn.query(
         `SELECT COUNT(*) AS scCount FROM sub_categories WHERE category_id=?`,
@@ -338,7 +319,6 @@ router.delete("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
       }
     } catch {}
 
-    // Empêche suppression si des produits existent
     try {
       const [[{ pCount }]] = await conn.query(
         `SELECT COUNT(*) AS pCount FROM products WHERE category_id=?`,
