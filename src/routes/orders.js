@@ -7,7 +7,6 @@ const PDFDocument = require("pdfkit");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin, isVendor } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { sendWhatsAppOrderConfirmation } = require("../services/twilio");
 const { env } = require("../lib/env");
 const {
   sendWhatsAppOrderConfirmation,
