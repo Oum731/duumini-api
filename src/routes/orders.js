@@ -1,5 +1,9 @@
 // src/routes/orders.js
 const { Router } = require("express");
+const crypto = require("crypto");
+const QRCode = require("qrcode");
+const PDFDocument = require("pdfkit");
+
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin, isVendor } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
@@ -7,6 +11,11 @@ const { sendWhatsAppOrderConfirmation } = require("../services/twilio");
 const { env } = require("../lib/env");
 
 const router = Router();
+
+/* =========================
+ * ✅ DUUMINI COMMISSION CONFIG
+ * =======================*/
+const DUUMINI_COMMISSION_RATE = 0.09; // ✅ 9% sur tout (food/market/fashion)
 
 /* =========================
  * CONFIG WHATSAPP ADMIN
@@ -99,13 +108,6 @@ function buildDisplayCode(id) {
   return n.toString(36).toUpperCase();
 }
 
-function computeCommissionForLine(clientUnitPrice, qty, subSlug) {
-  const totalClientLine = Number(clientUnitPrice || 0) * Number(qty || 1);
-  const sub = String(subSlug || "").trim().toLowerCase();
-  const rate = sub === "food" ? 0.18 : 0.11;
-  return +(+totalClientLine * rate).toFixed(2);
-}
-
 function normCommission(x) {
   if (x === null || x === undefined || x === "") return null;
   const n = Number(x);
@@ -120,9 +122,52 @@ function stripCommissionFromOrderRow(row, user) {
   return rest;
 }
 
-/**
+function isCancelledStatus(s) {
+  return String(s || "").trim().toUpperCase() === "CANCELLED";
+}
+
+/** ✅ Commission Duumini = 9% uniquement sur les PRODUITS (pas livraison) */
+function computeDuuminiCommission(itemsAmount) {
+  const base = Number(itemsAmount || 0);
+  if (!Number.isFinite(base) || base <= 0) return 0;
+  return +(+base * DUUMINI_COMMISSION_RATE).toFixed(2);
+}
+
+/* =========================
+ * ✅ Receipt helpers (token + number)
+ * =======================*/
+function genReceiptToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function formatReceiptNumber(orderId, createdAt = null) {
+  // DM-YYYY-000123
+  const dt = createdAt ? new Date(createdAt) : new Date();
+  const year = dt.getFullYear();
+  const seq = String(Number(orderId || 0)).padStart(6, "0");
+  return `DM-${year}-${seq}`;
+}
+
+async function detectOrdersReceiptCols(conn) {
+  const candidates = ["receipt_number", "receipt_token"];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    receipt_number: found.has("receipt_number"),
+    receipt_token: found.has("receipt_token"),
+  };
+}
+
+/* =========================
  * ✅ vérifier si une commande ne contient QUE les produits d'un vendeur
- */
+ * =======================*/
 async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
   const [[r]] = await conn.query(
     `
@@ -135,7 +180,7 @@ async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
     JOIN shops s    ON s.id = p.shop_id
     WHERE oi.order_id = ?
     `,
-    [vendorId, orderId],
+    [vendorId, orderId]
   );
 
   const mine = Number(r?.mine_count || 0);
@@ -161,7 +206,7 @@ async function getOrderWithPerm(conn, id, user) {
         WHERE oi.order_id = ? AND s.owner_id = ?
         LIMIT 1
         `,
-        [id, user.id],
+        [id, user.id]
       );
       if (!own) return { status: 403, error: "Forbidden" };
     } else {
@@ -214,7 +259,7 @@ async function getAdminUserIds() {
     `SELECT id 
        FROM users 
       WHERE role = 'ADMIN'
-        AND (is_active = 1 OR is_active IS NULL)`,
+        AND (is_active = 1 OR is_active IS NULL)`
   );
   return (rows || []).map((r) => r.id);
 }
@@ -230,7 +275,7 @@ async function getVendorsForOrder(orderId) {
      WHERE oi.order_id = ?
        AND (u.is_active = 1 OR u.is_active IS NULL)
     `,
-    [orderId],
+    [orderId]
   );
   return (rows || []).map((r) => r.user_id);
 }
@@ -262,14 +307,10 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     INSERT INTO notification_queue (user_id, type, payload, status)
     VALUES ?
     `,
-    [values],
+    [values]
   );
 }
 
-/**
- * ✅ NOUVEAU: push “temps réel” WS uniquement (pas de push) pour admins + vendeurs
- * -> évite d’attendre le worker, et évite les doublons push
- */
 async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
   let notifyUser;
   try {
@@ -305,7 +346,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
        FROM orders
       WHERE id = ?
       LIMIT 1`,
-    [orderId],
+    [orderId]
   );
 
   if (!row || !row.user_id) return;
@@ -329,7 +370,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
     INSERT INTO notification_queue (user_id, type, payload, status)
     VALUES (?, 'ORDER_STATUS', ?, 'queued')
     `,
-    [row.user_id, JSON.stringify(payloadObj)],
+    [row.user_id, JSON.stringify(payloadObj)]
   );
 }
 
@@ -358,7 +399,7 @@ async function sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTota
       WHERE oi.order_id = ?
       ORDER BY oi.id ASC
       `,
-      [orderId],
+      [orderId]
     );
 
     if (rows && rows.length) {
@@ -369,7 +410,7 @@ async function sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTota
           const suffix = vtxt ? ` (${vtxt})` : "";
           const qty = Number(r.qty || 1);
           const price = Number(r.unit_price || 0);
-          return `• ${label}${suffix} ×${qty} — ${price} ${currency || "MAD"}`;
+          return `• ${label}${suffix} ×${qty} — ${price} ${(currency || "MAD").toUpperCase()}`;
         })
         .join("\n");
     }
@@ -397,7 +438,7 @@ async function sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTota
       ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
       LIMIT 1
       `,
-      [orderId],
+      [orderId]
     );
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
   } catch {}
@@ -503,7 +544,7 @@ async function detectOrderItemsPromoCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'order_items'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -540,7 +581,7 @@ async function detectOrdersPayCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -561,10 +602,6 @@ async function getOrdersPayColsCached(pool) {
   } finally {
     conn.release();
   }
-}
-
-function isCancelledStatus(s) {
-  return String(s || "").trim().toUpperCase() === "CANCELLED";
 }
 
 function normMoney(x) {
@@ -676,13 +713,11 @@ async function lockProductForItem(conn, productId) {
       p.shop_id,
       p.promo_eligible,
       p.promo_discount_type,
-      p.promo_discount_value,
-      sc.slug AS sub_category_slug
+      p.promo_discount_value
     FROM products p
-    LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
     WHERE p.id=? FOR UPDATE
     `,
-    [productId],
+    [productId]
   );
   return p || null;
 }
@@ -702,7 +737,7 @@ async function lockVariantForItem(conn, productId, variantId) {
     FROM product_variants pv
     WHERE pv.id=? AND pv.product_id=? FOR UPDATE
     `,
-    [variantId, productId],
+    [variantId, productId]
   );
   return v || null;
 }
@@ -788,12 +823,19 @@ router.get("/", authRequired, async (req, res) => {
       const isVendorView = isVendor(user) && !isAdmin(user);
 
       const itemsAmount = Number(r.items_amount || 0);
+      const currency = (r.currency || "MAD").toUpperCase();
+
       const totalAmount = isVendorView ? itemsAmount : Number(r.total || itemsAmount);
       const deliveryFee = isVendorView ? 0 : Math.max(0, totalAmount - itemsAmount);
 
-      const currency = (r.currency || "MAD").toUpperCase();
       const paymentNorm = normalizePaymentForRow(r, Number(r.total || itemsAmount), currency, payCols);
-      const commissionDuumini = isCancelledStatus(r.status) ? null : normCommission(r.commission_duumini);
+
+      // ✅ CA Duumini (commission) = 9% des produits
+      const duuminiCommission = isCancelledStatus(r.status) ? 0 : computeDuuminiCommission(itemsAmount);
+
+      // ✅ si la DB a déjà commission_duumini, on garde la valeur (mais on peut l’écraser si besoin)
+      // ici on privilégie le calcul pour cohérence 9%
+      const commissionDuumini = isVendorView ? null : (isCancelledStatus(r.status) ? 0 : duuminiCommission);
 
       return {
         ...r,
@@ -804,11 +846,11 @@ router.get("/", authRequired, async (req, res) => {
         geo_link,
         ...paymentNorm,
         totals: {
-          items_amount: itemsAmount,
-          delivery_fee: deliveryFee,
-          amount: totalAmount,
+          items_amount: +itemsAmount.toFixed(2),
+          delivery_fee: +deliveryFee.toFixed(2),
+          amount: +totalAmount.toFixed(2),
           currency,
-          duumini_amount: isVendorView ? null : commissionDuumini,
+          duumini_commission: commissionDuumini, // ✅ CA Duumini (9%)
         },
       };
     };
@@ -855,7 +897,7 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
@@ -905,7 +947,7 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
@@ -935,7 +977,7 @@ router.get("/", authRequired, async (req, res) => {
         JOIN shops s        ON s.id = p.shop_id
         WHERE ${where}
         `,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
@@ -974,7 +1016,7 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, ...params, limit, offset],
+        [req.user.id, req.user.id, ...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
@@ -1022,7 +1064,7 @@ router.get("/", authRequired, async (req, res) => {
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset],
+      [...params, limit, offset]
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
@@ -1035,12 +1077,11 @@ router.get("/", authRequired, async (req, res) => {
 
 /* =========================
  * Shared: build cleanItems with promo
+ * ✅ Commission Duumini = 9% itemsAmount (pas besoin par ligne)
  * =======================*/
 async function buildCleanItemsWithPromo({ conn, items }) {
   let itemsAmount = 0;
-  let totalCommission = 0;
   const cleanItems = [];
-  let firstFoodShopId = null;
 
   for (const it of items) {
     const product_id = Number(it?.product_id);
@@ -1060,24 +1101,6 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       err.statusCode = 400;
       err.payload = { code: "PRODUCT_NOT_FOUND", message: "Un produit de votre panier n'est plus disponible.", product_id };
       throw err;
-    }
-
-    const isFood = String(p.sub_category_slug || "").trim().toLowerCase() === "food";
-    if (isFood) {
-      const shopId = p.shop_id != null ? Number(p.shop_id) : null;
-      if (shopId != null) {
-        if (firstFoodShopId == null) firstFoodShopId = shopId;
-        else if (firstFoodShopId !== shopId) {
-          const err = new Error("MULTIPLE_FOOD_SHOPS_NOT_ALLOWED");
-          err.statusCode = 400;
-          err.payload = {
-            code: "MULTIPLE_FOOD_SHOPS_NOT_ALLOWED",
-            message:
-              "Vous ne pouvez pas commander dans plusieurs restaurants (catégorie Food) en même temps. Terminez ou videz votre panier avant de changer de restaurant.",
-          };
-          throw err;
-        }
-      }
     }
 
     let base_unit_price = Number(p.price || 0);
@@ -1103,8 +1126,6 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     const promoPack = calcLineUnitPriceWithPromo({ baseUnitPrice: base_unit_price, p });
     const unit_price = promoPack.unit_price;
 
-    const lineCommission = computeCommissionForLine(unit_price, qty, p.sub_category_slug);
-
     cleanItems.push({
       product_id: p.id,
       qty,
@@ -1120,8 +1141,10 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     });
 
     itemsAmount += unit_price * qty;
-    totalCommission += lineCommission;
   }
+
+  // ✅ commission globale
+  const totalCommission = computeDuuminiCommission(itemsAmount);
 
   return { cleanItems, itemsAmount, totalCommission };
 }
@@ -1177,7 +1200,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         WHERE id = ?
         FOR UPDATE
         `,
-        [id],
+        [id]
       );
 
       if (!o) {
@@ -1272,6 +1295,7 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
+
     const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({ conn, items });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -1281,7 +1305,22 @@ router.post("/", authRequired, async (req, res) => {
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    const cols = ["user_id", "status", "address", "contact", "geo_link", "total", "commission_duumini", "currency", "created_at", "updated_at"];
+    // ✅ Receipt fields
+    const receiptCols = await detectOrdersReceiptCols(conn);
+    const receiptToken = receiptCols.receipt_token ? genReceiptToken() : null;
+
+    const cols = [
+      "user_id",
+      "status",
+      "address",
+      "contact",
+      "geo_link",
+      "total",
+      "commission_duumini",
+      "currency",
+      "created_at",
+      "updated_at",
+    ];
     const placeholders = ["?", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
     const vals = [
       req.user.id,
@@ -1289,10 +1328,21 @@ router.post("/", authRequired, async (req, res) => {
       JSON.stringify(addressObj),
       JSON.stringify(contactObj),
       geoLink,
-      orderTotal,
-      +totalCommission.toFixed(2),
+      +orderTotal.toFixed(2),
+      +totalCommission.toFixed(2), // ✅ 9% produits
       currency,
     ];
+
+    if (receiptCols.receipt_number) {
+      cols.push("receipt_number");
+      placeholders.push("?");
+      vals.push(null); // on le mettra après avoir l'orderId
+    }
+    if (receiptCols.receipt_token) {
+      cols.push("receipt_token");
+      placeholders.push("?");
+      vals.push(receiptToken);
+    }
 
     if (payCols?.payment) { cols.push("payment"); placeholders.push("?"); vals.push(JSON.stringify(paymentObj)); }
     if (payCols?.payment_status) { cols.push("payment_status"); placeholders.push("?"); vals.push(paymentObj.status); }
@@ -1302,6 +1352,13 @@ router.post("/", authRequired, async (req, res) => {
     const [r] = await conn.query(`INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`, vals);
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
+
+    // ✅ finalize receipt_number (pro)
+    if (receiptCols.receipt_number) {
+      const receiptNumber = formatReceiptNumber(orderId, new Date());
+      // collision improbable mais on reste safe
+      await conn.query(`UPDATE orders SET receipt_number = ? WHERE id = ?`, [receiptNumber, orderId]);
+    }
 
     for (const it of cleanItems) {
       if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
@@ -1317,11 +1374,12 @@ router.post("/", authRequired, async (req, res) => {
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
 
+    // stock decrement
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -1351,10 +1409,7 @@ router.post("/", authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // ✅ Queue (push via worker)
     try { await enqueueOrderCreatedNotifications(orderId, orderTotal, currency); } catch {}
-
-    // ✅ Client immédiat (WS + push si device)
     try {
       const { notifyUser } = require("../services/notify");
       await notifyUser(req.user.id, "ORDER_CREATED", {
@@ -1367,18 +1422,15 @@ router.post("/", authRequired, async (req, res) => {
         status: "OPEN",
       });
     } catch {}
-
-    // ✅ Admin/Vendeurs immédiat (WS only)
     try { await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency); } catch {}
 
-    // WhatsApp admin (optionnel)
     sendAdminWhatsAppForOrder({ pool, orderId, displayCode, orderTotal, currency, addressObj, contactObj, items }).catch(() => {});
 
     res.status(201).json({
       id: orderId,
       display_code: displayCode,
       status: "OPEN",
-      total: orderTotal,
+      total: +orderTotal.toFixed(2),
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
@@ -1417,6 +1469,7 @@ router.post("/guest", async (req, res) => {
     const geoLink = buildGeoLink(addressObj.gps);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
+
     const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({ conn, items });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
@@ -1426,9 +1479,42 @@ router.post("/guest", async (req, res) => {
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
-    const cols = ["user_id", "status", "address", "contact", "geo_link", "total", "commission_duumini", "currency", "created_at", "updated_at"];
+    const receiptCols = await detectOrdersReceiptCols(conn);
+    const receiptToken = receiptCols.receipt_token ? genReceiptToken() : null;
+
+    const cols = [
+      "user_id",
+      "status",
+      "address",
+      "contact",
+      "geo_link",
+      "total",
+      "commission_duumini",
+      "currency",
+      "created_at",
+      "updated_at",
+    ];
     const placeholders = ["NULL", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
-    const vals = ["OPEN", JSON.stringify(addressObj), JSON.stringify(contactObj), geoLink, orderTotal, +totalCommission.toFixed(2), currency];
+    const vals = [
+      "OPEN",
+      JSON.stringify(addressObj),
+      JSON.stringify(contactObj),
+      geoLink,
+      +orderTotal.toFixed(2),
+      +totalCommission.toFixed(2),
+      currency,
+    ];
+
+    if (receiptCols.receipt_number) {
+      cols.push("receipt_number");
+      placeholders.push("?");
+      vals.push(null);
+    }
+    if (receiptCols.receipt_token) {
+      cols.push("receipt_token");
+      placeholders.push("?");
+      vals.push(receiptToken);
+    }
 
     if (payCols?.payment) { cols.push("payment"); placeholders.push("?"); vals.push(JSON.stringify(paymentObj)); }
     if (payCols?.payment_status) { cols.push("payment_status"); placeholders.push("?"); vals.push(paymentObj.status); }
@@ -1438,6 +1524,11 @@ router.post("/guest", async (req, res) => {
     const [r] = await conn.query(`INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`, vals);
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
+
+    if (receiptCols.receipt_number) {
+      const receiptNumber = formatReceiptNumber(orderId, new Date());
+      await conn.query(`UPDATE orders SET receipt_number = ? WHERE id = ?`, [receiptNumber, orderId]);
+    }
 
     for (const it of cleanItems) {
       if (promoCols && (promoCols.promo_applied || promoCols.promo_type || promoCols.promo_value || promoCols.base_unit_price)) {
@@ -1453,7 +1544,7 @@ router.post("/guest", async (req, res) => {
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -1496,7 +1587,7 @@ router.post("/guest", async (req, res) => {
       id: orderId,
       display_code: displayCode,
       status: "OPEN",
-      total: orderTotal,
+      total: +orderTotal.toFixed(2),
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
@@ -1542,27 +1633,143 @@ router.get("/:id", authRequired, async (req, res) => {
     const payCols = await getOrdersPayColsCached(getPool());
     const paymentNorm = normalizePaymentForRow(o, Number(o.total || itemsAmount), currency, payCols);
 
-    const commissionDuumini = isCancelledStatus(o.status) ? null : normCommission(o.commission_duumini);
+    const duuminiCommission = isCancelledStatus(o.status) ? 0 : computeDuuminiCommission(itemsAmount);
 
     res.json({
       ...o,
-      commission_duumini: isVendorView ? null : commissionDuumini,
+      commission_duumini: isVendorView ? null : duuminiCommission,
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
       ...paymentNorm,
       items: result.items,
       totals: {
-        items_amount: itemsAmount,
-        delivery_fee: deliveryFee,
-        amount: totalAmount,
+        items_amount: +itemsAmount.toFixed(2),
+        delivery_fee: +deliveryFee.toFixed(2),
+        amount: +totalAmount.toFixed(2),
         currency,
-        duumini_amount: isVendorView ? null : commissionDuumini,
+        duumini_commission: isVendorView ? null : duuminiCommission,
       },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * ✅ RECEIPT PDF (with QR)
+ * GET /api/orders/:id/receipt.pdf
+ * =======================*/
+router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+  const conn = await getPool().getConnection();
+  try {
+    const result = await getOrderWithPerm(conn, id, req.user);
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+
+    const o = result.order;
+    const items = result.items || [];
+    const currency = (o.currency || "MAD").toUpperCase();
+
+    const address = safeParseJSON(o.address) || {};
+    const contact = safeParseJSON(o.contact) || {};
+
+    const itemsAmount = items.reduce((sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1), 0);
+    const totalAmount = Number(o.total || itemsAmount);
+    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+
+    // ✅ CA Duumini séparé
+    const duuminiCommission = isCancelledStatus(o.status) ? 0 : computeDuuminiCommission(itemsAmount);
+
+    // QR payload -> vérification (token si dispo)
+    const token = o.receipt_token ? String(o.receipt_token) : null;
+    const verifyUrl = token
+      ? `${(env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com").replace(/\/+$/, "")}/verify/${token}`
+      : `${(env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com").replace(/\/+$/, "")}/orders/${id}`;
+
+    const qrDataUrl = await QRCode.toDataURL(verifyUrl, { margin: 1, scale: 6 });
+
+    // PDF
+    res.setHeader("Content-Type", "application/pdf");
+    const filename = `${o.receipt_number || `receipt-${id}`}.pdf`;
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+
+    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    doc.pipe(res);
+
+    // Header
+    doc.fontSize(22).text("DUUMINI", { align: "left" });
+    doc.moveDown(0.2);
+    doc.fontSize(10).text("Reçu de commande", { align: "left" });
+    doc.moveDown();
+
+    const receiptNo = o.receipt_number || `DM-${new Date().getFullYear()}-${String(id).padStart(6, "0")}`;
+    const displayCode = buildDisplayCode(id);
+
+    doc.fontSize(12).text(`Reçu N° : ${receiptNo}`);
+    doc.text(`Commande : ${displayCode}`);
+    doc.text(`Statut : ${(o.status || "").toUpperCase()}`);
+    doc.text(`Date : ${o.created_at ? new Date(o.created_at).toLocaleString("fr-FR") : new Date().toLocaleString("fr-FR")}`);
+    doc.moveDown();
+
+    // Client & Livraison
+    const fullName = `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || "Client";
+    doc.fontSize(12).text("Client", { underline: true });
+    doc.fontSize(10).text(`Nom : ${fullName}`);
+    if (contact.phone) doc.text(`Téléphone : ${contact.phone}`);
+    doc.moveDown(0.5);
+
+    doc.fontSize(12).text("Adresse", { underline: true });
+    doc.fontSize(10).text(`Ville : ${address.city || "—"}`);
+    doc.text(`Commune : ${address.commune || "—"}`);
+    doc.text(`Quartier : ${address.district || "—"}`);
+    doc.moveDown();
+
+    // Items
+    doc.fontSize(12).text("Détails", { underline: true });
+    doc.moveDown(0.5);
+
+    doc.fontSize(10);
+    items.forEach((it) => {
+      const name = it.product_name || `Produit #${it.product_id || ""}`;
+      const qty = Number(it.qty || 1);
+      const unit = Number(it.unit_price || 0);
+      const line = +(qty * unit).toFixed(2);
+      const variant = [it.variant_size, it.variant_color].filter(Boolean).join(" / ");
+      const suffix = variant ? ` (${variant})` : "";
+      doc.text(`• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(2)} ${currency}`);
+    });
+
+    doc.moveDown();
+
+    // Totals (séparés)
+    doc.fontSize(12).text("Totaux", { underline: true });
+    doc.fontSize(10);
+    doc.text(`Sous-total produits : ${itemsAmount.toFixed(2)} ${currency}`);
+    doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
+    doc.moveDown(0.3);
+    doc.fontSize(12).text(`TOTAL : ${totalAmount.toFixed(2)} ${currency}`);
+    doc.moveDown(0.6);
+
+    doc.fontSize(10).text(`CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`);
+    doc.moveDown();
+
+    // QR
+    const qrBase64 = qrDataUrl.split(",")[1];
+    const qrBuf = Buffer.from(qrBase64, "base64");
+    doc.fontSize(10).text("Scanner pour vérifier le reçu :", { align: "left" });
+    doc.image(qrBuf, doc.x, doc.y + 6, { width: 110 });
+    doc.moveDown(6);
+    doc.fontSize(8).text(`Lien : ${verifyUrl}`);
+
+    doc.end();
+  } catch (e) {
+    try { res.status(500).json({ error: e.message }); } catch {}
   } finally {
     conn.release();
   }
@@ -1651,7 +1858,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     const [items] = await conn.query(
       `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
-      [id],
+      [id]
     );
 
     for (const it of items) {
@@ -1671,7 +1878,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
           commission_duumini = 0,
           updated_at=NOW()
     WHERE id=?`,
-      [id],
+      [id]
     );
 
     await conn.commit();
