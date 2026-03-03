@@ -202,10 +202,40 @@ async function sendWhatsAppOrderConfirmation({
   const body = lines.join("\n");
   return sendWhatsAppMessage(to, body, imageUrl || undefined);
 }
+/**
+ * ✅ Envoie un reçu (PDF) au client via WhatsApp.
+ * mediaUrl DOIT être une URL HTTPS publique (accessible sans auth).
+ */
+async function sendWhatsAppReceiptToClient({
+  to,
+  receiptNumber,
+  displayCode,
+  total,
+  currency = "MAD",
+  pdfUrl,
+}) {
+  const lines = [];
 
+  lines.push("🧾 *Reçu Duumini*");
+  if (receiptNumber) lines.push(`• Reçu : ${receiptNumber}`);
+  if (displayCode) lines.push(`• Commande : ${displayCode}`);
+  if (typeof total !== "undefined" && total !== null)
+    lines.push(`• Total : ${Number(total || 0).toFixed(2)} ${String(currency || "MAD").toUpperCase()}`);
+
+  lines.push("");
+  lines.push("📎 Reçu en pièce jointe (PDF).");
+  lines.push("Merci pour votre commande 🙏");
+
+  const body = lines.join("\n");
+
+  // ✅ Twilio WhatsApp: mediaUrl en tableau possible
+  return sendWhatsAppMessage(to, body, pdfUrl);
+}
 module.exports = {
   sendOtpStart,
   checkOtpCode,
   sendWhatsAppMessage,
   sendWhatsAppOrderConfirmation,
+  sendWhatsAppReceiptToClient, // ✅
+
 };
