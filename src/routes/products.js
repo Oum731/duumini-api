@@ -112,14 +112,24 @@ function normalizeVertical(value, fallback = null) {
   return fallback;
 }
 
-function parseOnlyActive(req) {
-  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  return (
-    onlyActiveRaw === "1" ||
-    onlyActiveRaw === "true" ||
-    onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on"
-  );
+/**
+ * ✅ Active filter (tri-state)
+ * - null => tous
+ * - 1    => actifs
+ * - 0    => désactivés
+ *
+ * defaultValue:
+ * - PUBLIC: 1 (actifs)
+ * - MANAGE: null (tous)
+ */
+function parseActiveFilter(req, defaultValue = null) {
+  const raw = req.query?.onlyActive;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return defaultValue;
+
+  const v = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return 1;
+  if (["0", "false", "no", "off"].includes(v)) return 0;
+  return defaultValue;
 }
 
 function pickFilters(req) {
@@ -155,13 +165,6 @@ function isActingVendorOrRestaurant(req) {
 
 /* =========================================================
  * ✅ Products cache (TTL + max entries)
- * - Env:
- *   PRODUCTS_CACHE_ENABLED=1
- *   PRODUCTS_CACHE_TTL_MS=20000
- *   PRODUCTS_CACHE_MAX=500
- * - Query:
- *   ?noCache=1  -> bypass cache
- * - Auto invalidation on create/update/delete/images/variants
  * ========================================================= */
 const PRODUCTS_CACHE_ENABLED =
   String(env.PRODUCTS_CACHE_ENABLED ?? "1").trim() === "1";
@@ -276,7 +279,6 @@ function isDrinkCategoryId(catId, drinkCatId) {
 
 /* =========================================================
  * Optional supplier_* integration (NO breaking change)
- * - use aggregated derived table (avoid GROUP BY p.*)
  * ========================================================= */
 let _supplierMetaLoaded = false;
 let _supplierMeta = {
@@ -892,7 +894,7 @@ async function listProducts(pool, opts) {
     limit,
     offset,
     channel,
-    onlyActive,
+    activeFilter, // ✅ tri-state
     onlyPromos,
     categoryId,
     subCategoryId,
@@ -904,7 +906,7 @@ async function listProducts(pool, opts) {
     ownerId,
     onlyDrinks,
     excludeDrinks,
-    catalogueMode, // "PUBLIC_CLIENT" | "SUPPLIER_ONLY" | null
+    catalogueMode,
   } = opts || {};
 
   const whereParts = [];
@@ -920,7 +922,8 @@ async function listProducts(pool, opts) {
     else whereParts.push("1=1");
   }
 
-  if (onlyActive) whereParts.push("p.is_active = 1");
+  if (activeFilter === 1) whereParts.push("p.is_active = 1");
+  if (activeFilter === 0) whereParts.push("p.is_active = 0");
 
   if (onlyPromos) {
     whereParts.push(`(p.promo_eligible = 1 AND COALESCE(p.promo_discount_value, 0) > 0)`);
@@ -1046,8 +1049,14 @@ function applyPageSizeAlias(req) {
 async function listHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
-  const onlyActive = parseOnlyActive(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 20,
+    maxPageSize: 100,
+  });
+
+  const activeFilter = parseActiveFilter(req, 1); // ✅ public => actifs par défaut
+
   const {
     categoryId,
     subCategoryId,
@@ -1071,7 +1080,7 @@ async function listHandler(req, res, next) {
       limit,
       offset,
       channel: null,
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -1098,8 +1107,13 @@ async function listHandler(req, res, next) {
 async function listFoodHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
-  const onlyActive = parseOnlyActive(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 20,
+    maxPageSize: 100,
+  });
+
+  const activeFilter = parseActiveFilter(req, 1); // ✅ public => actifs par défaut
   const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   const pool = getPool();
@@ -1110,7 +1124,7 @@ async function listFoodHandler(req, res, next) {
       limit,
       offset,
       channel: "african-food",
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -1135,8 +1149,13 @@ async function listFoodHandler(req, res, next) {
 async function listMarketHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
-  const onlyActive = parseOnlyActive(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 20,
+    maxPageSize: 100,
+  });
+
+  const activeFilter = parseActiveFilter(req, 1); // ✅ public => actifs par défaut
   const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
 
   const pool = getPool();
@@ -1147,7 +1166,7 @@ async function listMarketHandler(req, res, next) {
       limit,
       offset,
       channel: "african-market",
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -1171,12 +1190,16 @@ async function listMarketHandler(req, res, next) {
 
 /**
  * PUBLIC: DRINKS BY SHOP
- * GET /api/products/drinks?shopId=1&onlyActive=1&q=...
  */
 async function listShopDrinksHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 20,
+    maxPageSize: 100,
+  });
+
   const pool = getPool();
 
   try {
@@ -1185,7 +1208,7 @@ async function listShopDrinksHandler(req, res, next) {
     const shopId = Number(req.query.shopId ?? req.query.shop_id ?? 0);
     if (!shopId) return res.status(400).json({ error: "shopId requis" });
 
-    const onlyActive = parseOnlyActive(req);
+    const activeFilter = parseActiveFilter(req, 1); // ✅ public => actifs
     const q = String(req.query.q ?? "").trim();
 
     const citiesCol = await getCitiesColCached(pool);
@@ -1194,7 +1217,7 @@ async function listShopDrinksHandler(req, res, next) {
       limit,
       offset,
       channel: null,
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId: drinkCatId,
       subCategoryId: null,
@@ -1217,13 +1240,19 @@ async function listShopDrinksHandler(req, res, next) {
 }
 
 /* =========================================================
- * ✅ SUPPLIER CATALOGUE (vendors/restaurants/admin only)
+ * ✅ SUPPLIER CATALOGUE (secure)
  * ========================================================= */
 async function listSuppliersCatalogueHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
-  const onlyActive = parseOnlyActive(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 50,
+    maxPageSize: 500,
+  });
+
+  const activeFilter = parseActiveFilter(req, 1); // ✅ suppliers => actifs par défaut
+
   const {
     categoryId,
     subCategoryId,
@@ -1247,7 +1276,7 @@ async function listSuppliersCatalogueHandler(req, res, next) {
       limit,
       offset,
       channel: null,
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -1277,8 +1306,14 @@ async function listSuppliersCatalogueHandler(req, res, next) {
 async function listManageHandler(req, res, next) {
   applyPageSizeAlias(req);
 
-  const { page, pageSize, offset, limit } = getPagination(req);
-  const onlyActive = parseOnlyActive(req);
+  const { page, pageSize, offset, limit } = getPagination(req, {
+    page: 1,
+    pageSize: 50,
+    maxPageSize: 1000, // ✅ admin/manage
+  });
+
+  const activeFilter = parseActiveFilter(req, null); // ✅ manage => tous par défaut
+
   const {
     categoryId,
     subCategoryId,
@@ -1307,7 +1342,7 @@ async function listManageHandler(req, res, next) {
       limit,
       offset,
       channel: null,
-      onlyActive,
+      activeFilter,
       onlyPromos: false,
       categoryId,
       subCategoryId,
@@ -1531,7 +1566,6 @@ async function getPublicByIdHandler(req, res, next) {
 async function promotionsHandler(req, res, next) {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
-  const onlyActive = parseOnlyActive(req);
 
   const channel = String(req.query.channel || "all").toLowerCase();
   const channelNorm =
@@ -1541,6 +1575,7 @@ async function promotionsHandler(req, res, next) {
       ? "african-market"
       : null;
 
+  const activeFilter = parseActiveFilter(req, 1); // ✅ promo public => actifs
   const { categoryId, subCategoryId, shopId, q, vertical, includeVariants } = pickFilters(req);
 
   try {
@@ -1550,7 +1585,7 @@ async function promotionsHandler(req, res, next) {
       limit,
       offset: 0,
       channel: channelNorm,
-      onlyActive,
+      activeFilter,
       onlyPromos: true,
       categoryId,
       subCategoryId,
@@ -2541,17 +2576,14 @@ router.delete(
  * ROUTES (public / secure)
  * ======================= */
 
-// ✅ FASHION shortcut (public)
 router.get("/fashion", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), async (req, res, next) => {
   req.query.vertical = "FASHION";
   if (req.query.includeVariants == null) req.query.includeVariants = "1";
   return listHandler(req, res, next);
 });
 
-// ✅ DRINKS (public)
 router.get("/drinks", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listShopDrinksHandler);
 
-// ✅ SUPPLIER catalogue (secure)
 router.get(
   "/suppliers",
   authRequired,
@@ -2560,7 +2592,6 @@ router.get(
   listSuppliersCatalogueHandler
 );
 
-// ✅ MANAGE routes (secure)
 router.get(
   "/manage",
   authRequired,
@@ -2583,12 +2614,10 @@ router.get(
   getManageByIdHandler
 );
 
-// ✅ PUBLIC catalogue
 router.get("/", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listHandler);
 router.get("/african-food", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listFoodHandler);
 router.get("/african-market", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listMarketHandler);
 
-// ✅ PROMO / TOP
 router.get("/promotions", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), promotionsHandler);
 router.get("/top-ordered", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topOrderedHandler);
 router.get("/top-rated", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topRatedHandler);
