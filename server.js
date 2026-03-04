@@ -31,6 +31,14 @@ const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 const locations = require("./src/routes/locations");
 
+// ✅ NEW: reports routes
+let reports = null;
+try {
+  reports = require("./src/routes/reports");
+} catch (e) {
+  console.warn("[reports] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Supply chain routes
 let deliveryZones = null;
 let supplierProducts = null;
@@ -89,6 +97,7 @@ try {
 function yn(v) {
   return v ? "OK" : "MISSING";
 }
+
 console.log("[ENV] NODE_ENV =", env.NODE_ENV);
 console.log("[ENV] PORT =", env.PORT);
 console.log("[ENV] CORS_ORIGINS =", env.CORS_ORIGINS || "*");
@@ -124,7 +133,7 @@ app.use((req, res, next) => {
   res.setHeader("X-Request-Id", String(rid));
   next();
 });
-app.use("/api/reports", require("./src/routes/reports"));
+
 /* =========================
  * ✅ Security headers
  * ========================= */
@@ -145,7 +154,7 @@ if (compression) {
 }
 
 /* =========================
- * ✅ CORS (clean, pas de double OPTIONS)
+ * ✅ CORS (IMPORTANT: avant les routes)
  * ========================= */
 const corsOrigins =
   env.CORS_ORIGINS === "*"
@@ -157,7 +166,7 @@ const corsOrigins =
 
 function isOriginAllowed(origin) {
   if (corsOrigins === true) return true;
-  if (!origin) return true;
+  if (!origin) return true; // curl/postman
   if (Array.isArray(corsOrigins)) {
     if (corsOrigins.includes(origin)) return true;
 
@@ -256,13 +265,9 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 /* =========================
  * Healthcheck
  * ========================= */
-app.get("/health", (_req, res) =>
-  res.status(200).json({ ok: true, ts: Date.now() }),
-);
+app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 app.get("/api/health", (_req, res) =>
-  res
-    .status(200)
-    .json({ ok: true, pid: process.pid, uptime: process.uptime() }),
+  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() }),
 );
 
 /* =========================
@@ -294,6 +299,9 @@ app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
 app.use("/api/locations", locations);
+
+// ✅ Reports routes (ICI, après CORS)
+if (reports) app.use("/api/reports", reports);
 
 // ✅ Supply chain routes (si présents)
 if (deliveryZones) app.use("/api/delivery-zones", deliveryZones);
@@ -412,9 +420,7 @@ const RUN_WORKER =
   (env.NODE_ENV === "production" ? "1" : "0");
 if (RUN_WORKER === "1" && io) {
   try {
-    const {
-      startNotificationWorker,
-    } = require("./src/workers/notificationWorker");
+    const { startNotificationWorker } = require("./src/workers/notificationWorker");
     startNotificationWorker(io);
     console.log("[worker] notificationWorker started");
   } catch (e) {
@@ -440,9 +446,5 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) =>
-  console.error("[unhandledRejection]", err),
-);
-process.on("uncaughtException", (err) =>
-  console.error("[uncaughtException]", err),
-);
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
