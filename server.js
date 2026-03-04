@@ -31,6 +31,14 @@ const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 const locations = require("./src/routes/locations");
 
+// ✅ NEW: admin users route
+let adminUsers = null;
+try {
+  adminUsers = require("./src/routes/adminUsers");
+} catch (e) {
+  console.warn("[adminUsers] route missing:", e?.message || e);
+}
+
 // ✅ NEW: reports routes
 let reports = null;
 try {
@@ -265,7 +273,9 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 /* =========================
  * Healthcheck
  * ========================= */
-app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
+app.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true, ts: Date.now() }),
+);
 app.get("/api/health", (_req, res) =>
   res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() }),
 );
@@ -283,6 +293,9 @@ app.use("/api/auth", auth);
 app.use("/api/auth", otpRoutes);
 
 app.use("/api/user", users);
+
+// ✅ NEW: admin users (clients/users list)
+if (adminUsers) app.use("/api/admin/users", adminUsers);
 
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
@@ -446,5 +459,9 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+process.on("unhandledRejection", (err) =>
+  console.error("[unhandledRejection]", err),
+);
+process.on("uncaughtException", (err) =>
+  console.error("[uncaughtException]", err),
+);
