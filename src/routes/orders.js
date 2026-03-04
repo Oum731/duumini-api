@@ -1396,16 +1396,21 @@ router.put("/:id/payment", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Create order AS CUSTOMER (ADMIN)
- * POST /api/orders/admin
- * body: { customer_id, contact?, address?, delivery?, items[], totals?, payment? }
- * =======================*/
+//* =========================
+ // ✅ Create order AS ADMIN (user OR guest)
+ //POST /api/orders/admin
+ //* body:
+ //* - soit { customer_id, ... }   ✅ user existant
+ //* - soit { contact: {phone,...}, ... } ✅ invité sans compte
+ //* - compat: accepte aussi { customer: {phone,...} } (si ton front envoie customer)
+ // =======================*//
 router.post("/admin", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const {
     customer_id,
+    // compat: certains fronts envoient "customer"
+    customer = null,
     contact = null,
     address = {},
     delivery = {},
@@ -1414,10 +1419,8 @@ router.post("/admin", authRequired, async (req, res) => {
     payment = null,
   } = req.body || {};
 
-  const customerId = Number(customer_id);
-  if (!Number.isFinite(customerId) || customerId <= 0) {
-    return res.status(400).json({ error: "customer_id required" });
-  }
+  const customerId = Number(customer_id || 0);
+  const hasUser = Number.isFinite(customerId) && customerId > 0;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items[] required" });
@@ -1429,34 +1432,63 @@ router.post("/admin", authRequired, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    const [[u]] = await conn.query(
-      `SELECT id, first_name, last_name, phone
-         FROM users
-        WHERE id = ?
-        LIMIT 1`,
-      [customerId]
-    );
-    if (!u) {
-      await conn.rollback();
-      return res.status(404).json({ error: "customer not found" });
+    // ✅ si customer_id présent => on charge le user, sinon guest
+    let u = null;
+    if (hasUser) {
+      const [[row]] = await conn.query(
+        `SELECT id, first_name, last_name, phone
+           FROM users
+          WHERE id = ?
+          LIMIT 1`,
+        [customerId]
+      );
+      if (!row) {
+        await conn.rollback();
+        return res.status(404).json({ error: "customer not found" });
+      }
+      u = row;
     }
 
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    let contactObj = contact ? buildContactFromPayload(contact) : null;
-    if (!contactObj || (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)) {
+    // ✅ contact: priorités
+    // 1) contact (si fourni)
+    // 2) customer (compat)
+    // 3) user (si hasUser)
+    let contactObj = null;
+
+    const rawContact = contact || customer || null;
+    if (rawContact) contactObj = buildContactFromPayload(rawContact);
+
+    if (
+      (!contactObj ||
+        (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)) &&
+      hasUser
+    ) {
       contactObj = buildContactFromUser(u);
+    }
+
+    // ✅ si guest => téléphone obligatoire
+    if (!hasUser) {
+      if (!contactObj) contactObj = buildContactFromPayload({});
+      if (!contactObj.phone) {
+        await conn.rollback();
+        return res.status(400).json({
+          code: "PHONE_REQUIRED",
+          message:
+            "Pour créer une commande admin sans compte, un numéro de téléphone est obligatoire (contact.phone).",
+        });
+      }
     }
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
 
-    // ✅ IMPORTANT: ton code appelait actor mais la fonction ne l'accepte pas.
-    // On garde aligné: pas d'actor tant qu'on n'a pas la logique produits privés ici.
-    const { cleanItems, itemsAmount, totalCommission } = await buildCleanItemsWithPromo({
-      conn,
-      items,
-    });
+    const { cleanItems, itemsAmount, totalCommission } =
+      await buildCleanItemsWithPromo({
+        conn,
+        items,
+      });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
@@ -1468,6 +1500,7 @@ router.post("/admin", authRequired, async (req, res) => {
     const receiptCols = await detectOrdersReceiptCols(conn);
     const receiptToken = receiptCols.receipt_token ? genReceiptToken() : null;
 
+    // ✅ INSERT order (user_id NULL si guest)
     const cols = [
       "user_id",
       "created_by_admin_id",
@@ -1482,14 +1515,27 @@ router.post("/admin", authRequired, async (req, res) => {
       "created_at",
       "updated_at",
     ];
-    const placeholders = ["?", "?", "?", "?", "?", "?", "?", "?", "?", "?", "NOW()", "NOW()"];
+    const placeholders = [
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "?",
+      "NOW()",
+      "NOW()",
+    ];
     const vals = [
-      customerId,
+      hasUser ? customerId : null,
       req.user.id,
       "ADMIN",
       "OPEN",
       JSON.stringify(addressObj),
-      JSON.stringify(contactObj),
+      JSON.stringify(contactObj || {}),
       geoLink,
       +orderTotal.toFixed(2),
       +totalCommission.toFixed(2),
@@ -1544,6 +1590,7 @@ router.post("/admin", authRequired, async (req, res) => {
       ]);
     }
 
+    // ✅ order_items
     for (const it of cleanItems) {
       if (
         promoCols &&
@@ -1586,7 +1633,7 @@ router.post("/admin", authRequired, async (req, res) => {
       }
     }
 
-    // stock decrement
+    // ✅ stock decrement
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -1623,23 +1670,31 @@ router.post("/admin", authRequired, async (req, res) => {
 
     await conn.commit();
 
+    // ✅ notifications admin/vendors (OK pour guest aussi)
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch {}
     try {
-      const { notifyUser } = require("../services/notify");
-      await notifyUser(customerId, "ORDER_CREATED", {
-        title: `Commande ${displayCode} créée`,
-        body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0
-        )} ${currency}.`,
-        order_id: orderId,
-        display_code: displayCode,
-        total: Number(orderTotal || 0),
-        currency,
-        status: "OPEN",
-      });
+      await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
+
+    // ✅ notification client seulement si user existe
+    if (hasUser) {
+      try {
+        const { notifyUser } = require("../services/notify");
+        await notifyUser(customerId, "ORDER_CREATED", {
+          title: `Commande ${displayCode} créée`,
+          body: `Votre commande ${displayCode} a été créée. Total: ${Number(
+            orderTotal || 0
+          )} ${currency}.`,
+          order_id: orderId,
+          display_code: displayCode,
+          total: Number(orderTotal || 0),
+          currency,
+          status: "OPEN",
+        });
+      } catch {}
+    }
 
     return res.status(201).json({
       id: orderId,
@@ -1649,7 +1704,8 @@ router.post("/admin", authRequired, async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
-      user_id: customerId,
+      user_id: hasUser ? customerId : null,
+      contact: contactObj || null,
       created_by_admin_id: req.user.id,
       created_via: "ADMIN",
     });
@@ -1663,7 +1719,6 @@ router.post("/admin", authRequired, async (req, res) => {
     conn.release();
   }
 });
-
 /* =========================
  * Create order (auth)
  * =======================*/
