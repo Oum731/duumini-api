@@ -23,6 +23,9 @@ cloudinary.config({
   api_secret: env.CLOUDINARY_API_SECRET,
 });
 
+/* =========================================================
+ * Cloudinary upload (buffer)
+ * ========================================================= */
 function uploadBufferToCloudinary(buffer, filename) {
   return new Promise((resolve, reject) => {
     const now = new Date();
@@ -46,21 +49,25 @@ function uploadBufferToCloudinary(buffer, filename) {
   });
 }
 
+/* =========================================================
+ * Router / upload
+ * ========================================================= */
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
+/* =========================================================
+ * Small helpers
+ * ========================================================= */
 function toPositiveInt(value, defaultValue) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return defaultValue;
   return Math.floor(n);
 }
-
 function parseIdParam(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.floor(n);
 }
-
 function parseBoolFlag(value, defaultValue = null) {
   if (value === undefined || value === null) return defaultValue;
   const v = String(value).trim().toLowerCase();
@@ -68,7 +75,6 @@ function parseBoolFlag(value, defaultValue = null) {
   if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
   return defaultValue;
 }
-
 function safeJsonParse(x, fallback = null) {
   if (x == null) return fallback;
   if (typeof x === "object") return x;
@@ -78,11 +84,17 @@ function safeJsonParse(x, fallback = null) {
     return fallback;
   }
 }
+function parseBoolQuery(req, key, defaultValue = 0) {
+  const raw = req.query?.[key];
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "") return defaultValue;
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return 1;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
+  return defaultValue;
+}
 
 /**
  * ✅ Vertical strict
- * - ton DB: sub_categories.vertical existe (confirmé)
- * - FOOD = plats + boissons
  */
 function normalizeVertical(value, fallback = null) {
   if (value == null) return fallback;
@@ -97,13 +109,28 @@ function normalizeVertical(value, fallback = null) {
   return fallback;
 }
 
-function parseBoolQuery(req, key, defaultValue = 0) {
-  const raw = req.query?.[key];
-  const v = String(raw ?? "").trim().toLowerCase();
-  if (v === "") return defaultValue;
-  if (v === "1" || v === "true" || v === "yes" || v === "on") return 1;
-  if (v === "0" || v === "false" || v === "no" || v === "off") return 0;
-  return defaultValue;
+function parseOnlyActive(req) {
+  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
+  return (
+    onlyActiveRaw === "1" ||
+    onlyActiveRaw === "true" ||
+    onlyActiveRaw === "yes" ||
+    onlyActiveRaw === "on"
+  );
+}
+
+function pickFilters(req) {
+  return {
+    categoryId: req.query.categoryId ?? req.query.category_id ?? null,
+    subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
+    shopId: req.query.shopId ?? req.query.shop_id ?? null,
+    q: req.query.q ?? "",
+    vertical: req.query.vertical ?? req.query.v ?? null,
+    includeVariants: parseBoolQuery(req, "includeVariants", 0),
+    onlyWithVariants: parseBoolQuery(req, "onlyWithVariants", 0),
+    onlyDrinks: parseBoolQuery(req, "onlyDrinks", 0),
+    excludeDrinks: parseBoolQuery(req, "excludeDrinks", 0),
+  };
 }
 
 /* =========================================================
@@ -124,9 +151,95 @@ function isActingVendorOrRestaurant(req) {
 }
 
 /* =========================================================
- * Drinks (Boissons) helpers (NO breaking change)
- * - category slug: 'boissons'
- * - fallback id: 8
+ * ✅ Products cache (TTL + max entries)
+ * - Env:
+ *   PRODUCTS_CACHE_ENABLED=1
+ *   PRODUCTS_CACHE_TTL_MS=20000
+ *   PRODUCTS_CACHE_MAX=500
+ * - Query:
+ *   ?noCache=1  -> bypass cache
+ * - Auto invalidation on create/update/delete/images/variants
+ * ========================================================= */
+const PRODUCTS_CACHE_ENABLED = String(env.PRODUCTS_CACHE_ENABLED ?? "1").trim() === "1";
+const PRODUCTS_CACHE_TTL_MS = toPositiveInt(env.PRODUCTS_CACHE_TTL_MS, 20_000);
+const PRODUCTS_CACHE_MAX = toPositiveInt(env.PRODUCTS_CACHE_MAX, 500);
+
+const _cache = new Map(); // key -> { exp, payload }
+
+function _cacheNow() {
+  return Date.now();
+}
+function _cachePrune() {
+  const now = _cacheNow();
+  for (const [k, v] of _cache.entries()) {
+    if (!v || v.exp <= now) _cache.delete(k);
+  }
+  if (_cache.size <= PRODUCTS_CACHE_MAX) return;
+  const it = _cache.keys();
+  while (_cache.size > PRODUCTS_CACHE_MAX) {
+    const k = it.next().value;
+    if (k == null) break;
+    _cache.delete(k);
+  }
+}
+function cacheGet(key) {
+  if (!PRODUCTS_CACHE_ENABLED) return null;
+  const item = _cache.get(key);
+  if (!item) return null;
+  if (item.exp <= _cacheNow()) {
+    _cache.delete(key);
+    return null;
+  }
+  return item.payload ?? null;
+}
+function cacheSet(key, payload, ttlMs = PRODUCTS_CACHE_TTL_MS) {
+  if (!PRODUCTS_CACHE_ENABLED) return;
+  _cachePrune();
+  _cache.set(key, { exp: _cacheNow() + Math.max(1000, ttlMs), payload });
+}
+function clearProductsCache() {
+  _cache.clear();
+}
+
+function buildCacheKey(req, scope = "PUBLIC") {
+  const q = req.query || {};
+  const base = `${req.method}:${req.baseUrl}${req.path}`;
+  const stableKeys = Object.keys(q).sort();
+  const queryStr = stableKeys.map((k) => `${k}=${String(q[k])}`).join("&");
+
+  if (scope === "PUBLIC") return `PUBLIC|${base}?${queryStr}`;
+
+  const uid = actingUserId(req) || 0;
+  const role = String(req?.user?.role || "").toUpperCase();
+  const shop = actingShopId(req) || 0;
+  return `AUTH|uid=${uid}|role=${role}|shop=${shop}|${base}?${queryStr}`;
+}
+
+function cachedJson(scope, ttlMs) {
+  return (req, res, next) => {
+    if (!PRODUCTS_CACHE_ENABLED) return next();
+
+    const noCache = String(req.query?.noCache ?? "").toLowerCase();
+    if (noCache === "1" || noCache === "true" || noCache === "yes") return next();
+
+    const key = buildCacheKey(req, scope);
+    const cached = cacheGet(key);
+    if (cached != null) return res.json(cached);
+
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        cacheSet(key, body, ttlMs);
+      }
+      return originalJson(body);
+    };
+
+    return next();
+  };
+}
+
+/* =========================================================
+ * Drinks helpers (NO breaking change)
  * ========================================================= */
 const DRINK_CATEGORY_SLUG = "boissons";
 const DRINK_CATEGORY_ID_FALLBACK = 8;
@@ -151,7 +264,6 @@ async function getDrinkCategoryIdCached(pool) {
     conn.release();
   }
 }
-
 function isDrinkCategoryId(catId, drinkCatId) {
   const c = Number(catId || 0);
   const d = Number(drinkCatId || 0);
@@ -160,6 +272,7 @@ function isDrinkCategoryId(catId, drinkCatId) {
 
 /* =========================================================
  * Optional supplier_* integration (NO breaking change)
+ * - use aggregated derived table (avoid GROUP BY p.*)
  * ========================================================= */
 let _supplierMetaLoaded = false;
 let _supplierMeta = {
@@ -218,20 +331,32 @@ async function getSupplierMetaCached(pool) {
 }
 
 function supplierAggSelect(meta) {
-  if (!meta?.enabled) {
-    return { joinSql: "", selectSql: "" };
-  }
+  if (!meta?.enabled) return { joinSql: "", selectSql: "" };
 
-  const costExpr = meta.costCol ? `MIN(sp.${meta.costCol})` : "NULL";
-  const stockExpr = meta.stockCol ? `COALESCE(SUM(sp.${meta.stockCol}),0)` : "NULL";
-  const lastExpr = meta.updatedAtCol ? `MAX(sp.${meta.updatedAtCol})` : "NULL";
+  const costCol = meta.costCol;
+  const stockCol = meta.stockCol;
+  const updatedAtCol = meta.updatedAtCol;
+
+  const costExpr = costCol ? `MIN(${costCol})` : "NULL";
+  const stockExpr = stockCol ? `COALESCE(SUM(${stockCol}),0)` : "NULL";
+  const lastExpr = updatedAtCol ? `MAX(${updatedAtCol})` : "NULL";
 
   return {
-    joinSql: `LEFT JOIN supplier_products sp ON sp.product_id = p.id`,
+    joinSql: `
+      LEFT JOIN (
+        SELECT
+          product_id,
+          ${stockExpr} AS supplier_stock,
+          ${costExpr}  AS supplier_cost,
+          ${lastExpr}  AS supplier_last_supply_at
+        FROM supplier_products
+        GROUP BY product_id
+      ) sp ON sp.product_id = p.id
+    `,
     selectSql: `,
-      ${stockExpr} AS supplier_stock,
-      ${costExpr}  AS supplier_cost,
-      ${lastExpr}  AS supplier_last_supply_at
+      sp.supplier_stock,
+      sp.supplier_cost,
+      sp.supplier_last_supply_at
     `,
   };
 }
@@ -669,7 +794,81 @@ async function attachVariantsToProducts(pool, items, opts = {}) {
 }
 
 /* =========================================================
- * LIST PRODUCTS (supports shop_type filtering + ownerId)
+ * Core select builders
+ * ========================================================= */
+async function getSelectMeta(pool) {
+  const shopTypeCol = await getShopTypeColCached(pool);
+  const supplierMeta = await getSupplierMetaCached(pool);
+  const supplierAgg = supplierAggSelect(supplierMeta);
+  return { shopTypeCol, supplierAgg };
+}
+
+function baseSelectSql(shopTypeCol, supplierAgg) {
+  return `
+    SELECT
+      p.*,
+      s.name AS shop_name,
+      s.logo AS shop_logo,
+      s.cover AS shop_cover,
+      s.city AS shop_city
+      ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
+
+      c.name AS category_name,
+      c.slug AS category_slug,
+
+      sc.id   AS sub_category_id,
+      sc.name AS sub_category_name,
+      sc.slug AS sub_category_slug,
+
+      (SELECT url
+         FROM product_images pi
+        WHERE pi.product_id = p.id
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1) AS cover,
+
+      (SELECT COUNT(*)
+         FROM product_variants pv
+        WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
+
+      (SELECT MIN(COALESCE(pv.price_override, p.price))
+         FROM product_variants pv
+        WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
+      ${supplierAgg.selectSql}
+
+    FROM products p
+    LEFT JOIN shops s ON s.id = p.shop_id
+    LEFT JOIN categories c ON c.id = p.category_id
+    LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
+    ${supplierAgg.joinSql}
+  `;
+}
+
+function mapProductRow(r) {
+  addSupplierAggToRow(r);
+
+  const base = stripDuuminiRateFromProduct(r);
+
+  const variants_count = Number(r.variants_count || 0);
+  const min_price = r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
+
+  const merged = {
+    ...base,
+    has_variants: variants_count > 0,
+    min_price: Number.isFinite(min_price) ? min_price : null,
+    variants_count,
+
+    shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
+
+    supplier_stock: r.supplier_stock == null ? null : Number(r.supplier_stock),
+    supplier_cost: r.supplier_cost == null ? null : Number(r.supplier_cost),
+    supplier_last_supply_at: r.supplier_last_supply_at ?? null,
+  };
+
+  return withPromoComputed(merged);
+}
+
+/* =========================================================
+ * LIST PRODUCTS
  * ========================================================= */
 async function listProducts(pool, opts) {
   const {
@@ -694,21 +893,14 @@ async function listProducts(pool, opts) {
   const whereParts = [];
   const params = [];
 
-  // ✅ IMPORTANT: on ne se base PLUS sur sc.slug='food'
-  // - african-food => p.vertical='FOOD' (inclut plats + boissons)
-  // - african-market => p.vertical='MARKET'
   const v = normalizeVertical(vertical, null);
   if (v) {
     whereParts.push("p.vertical = ?");
     params.push(v);
   } else {
-    if (channel === "african-food") {
-      whereParts.push("p.vertical = 'FOOD'");
-    } else if (channel === "african-market") {
-      whereParts.push("p.vertical = 'MARKET'");
-    } else {
-      whereParts.push("1=1");
-    }
+    if (channel === "african-food") whereParts.push("p.vertical = 'FOOD'");
+    else if (channel === "african-market") whereParts.push("p.vertical = 'MARKET'");
+    else whereParts.push("1=1");
   }
 
   if (onlyActive) whereParts.push("p.is_active = 1");
@@ -762,7 +954,6 @@ async function listProducts(pool, opts) {
     );
   }
 
-  // ✅ Drinks filters (non breaking)
   const drinkCatId = await getDrinkCategoryIdCached(pool);
 
   if (parseBoolFlag(onlyDrinks, 0) === 1) {
@@ -772,11 +963,10 @@ async function listProducts(pool, opts) {
   }
 
   if (parseBoolFlag(excludeDrinks, 0) === 1) {
-    whereParts.push("(p.category_id IS NULL OR p.category_id <> ?)");
+    whereParts.push(`NOT (p.vertical = 'FOOD' AND p.category_id = ?)`);
     params.push(drinkCatId);
   }
 
-  // ✅ shop_type filtering (NO breaking if missing)
   const shopTypeCol = await getShopTypeColCached(pool);
   if (shopTypeCol) {
     if (catalogueMode === "PUBLIC_CLIENT") {
@@ -790,8 +980,8 @@ async function listProducts(pool, opts) {
 
   const whereSql = whereParts.length ? whereParts.join(" AND ") : "1=1";
 
-  const supplierMeta = await getSupplierMetaCached(pool);
-  const supplierAgg = supplierAggSelect(supplierMeta);
+  const { shopTypeCol: stCol, supplierAgg } = await getSelectMeta(pool);
+  const selectSql = baseSelectSql(stCol, supplierAgg);
 
   const [[{ total }]] = await pool.query(
     `
@@ -807,72 +997,15 @@ async function listProducts(pool, opts) {
 
   const [rowsRaw] = await pool.query(
     `
-    SELECT
-      p.*,
-      s.name AS shop_name,
-      s.logo AS shop_logo,
-      s.cover AS shop_cover,
-      s.city AS shop_city
-      ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
-
-      c.name AS category_name,
-      c.slug AS category_slug,
-
-      sc.id   AS sub_category_id,
-      sc.name AS sub_category_name,
-      sc.slug AS sub_category_slug,
-
-      (SELECT url
-         FROM product_images pi
-        WHERE pi.product_id = p.id
-        ORDER BY sort_order ASC, id ASC
-        LIMIT 1) AS cover,
-
-      (SELECT COUNT(*)
-         FROM product_variants pv
-        WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
-
-      (SELECT MIN(COALESCE(pv.price_override, p.price))
-         FROM product_variants pv
-        WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
-      ${supplierAgg.selectSql}
-
-     FROM products p
-     LEFT JOIN shops s ON s.id = p.shop_id
-     LEFT JOIN categories c ON c.id = p.category_id
-     LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
-     ${supplierAgg.joinSql}
-     WHERE ${whereSql}
-     GROUP BY p.id
-     ORDER BY p.created_at DESC
-     LIMIT ? OFFSET ?
+    ${selectSql}
+    WHERE ${whereSql}
+    ORDER BY p.created_at DESC
+    LIMIT ? OFFSET ?
     `,
     [...params, Number(limit), Number(offset)]
   );
 
-  let rows = (rowsRaw || []).map((r) => {
-    addSupplierAggToRow(r);
-
-    const base = stripDuuminiRateFromProduct(r);
-
-    const variants_count = Number(r.variants_count || 0);
-    const min_price = r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
-
-    const merged = {
-      ...base,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
-      variants_count,
-
-      shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
-
-      supplier_stock: r.supplier_stock == null ? null : Number(r.supplier_stock),
-      supplier_cost: r.supplier_cost == null ? null : Number(r.supplier_cost),
-      supplier_last_supply_at: r.supplier_last_supply_at ?? null,
-    };
-
-    return withPromoComputed(merged);
-  });
+  let rows = (rowsRaw || []).map(mapProductRow);
 
   rows = await attachVariantsToProducts(pool, rows, {
     includeVariants: !!includeVariants,
@@ -881,32 +1014,8 @@ async function listProducts(pool, opts) {
   return { rows, total };
 }
 
-function parseOnlyActive(req) {
-  const onlyActiveRaw = String(req.query.onlyActive || "").toLowerCase();
-  return (
-    onlyActiveRaw === "1" ||
-    onlyActiveRaw === "true" ||
-    onlyActiveRaw === "yes" ||
-    onlyActiveRaw === "on"
-  );
-}
-
-function pickFilters(req) {
-  return {
-    categoryId: req.query.categoryId ?? req.query.category_id ?? null,
-    subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
-    shopId: req.query.shopId ?? req.query.shop_id ?? null,
-    q: req.query.q ?? "",
-    vertical: req.query.vertical ?? req.query.v ?? null,
-    includeVariants: parseBoolQuery(req, "includeVariants", 0),
-    onlyWithVariants: parseBoolQuery(req, "onlyWithVariants", 0),
-    onlyDrinks: parseBoolQuery(req, "onlyDrinks", 0),
-    excludeDrinks: parseBoolQuery(req, "excludeDrinks", 0),
-  };
-}
-
 /* =========================================================
- * PUBLIC LIST (catalogue client) => vendors + restaurants
+ * PUBLIC LIST
  * ========================================================= */
 async function listHandler(req, res, next) {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -1184,6 +1293,66 @@ async function listManageHandler(req, res, next) {
   }
 }
 
+/* =========================================================
+ * GET (manage / public) helpers
+ * ========================================================= */
+async function getProductFullBy(conn, pool, whereSql, whereParams, opts = {}) {
+  const wantVariants = !!opts.wantVariants;
+  const wantImages = opts.wantImages !== false;
+
+  const citiesCol = await getCitiesColCached(pool);
+  const { shopTypeCol, supplierAgg } = await getSelectMeta(pool);
+  const selectSql = baseSelectSql(shopTypeCol, supplierAgg);
+
+  const [rows] = await conn.query(
+    `
+    ${selectSql}
+    ${whereSql}
+    LIMIT 1
+    `,
+    whereParams
+  );
+
+  const raw = rows?.[0] || null;
+  if (!raw) return null;
+
+  const product = mapProductRow(raw);
+
+  let images = [];
+  if (wantImages) {
+    const [imgs] = await conn.query(
+      `SELECT id, url, sort_order
+         FROM product_images
+        WHERE product_id=?
+        ORDER BY sort_order ASC, id ASC`,
+      [raw.id]
+    );
+    images = imgs || [];
+  }
+
+  let variants = undefined;
+  if (wantVariants) {
+    const [vrows] = await conn.query(
+      `SELECT id, product_id, size, color, sku, stock, price_override, is_active
+         FROM product_variants
+        WHERE product_id=?
+        ORDER BY is_active DESC, id ASC`,
+      [raw.id]
+    );
+    variants = vrows || [];
+  }
+
+  let cities = null;
+  if (citiesCol) cities = normalizeCitiesValue(raw?.[citiesCol]);
+
+  return {
+    ...product,
+    images,
+    ...(variants ? { variants } : {}),
+    ...(cities ? { cities } : {}),
+  };
+}
+
 async function getManageByIdHandler(req, res, next) {
   const id = parseIdParam(req.params.id);
   if (!id) return next();
@@ -1191,106 +1360,32 @@ async function getManageByIdHandler(req, res, next) {
   const pool = getPool();
   const conn = await pool.getConnection();
   try {
-    const citiesCol = await getCitiesColCached(pool);
-    const supplierMeta = await getSupplierMetaCached(pool);
-    const supplierAgg = supplierAggSelect(supplierMeta);
-    const shopTypeCol = await getShopTypeColCached(pool);
-
-    const [rows] = await conn.query(
-      `SELECT
-         p.*,
-         s.owner_id,
-         s.name AS shop_name,
-         s.logo AS shop_logo,
-         s.cover AS shop_cover,
-         s.city AS shop_city
-         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
-
-         c.name AS category_name,
-         c.slug AS category_slug,
-
-         sc.id   AS sub_category_id,
-         sc.name AS sub_category_name,
-         sc.slug AS sub_category_slug,
-
-         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
-         (SELECT MIN(COALESCE(pv.price_override, p.price))
-            FROM product_variants pv
-           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
-         ${supplierAgg.selectSql}
-
-       FROM products p
-       LEFT JOIN shops s ON s.id = p.shop_id
-       LEFT JOIN categories c ON c.id = p.category_id
-       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
-       ${supplierAgg.joinSql}
-       WHERE p.id=?
-       GROUP BY p.id`,
+    const [[ownerRow]] = await conn.query(
+      `SELECT s.owner_id
+         FROM products p
+         LEFT JOIN shops s ON s.id = p.shop_id
+        WHERE p.id=? LIMIT 1`,
       [id]
     );
-
-    const rawProduct = rows[0];
-    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+    if (!ownerRow) return res.status(404).json({ error: "Not found" });
 
     const actorId = actingUserId(req);
-    if (isActingVendorOrRestaurant(req) && String(rawProduct.owner_id) !== String(actorId)) {
+    if (isActingVendorOrRestaurant(req) && String(ownerRow.owner_id) !== String(actorId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
-
-    const [images] = await conn.query(
-      `SELECT id, url, sort_order
-         FROM product_images
-        WHERE product_id=?
-        ORDER BY sort_order ASC, id ASC`,
-      [id]
-    );
 
     const wantVariants =
       String(req.query.variants || "").toLowerCase() === "1" ||
       String(req.query.variants || "").toLowerCase() === "true";
 
-    let variants = undefined;
-    if (wantVariants) {
-      const [vrows] = await conn.query(
-        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
-           FROM product_variants
-          WHERE product_id=?
-          ORDER BY is_active DESC, id ASC`,
-        [id]
-      );
-      variants = vrows || [];
-    }
-
-    let cities = null;
-    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
-
-    addSupplierAggToRow(rawProduct);
-
-    const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price =
-      rawProduct.min_price == null || rawProduct.min_price === ""
-        ? null
-        : Number(rawProduct.min_price);
-
-    const base = stripDuuminiRateFromProduct(rawProduct);
-    const product = withPromoComputed({
-      ...base,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
-      variants_count,
-      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
-
-      supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
-      supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
-      supplier_last_supply_at: rawProduct.supplier_last_supply_at ?? null,
+    const full = await getProductFullBy(conn, pool, `WHERE p.id=?`, [id], {
+      wantVariants,
+      wantImages: true,
     });
 
-    res.json({
-      ...product,
-      images,
-      ...(variants ? { variants } : {}),
-      ...(cities ? { cities } : {}),
-    });
+    if (!full) return res.status(404).json({ error: "Not found" });
+
+    res.json(full);
   } catch (e) {
     next(e);
   } finally {
@@ -1305,105 +1400,86 @@ async function getManageBySlugHandler(req, res, next) {
   const pool = getPool();
   const conn = await pool.getConnection();
   try {
-    const citiesCol = await getCitiesColCached(pool);
-    const supplierMeta = await getSupplierMetaCached(pool);
-    const supplierAgg = supplierAggSelect(supplierMeta);
-    const shopTypeCol = await getShopTypeColCached(pool);
-
-    const [rows] = await conn.query(
-      `SELECT
-         p.*,
-         s.owner_id,
-         s.name AS shop_name,
-         s.logo AS shop_logo,
-         s.cover AS shop_cover,
-         s.city AS shop_city
-         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
-
-         c.name AS category_name,
-         c.slug AS category_slug,
-
-         sc.id   AS sub_category_id,
-         sc.name AS sub_category_name,
-         sc.slug AS sub_category_slug,
-
-         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
-         (SELECT MIN(COALESCE(pv.price_override, p.price))
-            FROM product_variants pv
-           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
-         ${supplierAgg.selectSql}
-
-       FROM products p
-       LEFT JOIN shops s ON s.id = p.shop_id
-       LEFT JOIN categories c ON c.id = p.category_id
-       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
-       ${supplierAgg.joinSql}
-       WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
+    const [[row]] = await conn.query(
+      `SELECT s.owner_id
+         FROM products p
+         LEFT JOIN shops s ON s.id = p.shop_id
+        WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
       [slug]
     );
-
-    const rawProduct = rows[0];
-    if (!rawProduct) return res.status(404).json({ error: "Not found" });
+    if (!row) return res.status(404).json({ error: "Not found" });
 
     const actorId = actingUserId(req);
-    if (isActingVendorOrRestaurant(req) && String(rawProduct.owner_id) !== String(actorId)) {
+    if (isActingVendorOrRestaurant(req) && String(row.owner_id) !== String(actorId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
-
-    const [images] = await conn.query(
-      `SELECT id, url, sort_order
-         FROM product_images
-        WHERE product_id=?
-        ORDER BY sort_order ASC, id ASC`,
-      [rawProduct.id]
-    );
 
     const wantVariants =
       String(req.query.variants || "").toLowerCase() === "1" ||
       String(req.query.variants || "").toLowerCase() === "true";
 
-    let variants = undefined;
-    if (wantVariants) {
-      const [vrows] = await conn.query(
-        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
-           FROM product_variants
-          WHERE product_id=?
-          ORDER BY is_active DESC, id ASC`,
-        [rawProduct.id]
-      );
-      variants = vrows || [];
-    }
-
-    let cities = null;
-    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
-
-    addSupplierAggToRow(rawProduct);
-
-    const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price =
-      rawProduct.min_price == null || rawProduct.min_price === ""
-        ? null
-        : Number(rawProduct.min_price);
-
-    const base = stripDuuminiRateFromProduct(rawProduct);
-    const product = withPromoComputed({
-      ...base,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
-      variants_count,
-      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
-
-      supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
-      supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
-      supplier_last_supply_at: rawProduct.supplier_last_supply_at ?? null,
+    const full = await getProductFullBy(conn, pool, `WHERE LOWER(TRIM(p.slug))=?`, [slug], {
+      wantVariants,
+      wantImages: true,
     });
 
-    res.json({
-      ...product,
-      images,
-      ...(variants ? { variants } : {}),
-      ...(cities ? { cities } : {}),
+    if (!full) return res.status(404).json({ error: "Not found" });
+
+    res.json(full);
+  } catch (e) {
+    next(e);
+  } finally {
+    conn.release();
+  }
+}
+
+/* ----------------------------- Read by SLUG (public) ----------------------------- */
+async function getPublicBySlugHandler(req, res, next) {
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!slug) return next();
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    const full = await getProductFullBy(conn, pool, `WHERE LOWER(TRIM(p.slug))=?`, [slug], {
+      wantVariants,
+      wantImages: true,
     });
+
+    if (!full) return res.status(404).json({ error: "Not found" });
+
+    res.json(full);
+  } catch (e) {
+    next(e);
+  } finally {
+    conn.release();
+  }
+}
+
+/* ----------------------------- Read by ID (public) ----------------------------- */
+async function getPublicByIdHandler(req, res, next) {
+  const id = parseIdParam(req.params.id);
+  if (!id) return next();
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    const wantVariants =
+      String(req.query.variants || "").toLowerCase() === "1" ||
+      String(req.query.variants || "").toLowerCase() === "true";
+
+    const full = await getProductFullBy(conn, pool, `WHERE p.id=?`, [id], {
+      wantVariants,
+      wantImages: true,
+    });
+
+    if (!full) return res.status(404).json({ error: "Not found" });
+
+    res.json(full);
   } catch (e) {
     next(e);
   } finally {
@@ -1412,56 +1488,9 @@ async function getManageBySlugHandler(req, res, next) {
 }
 
 /* =========================
- * ROUTES
- * ======================= */
-
-// ✅ FASHION shortcut (public)
-router.get("/fashion", async (req, res, next) => {
-  req.query.vertical = "FASHION";
-  if (req.query.includeVariants == null) req.query.includeVariants = "1";
-  return listHandler(req, res, next);
-});
-
-// ✅ DRINKS (public) - list drinks for a shop
-router.get("/drinks", listShopDrinksHandler);
-
-// ✅ SUPPLIER catalogue (secure)
-router.get(
-  "/suppliers",
-  authRequired,
-  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
-  listSuppliersCatalogueHandler
-);
-
-// ✅ MANAGE routes (secure)
-router.get(
-  "/manage",
-  authRequired,
-  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
-  listManageHandler
-);
-router.get(
-  "/manage/slug/:slug",
-  authRequired,
-  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
-  getManageBySlugHandler
-);
-router.get(
-  "/manage/:id",
-  authRequired,
-  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
-  getManageByIdHandler
-);
-
-// ✅ PUBLIC catalogue routes (clients)
-router.get("/", listHandler);
-router.get("/african-food", listFoodHandler);
-router.get("/african-market", listMarketHandler);
-
-/* =========================
  * PROMOTIONS / TOP (public)
  * ======================= */
-router.get("/promotions", async (req, res, next) => {
+async function promotionsHandler(req, res, next) {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 12);
   const onlyActive = parseOnlyActive(req);
@@ -1501,9 +1530,9 @@ router.get("/promotions", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+}
 
-router.get("/top-ordered", async (req, res, next) => {
+async function topOrderedHandler(req, res, next) {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
 
@@ -1561,9 +1590,9 @@ router.get("/top-ordered", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+}
 
-router.get("/top-rated", async (req, res, next) => {
+async function topRatedHandler(req, res, next) {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
   const minCount = toPositiveInt(req.query.minCount, 2);
@@ -1621,11 +1650,11 @@ router.get("/top-rated", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+}
 
-/* =========================
+/* =========================================================
  * VARIANTS API
- * ======================= */
+ * ========================================================= */
 router.get("/:id/variants", async (req, res, next) => {
   const productId = parseIdParam(req.params.id);
   if (!productId) return next();
@@ -1716,6 +1745,7 @@ router.put(
         ]
       );
 
+      clearProductsCache();
       res.json({ ok: true });
     } catch (e) {
       if (e && e.code === "ER_DUP_ENTRY") {
@@ -1755,6 +1785,8 @@ router.delete(
       }
 
       await conn.query(`DELETE FROM product_variants WHERE id=?`, [variantId]);
+
+      clearProductsCache();
       res.json({ ok: true });
     } catch (e) {
       next(e);
@@ -1817,6 +1849,7 @@ router.post(
         [productId]
       );
 
+      clearProductsCache();
       res.status(201).json({ ok: true, items: rows || [] });
     } catch (e) {
       try {
@@ -1832,224 +1865,15 @@ router.post(
   }
 );
 
-/* ----------------------------- Read by SLUG (public) ----------------------------- */
-router.get("/slug/:slug", async (req, res, next) => {
-  const slug = String(req.params.slug || "").trim().toLowerCase();
-  if (!slug) return next();
+/* =========================================================
+ * PUBLIC reads (cached)
+ * ========================================================= */
+router.get("/slug/:slug", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), getPublicBySlugHandler);
+router.get("/:id", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), getPublicByIdHandler);
 
-  const pool = getPool();
-  const conn = await pool.getConnection();
-  try {
-    const citiesCol = await getCitiesColCached(pool);
-    const supplierMeta = await getSupplierMetaCached(pool);
-    const supplierAgg = supplierAggSelect(supplierMeta);
-    const shopTypeCol = await getShopTypeColCached(pool);
-
-    const [rows] = await conn.query(
-      `SELECT
-         p.*,
-         s.name AS shop_name,
-         s.logo AS shop_logo,
-         s.cover AS shop_cover,
-         s.city AS shop_city
-         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
-
-         c.name AS category_name,
-         c.slug AS category_slug,
-
-         sc.id   AS sub_category_id,
-         sc.name AS sub_category_name,
-         sc.slug AS sub_category_slug,
-
-         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
-         (SELECT MIN(COALESCE(pv.price_override, p.price))
-            FROM product_variants pv
-           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
-         ${supplierAgg.selectSql}
-
-       FROM products p
-       LEFT JOIN shops s ON s.id = p.shop_id
-       LEFT JOIN categories c ON c.id = p.category_id
-       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
-       ${supplierAgg.joinSql}
-       WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
-      [slug]
-    );
-
-    const rawProduct = rows[0];
-    if (!rawProduct) return res.status(404).json({ error: "Not found" });
-
-    const [images] = await conn.query(
-      `SELECT id, url, sort_order
-         FROM product_images
-        WHERE product_id=?
-        ORDER BY sort_order ASC, id ASC`,
-      [rawProduct.id]
-    );
-
-    const wantVariants =
-      String(req.query.variants || "").toLowerCase() === "1" ||
-      String(req.query.variants || "").toLowerCase() === "true";
-
-    let variants = undefined;
-    if (wantVariants) {
-      const [vrows] = await conn.query(
-        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
-           FROM product_variants
-          WHERE product_id=?
-          ORDER BY is_active DESC, id ASC`,
-        [rawProduct.id]
-      );
-      variants = vrows || [];
-    }
-
-    let cities = null;
-    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
-
-    addSupplierAggToRow(rawProduct);
-
-    const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price =
-      rawProduct.min_price == null || rawProduct.min_price === ""
-        ? null
-        : Number(rawProduct.min_price);
-
-    const base = stripDuuminiRateFromProduct(rawProduct);
-    const product = withPromoComputed({
-      ...base,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
-      variants_count,
-      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
-
-      supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
-      supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
-      supplier_last_supply_at: rawProduct.supplier_last_supply_at ?? null,
-    });
-
-    res.json({
-      ...product,
-      images,
-      ...(variants ? { variants } : {}),
-      ...(cities ? { cities } : {}),
-    });
-  } catch (e) {
-    next(e);
-  } finally {
-    conn.release();
-  }
-});
-
-/* ----------------------------- Read by ID (public) ----------------------------- */
-router.get("/:id", async (req, res, next) => {
-  const id = parseIdParam(req.params.id);
-  if (!id) return next();
-
-  const pool = getPool();
-  const conn = await pool.getConnection();
-  try {
-    const citiesCol = await getCitiesColCached(pool);
-    const supplierMeta = await getSupplierMetaCached(pool);
-    const supplierAgg = supplierAggSelect(supplierMeta);
-    const shopTypeCol = await getShopTypeColCached(pool);
-
-    const [rows] = await conn.query(
-      `SELECT
-         p.*,
-         s.name AS shop_name,
-         s.logo AS shop_logo,
-         s.cover AS shop_cover,
-         s.city AS shop_city
-         ${shopTypeCol ? `, s.${shopTypeCol} AS shop_type` : ""},
-
-         c.name AS category_name,
-         c.slug AS category_slug,
-
-         sc.id   AS sub_category_id,
-         sc.name AS sub_category_name,
-         sc.slug AS sub_category_slug,
-
-         (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.is_active = 1) AS variants_count,
-         (SELECT MIN(COALESCE(pv.price_override, p.price))
-            FROM product_variants pv
-           WHERE pv.product_id = p.id AND pv.is_active = 1) AS min_price
-         ${supplierAgg.selectSql}
-
-       FROM products p
-       LEFT JOIN shops s ON s.id = p.shop_id
-       LEFT JOIN categories c ON c.id = p.category_id
-       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
-       ${supplierAgg.joinSql}
-       WHERE p.id=?
-       GROUP BY p.id`,
-      [id]
-    );
-
-    const rawProduct = rows[0];
-    if (!rawProduct) return res.status(404).json({ error: "Not found" });
-
-    const [images] = await conn.query(
-      `SELECT id, url, sort_order
-         FROM product_images
-        WHERE product_id=?
-        ORDER BY sort_order ASC, id ASC`,
-      [id]
-    );
-
-    const wantVariants =
-      String(req.query.variants || "").toLowerCase() === "1" ||
-      String(req.query.variants || "").toLowerCase() === "true";
-
-    let variants = undefined;
-    if (wantVariants) {
-      const [vrows] = await conn.query(
-        `SELECT id, product_id, size, color, sku, stock, price_override, is_active
-           FROM product_variants
-          WHERE product_id=?
-          ORDER BY is_active DESC, id ASC`,
-        [id]
-      );
-      variants = vrows || [];
-    }
-
-    let cities = null;
-    if (citiesCol) cities = normalizeCitiesValue(rawProduct?.[citiesCol]);
-
-    addSupplierAggToRow(rawProduct);
-
-    const variants_count = Number(rawProduct.variants_count || 0);
-    const min_price =
-      rawProduct.min_price == null || rawProduct.min_price === ""
-        ? null
-        : Number(rawProduct.min_price);
-
-    const base = stripDuuminiRateFromProduct(rawProduct);
-    const product = withPromoComputed({
-      ...base,
-      has_variants: variants_count > 0,
-      min_price: Number.isFinite(min_price) ? min_price : null,
-      variants_count,
-      shop_type: rawProduct.shop_type ? normalizeShopType(rawProduct.shop_type) : null,
-
-      supplier_stock: rawProduct.supplier_stock == null ? null : Number(rawProduct.supplier_stock),
-      supplier_cost: rawProduct.supplier_cost == null ? null : Number(rawProduct.supplier_cost),
-      supplier_last_supply_at: rawProduct.supplier_last_supply_at ?? null,
-    });
-
-    res.json({
-      ...product,
-      images,
-      ...(variants ? { variants } : {}),
-      ...(cities ? { cities } : {}),
-    });
-  } catch (e) {
-    next(e);
-  } finally {
-    conn.release();
-  }
-});
-
-/* ----------------------------- Create ----------------------------- */
+/* =========================================================
+ * CREATE / UPDATE / IMAGES / DELETE
+ * ========================================================= */
 router.post(
   "/",
   authRequired,
@@ -2093,14 +1917,11 @@ router.post(
 
       if (isActingVendorOrRestaurant(req)) {
         if (forcedShopId) {
-          const [[shop]] = await conn.query(
-            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
-            [forcedShopId]
-          );
+          const [[shop]] = await conn.query(`SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`, [
+            forcedShopId,
+          ]);
           if (!shop) return res.status(400).json({ error: "Boutique invalide (impersonate_shop_id)" });
-          if (String(shop.owner_id) !== String(actorId)) {
-            return res.status(403).json({ error: "Forbidden" });
-          }
+          if (String(shop.owner_id) !== String(actorId)) return res.status(403).json({ error: "Forbidden" });
           finalShopId = Number(shop.id);
         } else {
           const [[shop]] = await conn.query(
@@ -2136,11 +1957,6 @@ router.post(
         }
       }
 
-      // ✅ vertical final:
-      // - boissons => FOOD
-      // - sinon => si body.vertical OK => body
-      // - sinon => si sub_category.vertical existe => celle-là
-      // - sinon => fallback MARKET
       const incomingVertical = normalizeVertical(vertical, null);
 
       let finalVertical = null;
@@ -2249,6 +2065,7 @@ router.post(
 
       const channel = finalVertical === "FOOD" ? "african-food" : "african-market";
 
+      // notifications / ws are best-effort
       try {
         const [userRows] = await pool.query(
           `SELECT DISTINCT user_id FROM user_devices WHERE provider = 'pushy'`
@@ -2280,6 +2097,7 @@ router.post(
         }
       } catch {}
 
+      clearProductsCache();
       res.status(201).json({ id: productId, channel, vertical: finalVertical });
     } catch (e) {
       try {
@@ -2295,7 +2113,6 @@ router.post(
   }
 );
 
-/* ----------------------------- Update ----------------------------- */
 router.put(
   "/:id",
   authRequired,
@@ -2385,19 +2202,10 @@ router.put(
         promo_free_delivery,
       });
 
-      // ✅ vertical update:
-      // - boissons => FOOD (forcé)
-      // - sinon => si body.vertical valide => body
-      // - sinon => si sub_category résolue => sub_category.vertical
-      // - sinon => ne touche pas (null => COALESCE garde l'existant)
       const vertIncoming = normalizeVertical(vertical, null);
       const subV = normalizeVertical(resolvedSub?.vertical, null);
-
       const vertFinal = targetIsDrink ? "FOOD" : vertIncoming || subV || null;
 
-      // ✅ duumini rate:
-      // - FOOD => 0.18
-      // - MARKET/FASHION => 0.11
       const duuminiRateParam = targetIsDrink
         ? 0.18
         : resolvedSub
@@ -2527,6 +2335,7 @@ router.put(
         }
       } catch {}
 
+      clearProductsCache();
       res.json({ ok: true });
     } catch (e) {
       next(e);
@@ -2593,6 +2402,8 @@ router.put(
       }
 
       await conn.commit();
+
+      clearProductsCache();
       res.json({ ok: true });
     } catch (e) {
       try {
@@ -2663,6 +2474,7 @@ router.delete(
         }
       } catch {}
 
+      clearProductsCache();
       res.json({ ok: true });
     } catch (e) {
       try {
@@ -2674,5 +2486,61 @@ router.delete(
     }
   }
 );
+
+/* =========================
+ * ROUTES (public / secure)
+ * ======================= */
+
+// ✅ FASHION shortcut (public)
+router.get("/fashion", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), async (req, res, next) => {
+  req.query.vertical = "FASHION";
+  if (req.query.includeVariants == null) req.query.includeVariants = "1";
+  return listHandler(req, res, next);
+});
+
+// ✅ DRINKS (public)
+router.get("/drinks", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listShopDrinksHandler);
+
+// ✅ SUPPLIER catalogue (secure)
+router.get(
+  "/suppliers",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  cachedJson("AUTH", PRODUCTS_CACHE_TTL_MS),
+  listSuppliersCatalogueHandler
+);
+
+// ✅ MANAGE routes (secure)
+router.get(
+  "/manage",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  cachedJson("AUTH", PRODUCTS_CACHE_TTL_MS),
+  listManageHandler
+);
+router.get(
+  "/manage/slug/:slug",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  cachedJson("AUTH", PRODUCTS_CACHE_TTL_MS),
+  getManageBySlugHandler
+);
+router.get(
+  "/manage/:id",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  cachedJson("AUTH", PRODUCTS_CACHE_TTL_MS),
+  getManageByIdHandler
+);
+
+// ✅ PUBLIC catalogue
+router.get("/", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listHandler);
+router.get("/african-food", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listFoodHandler);
+router.get("/african-market", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listMarketHandler);
+
+// ✅ PROMO / TOP
+router.get("/promotions", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), promotionsHandler);
+router.get("/top-ordered", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topOrderedHandler);
+router.get("/top-rated", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topRatedHandler);
 
 module.exports = router;

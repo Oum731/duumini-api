@@ -124,7 +124,7 @@ app.use((req, res, next) => {
   res.setHeader("X-Request-Id", String(rid));
   next();
 });
-
+app.use("/api/reports", require("./routes/reports"));
 /* =========================
  * ✅ Security headers
  * ========================= */
