@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -150,7 +149,7 @@ if (helmet) {
     helmet({
       contentSecurityPolicy: false,
       crossOriginResourcePolicy: { policy: "cross-origin" },
-    }),
+    })
   );
 }
 
@@ -174,7 +173,7 @@ const corsOrigins =
 
 function isOriginAllowed(origin) {
   if (corsOrigins === true) return true;
-  if (!origin) return true; // curl/postman
+  if (!origin) return true;
   if (Array.isArray(corsOrigins)) {
     if (corsOrigins.includes(origin)) return true;
 
@@ -204,8 +203,6 @@ app.use(
       "Cache-Control",
       "Pragma",
       "X-Request-Id",
-
-      // ✅ Duumini custom headers
       "x-duumini-city",
       "X-Duumini-City",
     ],
@@ -213,7 +210,7 @@ app.use(
     preflightContinue: false,
     optionsSuccessStatus: 204,
     maxAge: 86400,
-  }),
+  })
 );
 
 /* =========================
@@ -274,10 +271,10 @@ app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
  * Healthcheck
  * ========================= */
 app.get("/health", (_req, res) =>
-  res.status(200).json({ ok: true, ts: Date.now() }),
+  res.status(200).json({ ok: true, ts: Date.now() })
 );
 app.get("/api/health", (_req, res) =>
-  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() }),
+  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
 );
 
 /* =========================
@@ -294,13 +291,11 @@ app.use("/api/auth", otpRoutes);
 
 app.use("/api/user", users);
 
-// ✅ NEW: admin users (clients/users list)
 if (adminUsers) app.use("/api/admin/users", adminUsers);
 
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
-
 app.use("/api/sub-categories", subCategories);
 
 app.use("/api/products", products);
@@ -313,10 +308,8 @@ app.use("/api/products", productRatingsRouter);
 
 app.use("/api/locations", locations);
 
-// ✅ Reports routes (ICI, après CORS)
 if (reports) app.use("/api/reports", reports);
 
-// ✅ Supply chain routes (si présents)
 if (deliveryZones) app.use("/api/delivery-zones", deliveryZones);
 if (supplierProducts) app.use("/api/supplier-products", supplierProducts);
 if (supplierOrders) app.use("/api/supplier-orders", supplierOrders);
@@ -366,17 +359,28 @@ if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
 
-/* ✅ Cron auto-copy contrôlé par env */
+/* =========================
+ * ✅ Crons contrôlés par env
+ * ========================= */
 const RUN_CRON =
   String(process.env.RUN_CRON || "").trim() ||
   (env.NODE_ENV === "production" ? "1" : "0");
+
 if (RUN_CRON === "1") {
   try {
     const { startAutoCopyCron } = require("./src/ai/autoCopyJob");
     startAutoCopyCron();
     console.log("[cron] autoCopyJob started");
   } catch (e) {
-    console.warn("[cron] failed to start:", e?.message || e);
+    console.warn("[cron] autoCopyJob failed to start:", e?.message || e);
+  }
+
+  try {
+    const { startSalesReportsCron } = require("./src/jobs/salesReportsCron");
+    startSalesReportsCron();
+    console.log("[cron] salesReportsCron started");
+  } catch (e) {
+    console.warn("[cron] salesReportsCron failed to start:", e?.message || e);
   }
 }
 
@@ -431,6 +435,7 @@ try {
 const RUN_WORKER =
   String(process.env.RUN_WORKER || "").trim() ||
   (env.NODE_ENV === "production" ? "1" : "0");
+
 if (RUN_WORKER === "1" && io) {
   try {
     const { startNotificationWorker } = require("./src/workers/notificationWorker");
@@ -460,8 +465,8 @@ function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (err) =>
-  console.error("[unhandledRejection]", err),
+  console.error("[unhandledRejection]", err)
 );
 process.on("uncaughtException", (err) =>
-  console.error("[uncaughtException]", err),
+  console.error("[uncaughtException]", err)
 );
