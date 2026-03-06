@@ -68,176 +68,362 @@ function endOfYear(d) {
 function getRangeForPeriod(type, anchorDate) {
   const d = new Date(anchorDate);
 
-  if (type === "DAILY") {
-    return { start: startOfDay(d), end: endOfDay(d) };
-  }
+  if (type === "DAILY") return { start: startOfDay(d), end: endOfDay(d) };
+  if (type === "WEEKLY") return { start: startOfWeek(d), end: endOfWeek(d) };
+  if (type === "MONTHLY") return { start: startOfMonth(d), end: endOfMonth(d) };
+  if (type === "YEARLY") return { start: startOfYear(d), end: endOfYear(d) };
 
-  if (type === "WEEKLY") {
-    return { start: startOfWeek(d), end: endOfWeek(d) };
-  }
+  throw new Error("Invalid period_type");
+}
 
-  if (type === "MONTHLY") {
-    return { start: startOfMonth(d), end: endOfMonth(d) };
-  }
+function stepDate(period_type, d) {
+  const x = new Date(d);
 
-  if (type === "YEARLY") {
-    return { start: startOfYear(d), end: endOfYear(d) };
+  if (period_type === "DAILY") {
+    x.setDate(x.getDate() + 1);
+    return x;
+  }
+  if (period_type === "WEEKLY") {
+    x.setDate(x.getDate() + 7);
+    return x;
+  }
+  if (period_type === "MONTHLY") {
+    x.setMonth(x.getMonth() + 1, 1);
+    return x;
+  }
+  if (period_type === "YEARLY") {
+    x.setFullYear(x.getFullYear() + 1, 0, 1);
+    return x;
   }
 
   throw new Error("Invalid period_type");
+}
+
+function normalizeAnchor(period_type, d) {
+  if (period_type === "DAILY") return startOfDay(d);
+  if (period_type === "WEEKLY") return startOfWeek(d);
+  if (period_type === "MONTHLY") return startOfMonth(d);
+  if (period_type === "YEARLY") return startOfYear(d);
+  throw new Error("Invalid period_type");
+}
+
+function normMoney(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return +n.toFixed(2);
+}
+
+function safeJsonParse(v) {
+  if (!v) return null;
+  if (typeof v === "object") return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
+}
+
+function normPayStatus(s) {
+  const v = String(s || "")
+    .trim()
+    .toUpperCase();
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING")
+    return v;
+  return "UNKNOWN";
 }
 
 function getIncludedStatuses() {
   return ["DONE"];
 }
 
-function normalizeMoney(value) {
-  const n = Number(value || 0);
-  return Number.isFinite(n) ? +n.toFixed(2) : 0;
-}
+/* =========================
+ * Detect cols like orders.js
+ * =======================*/
+let _ordersReportCols = null;
+let _ordersReportColsLoaded = false;
 
-async function detectOrderColumns(conn) {
-  const [cols] = await conn.query(`SHOW COLUMNS FROM orders`);
+async function detectOrdersReportCols(conn) {
+  const candidates = [
+    "id",
+    "status",
+    "order_status",
+    "currency",
+    "created_at",
+    "updated_at",
+    "ordered_at",
+    "order_date",
+    "done_at",
+    "completed_at",
+    "total",
+    "total_amount",
+    "commission_duumini",
+    "duumini_commission",
+    "payment",
+    "payment_status",
+    "paid_amount",
+    "remaining_amount",
+  ];
 
-  const names = new Set((cols || []).map((c) => String(c.Field || "").toLowerCase()));
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
 
   return {
-    hasTotal: names.has("total"),
-    hasTotalAmount: names.has("total_amount"),
-    hasCommissionDuumini: names.has("commission_duumini"),
-    hasDuuminiCommission: names.has("duumini_commission"),
-    hasAmountPaid: names.has("amount_paid"),
-    hasPaidAmount: names.has("paid_amount"),
-    hasCurrency: names.has("currency"),
-    hasPaymentStatus: names.has("payment_status"),
-    hasCreatedAt: names.has("created_at"),
-    hasUpdatedAt: names.has("updated_at"),
+    id: found.has("id"),
+    status: found.has("status"),
+    order_status: found.has("order_status"),
+    currency: found.has("currency"),
+    created_at: found.has("created_at"),
+    updated_at: found.has("updated_at"),
+    ordered_at: found.has("ordered_at"),
+    order_date: found.has("order_date"),
+    done_at: found.has("done_at"),
+    completed_at: found.has("completed_at"),
+    total: found.has("total"),
+    total_amount: found.has("total_amount"),
+    commission_duumini: found.has("commission_duumini"),
+    duumini_commission: found.has("duumini_commission"),
+    payment: found.has("payment"),
+    payment_status: found.has("payment_status"),
+    paid_amount: found.has("paid_amount"),
+    remaining_amount: found.has("remaining_amount"),
   };
 }
 
-function pickOrderColumns(meta) {
-  const totalExpr = meta.hasTotalAmount
-    ? "o.total_amount"
-    : meta.hasTotal
-      ? "o.total"
-      : "0";
+async function getOrdersReportColsCached(pool) {
+  if (_ordersReportColsLoaded) return _ordersReportCols;
+  const conn = await pool.getConnection();
+  try {
+    _ordersReportCols = await detectOrdersReportCols(conn);
+    _ordersReportColsLoaded = true;
+    return _ordersReportCols;
+  } finally {
+    conn.release();
+  }
+}
 
-  const commissionExpr = meta.hasDuuminiCommission
-    ? "o.duumini_commission"
-    : meta.hasCommissionDuumini
-      ? "o.commission_duumini"
-      : "0";
+function pickStatusColumn(cols) {
+  if (cols.status) return "status";
+  if (cols.order_status) return "order_status";
+  return null;
+}
 
-  const amountPaidExpr = meta.hasAmountPaid
-    ? "o.amount_paid"
-    : meta.hasPaidAmount
-      ? "o.paid_amount"
-      : "0";
+function pickDateColumn(cols) {
+  if (cols.done_at) return "done_at";
+  if (cols.completed_at) return "completed_at";
+  if (cols.created_at) return "created_at";
+  if (cols.ordered_at) return "ordered_at";
+  if (cols.order_date) return "order_date";
+  if (cols.updated_at) return "updated_at";
+  return null;
+}
 
-  const paymentStatusExpr = meta.hasPaymentStatus
-    ? "COALESCE(o.payment_status,'UNKNOWN')"
-    : "'UNKNOWN'";
+function pickTotalColumn(cols) {
+  if (cols.total) return "total";
+  if (cols.total_amount) return "total_amount";
+  return null;
+}
 
-  const dateExpr = meta.hasCreatedAt
-    ? "o.created_at"
-    : meta.hasUpdatedAt
-      ? "o.updated_at"
-      : "o.created_at";
+function pickCommissionColumn(cols) {
+  if (cols.commission_duumini) return "commission_duumini";
+  if (cols.duumini_commission) return "duumini_commission";
+  return null;
+}
+
+function buildPaymentFromRow(row, cols, totalAmount, currency) {
+  const total = normMoney(totalAmount);
+  const paymentParsed = cols.payment ? safeJsonParse(row?.payment) : null;
+
+  const colStatus = cols.payment_status ? normPayStatus(row?.payment_status) : null;
+  const colPaid = cols.paid_amount ? normMoney(row?.paid_amount) : null;
+  const colRemain = cols.remaining_amount ? normMoney(row?.remaining_amount) : null;
+
+  const jsonPaid = paymentParsed
+    ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0)
+    : 0;
+
+  const paid = colPaid != null ? colPaid : jsonPaid;
+  const remaining =
+    colRemain != null ? colRemain : Math.max(0, total - Math.min(paid, total));
+
+  let status = colStatus;
+  if (!status || status === "UNKNOWN") {
+    if (paid <= 0) status = "UNPAID";
+    else if (paid >= total || total <= 0) status = "PAID";
+    else status = "PARTIAL";
+  }
 
   return {
-    totalExpr,
-    commissionExpr,
-    amountPaidExpr,
-    paymentStatusExpr,
-    dateExpr,
+    status,
+    paid_amount: Math.min(paid, total),
+    remaining_amount: remaining,
+    currency: String(currency || "MAD").toUpperCase(),
   };
 }
 
+/* =========================
+ * Core compute
+ * =======================*/
 async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
+  const pool = getPool();
+  const cols = await getOrdersReportColsCached(pool);
+
+  const statusCol = pickStatusColumn(cols);
+  const dateCol = pickDateColumn(cols);
+  const totalCol = pickTotalColumn(cols);
+  const commissionCol = pickCommissionColumn(cols);
+
+  if (!statusCol) {
+    throw new Error(
+      "Impossible de générer le rapport: aucune colonne status/order_status trouvée dans orders."
+    );
+  }
+
+  if (!dateCol) {
+    throw new Error(
+      "Impossible de générer le rapport: aucune colonne de date exploitable trouvée dans orders."
+    );
+  }
+
+  if (!totalCol) {
+    throw new Error(
+      "Impossible de générer le rapport: aucune colonne total/total_amount trouvée dans orders."
+    );
+  }
+
   const statuses = getIncludedStatuses();
-  const meta = await detectOrderColumns(conn);
-  const { totalExpr, commissionExpr, amountPaidExpr, paymentStatusExpr, dateExpr } =
-    pickOrderColumns(meta);
 
   const where = [];
   const params = [];
 
-  where.push(`o.status IN (${statuses.map(() => "?").join(",")})`);
+  where.push(`o.${statusCol} IN (${statuses.map(() => "?").join(",")})`);
   params.push(...statuses);
 
-  if (meta.hasCurrency) {
+  if (cols.currency) {
     where.push(`o.currency = ?`);
     params.push(currency);
   }
 
-  where.push(`${dateExpr} >= ?`);
-  where.push(`${dateExpr} <= ?`);
+  where.push(`o.${dateCol} >= ?`);
+  where.push(`o.${dateCol} <= ?`);
   params.push(toDateTimeSql(start), toDateTimeSql(end));
 
   const whereSql = where.join(" AND ");
 
-  const [[row]] = await conn.query(
+  const [orderRows] = await conn.query(
     `
     SELECT
-      COUNT(DISTINCT o.id) AS orders_count,
-      COALESCE(SUM(oi.qty * oi.unit_price), 0) AS items_amount,
-      COALESCE(SUM(DISTINCT ${totalExpr}), 0) AS total_amount,
-      COALESCE(SUM(DISTINCT ${commissionExpr}), 0) AS duumini_commission,
-      COALESCE(SUM(DISTINCT ${amountPaidExpr}), 0) AS paid_amount
+      o.id,
+      o.${totalCol} AS total_amount,
+      ${commissionCol ? `o.${commissionCol}` : "0"} AS duumini_commission
+      ${cols.payment ? ", o.payment" : ""}
+      ${cols.payment_status ? ", o.payment_status" : ""}
+      ${cols.paid_amount ? ", o.paid_amount" : ""}
+      ${cols.remaining_amount ? ", o.remaining_amount" : ""}
+      ${cols.currency ? ", o.currency" : ""}
     FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
     WHERE ${whereSql}
+    ORDER BY o.id ASC
     `,
     params
   );
 
-  const ordersCount = Number(row?.orders_count || 0);
-  const itemsAmount = normalizeMoney(row?.items_amount);
-  const totalAmount = normalizeMoney(row?.total_amount);
-  const paidAmount = normalizeMoney(row?.paid_amount);
-  const deliveryAmount = normalizeMoney(Math.max(0, totalAmount - itemsAmount));
-  const duuminiCommission = normalizeMoney(row?.duumini_commission);
-  const remainingAmount = normalizeMoney(Math.max(0, totalAmount - paidAmount));
+  const orderIds = (orderRows || []).map((r) => Number(r.id)).filter(Boolean);
 
-  let paymentBreakdown = [];
-  try {
-    const [payRows] = await conn.query(
+  let itemsAmount = 0;
+  if (orderIds.length) {
+    const [itemRows] = await conn.query(
       `
       SELECT
-        ${paymentStatusExpr} AS payment_status,
-        COUNT(*) AS cnt,
-        COALESCE(SUM(${totalExpr}), 0) AS amount
-      FROM orders o
-      WHERE ${whereSql}
-      GROUP BY ${paymentStatusExpr}
-      ORDER BY cnt DESC
+        oi.order_id,
+        COALESCE(SUM(oi.qty * oi.unit_price), 0) AS items_total
+      FROM order_items oi
+      WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
+      GROUP BY oi.order_id
       `,
-      params
+      orderIds
     );
 
-    paymentBreakdown = (payRows || []).map((r) => ({
-      payment_status: r.payment_status || "UNKNOWN",
-      cnt: Number(r.cnt || 0),
-      amount: normalizeMoney(r.amount),
-    }));
-  } catch {
-    paymentBreakdown = [];
+    const itemsMap = new Map(
+      (itemRows || []).map((r) => [Number(r.order_id), normMoney(r.items_total)])
+    );
+
+    itemsAmount = orderRows.reduce((sum, r) => {
+      return sum + normMoney(itemsMap.get(Number(r.id)) || 0);
+    }, 0);
   }
+
+  const ordersCount = Number(orderRows?.length || 0);
+  const totalAmount = orderRows.reduce(
+    (sum, r) => sum + normMoney(r.total_amount),
+    0
+  );
+  const duuminiCommission = orderRows.reduce(
+    (sum, r) => sum + normMoney(r.duumini_commission),
+    0
+  );
+
+  const paymentBreakdownMap = new Map();
+  let paidAmount = 0;
+  let remainingAmount = 0;
+
+  for (const row of orderRows) {
+    const payment = buildPaymentFromRow(
+      row,
+      cols,
+      Number(row.total_amount || 0),
+      cols.currency ? row.currency || currency : currency
+    );
+
+    paidAmount += normMoney(payment.paid_amount);
+    remainingAmount += normMoney(payment.remaining_amount);
+
+    const key = payment.status || "UNKNOWN";
+    const prev = paymentBreakdownMap.get(key) || {
+      payment_status: key,
+      cnt: 0,
+      amount: 0,
+    };
+
+    prev.cnt += 1;
+    prev.amount += normMoney(row.total_amount);
+    paymentBreakdownMap.set(key, prev);
+  }
+
+  const paymentBreakdown = Array.from(paymentBreakdownMap.values()).map((x) => ({
+    payment_status: x.payment_status,
+    cnt: Number(x.cnt || 0),
+    amount: normMoney(x.amount),
+  }));
+
+  const deliveryAmount = Math.max(0, normMoney(totalAmount - itemsAmount));
 
   return {
     orders_count: ordersCount,
-    items_amount: itemsAmount,
-    delivery_amount: deliveryAmount,
-    total_amount: totalAmount,
-    duumini_commission: duuminiCommission,
+    items_amount: normMoney(itemsAmount),
+    delivery_amount: normMoney(deliveryAmount),
+    total_amount: normMoney(totalAmount),
+    duumini_commission: normMoney(duuminiCommission),
     details_json: {
-      paid_amount: paidAmount,
-      remaining_amount: remainingAmount,
+      paid_amount: normMoney(paidAmount),
+      remaining_amount: normMoney(remainingAmount),
       payment_breakdown: paymentBreakdown,
+      included_statuses: statuses,
+      date_column_used: dateCol,
     },
   };
 }
 
+/* =========================
+ * Single upsert
+ * =======================*/
 async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
   if (!PERIODS.includes(period_type)) throw new Error("Invalid period_type");
 
@@ -307,13 +493,15 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
 
     await conn.commit();
 
-    return saved || {
-      period_type,
-      period_start,
-      period_end,
-      currency,
-      ...metrics,
-    };
+    return (
+      saved || {
+        period_type,
+        period_start,
+        period_end,
+        currency,
+        ...metrics,
+      }
+    );
   } catch (e) {
     try {
       await conn.rollback();
@@ -324,59 +512,33 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
   }
 }
 
-function stepDate(period_type, d) {
-  const x = new Date(d);
-
-  if (period_type === "DAILY") {
-    x.setDate(x.getDate() + 1);
-    return x;
-  }
-
-  if (period_type === "WEEKLY") {
-    x.setDate(x.getDate() + 7);
-    return x;
-  }
-
-  if (period_type === "MONTHLY") {
-    x.setMonth(x.getMonth() + 1, 1);
-    return x;
-  }
-
-  if (period_type === "YEARLY") {
-    x.setFullYear(x.getFullYear() + 1, 0, 1);
-    return x;
-  }
-
-  throw new Error("Invalid period_type");
-}
-
-function normalizeAnchor(period_type, d) {
-  if (period_type === "DAILY") return startOfDay(d);
-  if (period_type === "WEEKLY") return startOfWeek(d);
-  if (period_type === "MONTHLY") return startOfMonth(d);
-  if (period_type === "YEARLY") return startOfYear(d);
-  throw new Error("Invalid period_type");
-}
-
+/* =========================
+ * Find first order date
+ * =======================*/
 async function findFirstOrderDate(conn, currency = "MAD") {
-  const meta = await detectOrderColumns(conn);
-  const { dateExpr } = pickOrderColumns(meta);
-  const statuses = getIncludedStatuses();
+  const pool = getPool();
+  const cols = await getOrdersReportColsCached(pool);
 
+  const statusCol = pickStatusColumn(cols);
+  const dateCol = pickDateColumn(cols);
+
+  if (!statusCol || !dateCol) return null;
+
+  const statuses = getIncludedStatuses();
   const where = [];
   const params = [];
 
-  where.push(`status IN (${statuses.map(() => "?").join(",")})`);
+  where.push(`${statusCol} IN (${statuses.map(() => "?").join(",")})`);
   params.push(...statuses);
 
-  if (meta.hasCurrency) {
+  if (cols.currency) {
     where.push(`currency = ?`);
     params.push(currency);
   }
 
   const [[row]] = await conn.query(
     `
-    SELECT MIN(${dateExpr}) AS first_date
+    SELECT MIN(${dateCol}) AS first_date
     FROM orders
     WHERE ${where.join(" AND ")}
     `,
@@ -386,6 +548,9 @@ async function findFirstOrderDate(conn, currency = "MAD") {
   return row?.first_date ? new Date(row.first_date) : null;
 }
 
+/* =========================
+ * Backfill
+ * =======================*/
 async function backfillSalesReports({
   period_type,
   currency = "MAD",
