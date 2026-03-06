@@ -38,35 +38,27 @@ function startSalesReportsCron() {
   console.log("[salesReportsCron] starting...");
 
   cron.schedule("5 0 * * *", async () => {
-    console.log("[salesReportsCron] DAILY triggered");
     try {
       await generateAll("DAILY", new Date());
     } catch {}
   });
 
   cron.schedule("10 0 * * 1", async () => {
-    console.log("[salesReportsCron] WEEKLY triggered");
     try {
       await generateAll("WEEKLY", new Date());
     } catch {}
   });
 
   cron.schedule("15 0 1 * *", async () => {
-    console.log("[salesReportsCron] MONTHLY triggered");
     try {
       await generateAll("MONTHLY", new Date());
     } catch {}
   });
 
   cron.schedule("20 0 1 1 *", async () => {
-    console.log("[salesReportsCron] YEARLY triggered");
     try {
       await generateAll("YEARLY", new Date());
     } catch {}
-  });
-
-  generateAll("DAILY", new Date()).catch((e) => {
-    console.error("[salesReportsCron] immediate DAILY error:", e?.message || e);
   });
 
   console.log("[salesReportsCron] started");
