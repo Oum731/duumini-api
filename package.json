@@ -6,7 +6,13 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "sales:backfill": "node src/scripts/backfillSalesReports.js",
+    "sales:backfill:daily": "node src/scripts/backfillSalesReports.js DAILY",
+    "sales:backfill:weekly": "node src/scripts/backfillSalesReports.js WEEKLY",
+    "sales:backfill:monthly": "node src/scripts/backfillSalesReports.js MONTHLY",
+    "sales:backfill:yearly": "node src/scripts/backfillSalesReports.js YEARLY",
+    "sales:backfill:all": "node src/scripts/backfillSalesReports.js ALL"
   },
   "engines": {
     "node": ">=18"
