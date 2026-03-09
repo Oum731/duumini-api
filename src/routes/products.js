@@ -1,4 +1,3 @@
-// api/routes/products.js
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
@@ -130,6 +129,7 @@ function pickFilters(req) {
     onlyWithVariants: parseBoolQuery(req, "onlyWithVariants", 0),
     onlyDrinks: parseBoolQuery(req, "onlyDrinks", 0),
     excludeDrinks: parseBoolQuery(req, "excludeDrinks", 0),
+    onlyPromos: parseBoolQuery(req, "onlyPromos", 0),
   };
 }
 
@@ -1020,8 +1020,8 @@ async function listHandler(req, res, next) {
 
   const { page, pageSize, offset, limit } = getPagination(req, {
     page: 1,
-    pageSize: 20,
-    maxPageSize: 100,
+    pageSize: 50,
+    maxPageSize: 500,
   });
 
   const activeFilter = parseActiveFilter(req, 1);
@@ -1036,6 +1036,7 @@ async function listHandler(req, res, next) {
     onlyWithVariants,
     onlyDrinks,
     excludeDrinks,
+    onlyPromos,
   } = pickFilters(req);
 
   const pool = getPool();
@@ -1050,7 +1051,7 @@ async function listHandler(req, res, next) {
       offset,
       channel: null,
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: parseBoolFlag(onlyPromos, 0) === 1,
       categoryId,
       subCategoryId,
       shopId,
@@ -1078,12 +1079,12 @@ async function listFoodHandler(req, res, next) {
 
   const { page, pageSize, offset, limit } = getPagination(req, {
     page: 1,
-    pageSize: 20,
-    maxPageSize: 100,
+    pageSize: 50,
+    maxPageSize: 500,
   });
 
   const activeFilter = parseActiveFilter(req, 1);
-  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, onlyPromos } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -1094,7 +1095,7 @@ async function listFoodHandler(req, res, next) {
       offset,
       channel: "african-food",
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: parseBoolFlag(onlyPromos, 0) === 1,
       categoryId,
       subCategoryId,
       shopId,
@@ -1120,12 +1121,12 @@ async function listMarketHandler(req, res, next) {
 
   const { page, pageSize, offset, limit } = getPagination(req, {
     page: 1,
-    pageSize: 20,
-    maxPageSize: 100,
+    pageSize: 50,
+    maxPageSize: 500,
   });
 
   const activeFilter = parseActiveFilter(req, 1);
-  const { categoryId, subCategoryId, shopId, q } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, q, onlyPromos } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -1136,7 +1137,7 @@ async function listMarketHandler(req, res, next) {
       offset,
       channel: "african-market",
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: parseBoolFlag(onlyPromos, 0) === 1,
       categoryId,
       subCategoryId,
       shopId,
@@ -1162,8 +1163,8 @@ async function listShopDrinksHandler(req, res, next) {
 
   const { page, pageSize, offset, limit } = getPagination(req, {
     page: 1,
-    pageSize: 20,
-    maxPageSize: 100,
+    pageSize: 50,
+    maxPageSize: 500,
   });
 
   const pool = getPool();
@@ -1176,6 +1177,7 @@ async function listShopDrinksHandler(req, res, next) {
 
     const activeFilter = parseActiveFilter(req, 1);
     const q = String(req.query.q ?? "").trim();
+    const onlyPromos = parseBoolQuery(req, "onlyPromos", 0);
 
     const citiesCol = await getCitiesColCached(pool);
 
@@ -1184,7 +1186,7 @@ async function listShopDrinksHandler(req, res, next) {
       offset,
       channel: null,
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: onlyPromos === 1,
       categoryId: drinkCatId,
       subCategoryId: null,
       shopId,
@@ -1226,6 +1228,7 @@ async function listSuppliersCatalogueHandler(req, res, next) {
     onlyWithVariants,
     onlyDrinks,
     excludeDrinks,
+    onlyPromos,
   } = pickFilters(req);
 
   const pool = getPool();
@@ -1240,7 +1243,7 @@ async function listSuppliersCatalogueHandler(req, res, next) {
       offset,
       channel: null,
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: parseBoolFlag(onlyPromos, 0) === 1,
       categoryId,
       subCategoryId,
       shopId,
@@ -1284,6 +1287,7 @@ async function listManageHandler(req, res, next) {
     onlyWithVariants,
     onlyDrinks,
     excludeDrinks,
+    onlyPromos,
   } = pickFilters(req);
 
   const pool = getPool();
@@ -1302,7 +1306,7 @@ async function listManageHandler(req, res, next) {
       offset,
       channel: null,
       activeFilter,
-      onlyPromos: false,
+      onlyPromos: parseBoolFlag(onlyPromos, 0) === 1,
       categoryId,
       subCategoryId,
       shopId: safeShopId,
@@ -1537,8 +1541,14 @@ async function promotionsHandler(req, res, next) {
       : null;
 
   const activeFilter = parseActiveFilter(req, 1);
-  const { categoryId, subCategoryId, shopId, q, vertical, includeVariants } =
-    pickFilters(req);
+  const {
+    categoryId,
+    subCategoryId,
+    shopId,
+    q,
+    vertical,
+    includeVariants,
+  } = pickFilters(req);
 
   try {
     const citiesCol = await getCitiesColCached(pool);
