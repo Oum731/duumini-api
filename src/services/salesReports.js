@@ -6,6 +6,11 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
+function toDateSql(d) {
+  const x = new Date(d);
+  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`;
+}
+
 function toDateTimeSql(d) {
   const x = new Date(d);
   return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(
@@ -474,8 +479,9 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
     await conn.beginTransaction();
 
     const { start, end } = getRangeForPeriod(period_type, anchorDate);
-    const period_start = toDateTimeSql(start);
-    const period_end = toDateTimeSql(end);
+
+    const period_start = toDateSql(start);
+    const period_end = toDateSql(end);
 
     const metrics = await computeSalesMetrics(conn, {
       start,
@@ -657,8 +663,8 @@ async function backfillSalesReports({
       period_type,
       currency,
       generated,
-      from: toDateTimeSql(startDate),
-      to: toDateTimeSql(endDate),
+      from: toDateSql(startDate),
+      to: toDateSql(endDate),
     };
   } finally {
     conn.release();
