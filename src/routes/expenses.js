@@ -35,6 +35,33 @@ function normalizeDateOnly(v) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function generateExpenseReference() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `DEP-${yyyy}${mm}${dd}-${rand}`;
+}
+
+async function generateUniqueExpenseReference(pool) {
+  for (let i = 0; i < 10; i += 1) {
+    const ref = generateExpenseReference();
+    const [[existing]] = await pool.query(
+      `
+      SELECT id
+      FROM expenses
+      WHERE reference = ?
+      LIMIT 1
+      `,
+      [ref]
+    );
+    if (!existing) return ref;
+  }
+
+  return `DEP-${Date.now()}`;
+}
+
 function canManageExpenses(req) {
   return (
     isAdmin(req.user) ||
@@ -110,7 +137,9 @@ function buildExpenseWhere({ query = {}, user = null }) {
   }
 
   if (q) {
-    where.push("(e.label LIKE ? OR e.description LIKE ? OR e.reference LIKE ? OR e.category_name LIKE ?)");
+    where.push(
+      "(e.label LIKE ? OR e.description LIKE ? OR e.reference LIKE ? OR e.category_name LIKE ?)"
+    );
     params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
 
@@ -128,6 +157,7 @@ async function resolveCategory(pool, categoryId, fallbackName) {
       `,
       [categoryId]
     );
+
     if (row) {
       return {
         category_id: row.id,
@@ -180,7 +210,6 @@ router.get("/", authRequired, async (req, res) => {
         e.payment_method,
         e.reference,
         e.status,
-        e.receipt_url,
         e.created_at,
         e.updated_at,
         c.color AS category_color
@@ -266,7 +295,8 @@ router.get("/grouped", authRequired, async (req, res) => {
 
     let selectPeriod = "DATE_FORMAT(e.expense_date, '%Y-%m-%d')";
     if (period === "week") {
-      selectPeriod = "CONCAT(YEAR(e.expense_date), '-S', LPAD(WEEK(e.expense_date, 1), 2, '0'))";
+      selectPeriod =
+        "CONCAT(YEAR(e.expense_date), '-S', LPAD(WEEK(e.expense_date, 1), 2, '0'))";
     } else if (period === "month") {
       selectPeriod = "DATE_FORMAT(e.expense_date, '%Y-%m')";
     } else if (period === "year") {
@@ -367,19 +397,30 @@ router.post("/", authRequired, async (req, res) => {
     const amount = toNum(req.body?.amount, NaN);
     const expenseDate = normalizeDateOnly(req.body?.expense_date);
     const paymentMethod = cleanStr(req.body?.payment_method, 50);
-    const reference = cleanStr(req.body?.reference, 100);
     const status = String(req.body?.status || "PAID").toUpperCase();
-    const receiptUrl = cleanStr(req.body?.receipt_url, 255);
 
-    if (!label) return res.status(400).json({ error: "Le libellé est obligatoire." });
-    if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ error: "Montant invalide." });
-    if (!expenseDate) return res.status(400).json({ error: "Date invalide." });
-    if (!["PAID", "PENDING"].includes(status)) return res.status(400).json({ error: "Statut invalide." });
+    if (!label) {
+      return res.status(400).json({ error: "Le libellé est obligatoire." });
+    }
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({ error: "Montant invalide." });
+    }
+
+    if (!expenseDate) {
+      return res.status(400).json({ error: "Date invalide." });
+    }
+
+    if (!["PAID", "PENDING"].includes(status)) {
+      return res.status(400).json({ error: "Statut invalide." });
+    }
 
     const category = await resolveCategory(pool, categoryId, categoryFallback);
     if (!category?.category_name) {
       return res.status(400).json({ error: "La catégorie est obligatoire." });
     }
+
+    const reference = await generateUniqueExpenseReference(pool);
 
     const [result] = await pool.query(
       `
@@ -394,9 +435,8 @@ router.post("/", authRequired, async (req, res) => {
         expense_date,
         payment_method,
         reference,
-        status,
-        receipt_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         shopId,
@@ -410,7 +450,6 @@ router.post("/", authRequired, async (req, res) => {
         paymentMethod,
         reference,
         status,
-        receiptUrl,
       ]
     );
 
@@ -447,13 +486,15 @@ router.put("/:id", authRequired, async (req, res) => {
     }
 
     const id = toNum(req.params.id, 0);
-    if (!id) return res.status(400).json({ error: "ID invalide." });
+    if (!id) {
+      return res.status(400).json({ error: "ID invalide." });
+    }
 
     const pool = getPool();
 
     const [[existing]] = await pool.query(
       `
-      SELECT id, shop_id
+      SELECT id, shop_id, reference
       FROM expenses
       WHERE id = ?
       LIMIT 1
@@ -461,7 +502,10 @@ router.put("/:id", authRequired, async (req, res) => {
       [id]
     );
 
-    if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
+    if (!existing) {
+      return res.status(404).json({ error: "Dépense introuvable." });
+    }
+
     if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
@@ -473,19 +517,30 @@ router.put("/:id", authRequired, async (req, res) => {
     const amount = toNum(req.body?.amount, NaN);
     const expenseDate = normalizeDateOnly(req.body?.expense_date);
     const paymentMethod = cleanStr(req.body?.payment_method, 50);
-    const reference = cleanStr(req.body?.reference, 100);
     const status = String(req.body?.status || "").toUpperCase();
-    const receiptUrl = cleanStr(req.body?.receipt_url, 255);
 
-    if (!label) return res.status(400).json({ error: "Le libellé est obligatoire." });
-    if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ error: "Montant invalide." });
-    if (!expenseDate) return res.status(400).json({ error: "Date invalide." });
-    if (!["PAID", "PENDING"].includes(status)) return res.status(400).json({ error: "Statut invalide." });
+    if (!label) {
+      return res.status(400).json({ error: "Le libellé est obligatoire." });
+    }
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({ error: "Montant invalide." });
+    }
+
+    if (!expenseDate) {
+      return res.status(400).json({ error: "Date invalide." });
+    }
+
+    if (!["PAID", "PENDING"].includes(status)) {
+      return res.status(400).json({ error: "Statut invalide." });
+    }
 
     const category = await resolveCategory(pool, categoryId, categoryFallback);
     if (!category?.category_name) {
       return res.status(400).json({ error: "La catégorie est obligatoire." });
     }
+
+    const reference = existing.reference || (await generateUniqueExpenseReference(pool));
 
     await pool.query(
       `
@@ -499,8 +554,7 @@ router.put("/:id", authRequired, async (req, res) => {
         expense_date = ?,
         payment_method = ?,
         reference = ?,
-        status = ?,
-        receipt_url = ?
+        status = ?
       WHERE id = ?
       `,
       [
@@ -513,7 +567,6 @@ router.put("/:id", authRequired, async (req, res) => {
         paymentMethod,
         reference,
         status,
-        receiptUrl,
         id,
       ]
     );
@@ -551,7 +604,9 @@ router.delete("/:id", authRequired, async (req, res) => {
     }
 
     const id = toNum(req.params.id, 0);
-    if (!id) return res.status(400).json({ error: "ID invalide." });
+    if (!id) {
+      return res.status(400).json({ error: "ID invalide." });
+    }
 
     const pool = getPool();
 
@@ -565,7 +620,10 @@ router.delete("/:id", authRequired, async (req, res) => {
       [id]
     );
 
-    if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
+    if (!existing) {
+      return res.status(404).json({ error: "Dépense introuvable." });
+    }
+
     if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
