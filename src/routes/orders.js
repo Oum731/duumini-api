@@ -18,7 +18,7 @@ const router = Router();
 /* =========================
  * ✅ DUUMINI COMMISSION CONFIG
  * =======================*/
-const DUUMINI_COMMISSION_RATE = 0.09; // ✅ 9% sur tout (food/market/fashion)
+const DUUMINI_COMMISSION_RATE = 0.09;
 
 /* =========================
  * CONFIG WHATSAPP ADMIN
@@ -77,6 +77,7 @@ function buildAddressObj(input = {}) {
     gps,
   };
 }
+
 function buildGeoLink(gps) {
   if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number")
     return null;
@@ -156,11 +157,66 @@ function isCancelledStatus(s) {
   );
 }
 
-/** ✅ Commission Duumini = 9% uniquement sur les PRODUITS (pas livraison) */
 function computeDuuminiCommission(itemsAmount) {
   const base = Number(itemsAmount || 0);
   if (!Number.isFinite(base) || base <= 0) return 0;
   return +(+base * DUUMINI_COMMISSION_RATE).toFixed(2);
+}
+
+/* =========================
+ * ✅ Admin discount helpers
+ * =======================*/
+function normalizeAdminDiscount(input) {
+  const d = input && typeof input === "object" ? input : {};
+
+  const type = String(d.type || "NONE").trim().toUpperCase();
+  const label = d.label ? String(d.label).trim().slice(0, 120) : null;
+  const rawValue = Number(d.value ?? 0);
+
+  if (!["NONE", "AMOUNT", "PERCENT"].includes(type)) {
+    return {
+      type: "NONE",
+      value: 0,
+      amount: 0,
+      label: null,
+    };
+  }
+
+  if (!Number.isFinite(rawValue) || rawValue <= 0 || type === "NONE") {
+    return {
+      type: "NONE",
+      value: 0,
+      amount: 0,
+      label,
+    };
+  }
+
+  return {
+    type,
+    value: +rawValue.toFixed(2),
+    amount: 0,
+    label,
+  };
+}
+
+function computeAdminDiscountAmount(itemsSubtotal, discount) {
+  const subtotal = Number(itemsSubtotal || 0);
+  if (!Number.isFinite(subtotal) || subtotal <= 0) return 0;
+
+  const type = String(discount?.type || "NONE").toUpperCase();
+  const value = Number(discount?.value || 0);
+
+  if (!Number.isFinite(value) || value <= 0) return 0;
+
+  let amount = 0;
+
+  if (type === "AMOUNT") amount = value;
+  else if (type === "PERCENT") amount = subtotal * (value / 100);
+
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  if (amount > subtotal) amount = subtotal;
+
+  return +amount.toFixed(2);
 }
 
 /* =========================
@@ -171,7 +227,6 @@ function genReceiptToken() {
 }
 
 function formatReceiptNumber(orderId, createdAt = null) {
-  // DM-YYYY-000123
   const dt = createdAt ? new Date(createdAt) : new Date();
   const year = dt.getFullYear();
   const seq = String(Number(orderId || 0)).padStart(6, "0");
@@ -192,6 +247,92 @@ async function detectOrdersReceiptCols(conn) {
   return {
     receipt_number: found.has("receipt_number"),
     receipt_token: found.has("receipt_token"),
+  };
+}
+
+/* =========================
+ * ✅ Order discount columns detection
+ * =======================*/
+let _ordersDiscountCols = null;
+let _ordersDiscountColsLoaded = false;
+
+async function detectOrdersDiscountCols(conn) {
+  const candidates = [
+    "items_subtotal",
+    "delivery_fee",
+    "admin_discount_type",
+    "admin_discount_value",
+    "admin_discount_amount",
+    "admin_discount_label",
+    "discounted_by_admin_id",
+  ];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates,
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    items_subtotal: found.has("items_subtotal"),
+    delivery_fee: found.has("delivery_fee"),
+    admin_discount_type: found.has("admin_discount_type"),
+    admin_discount_value: found.has("admin_discount_value"),
+    admin_discount_amount: found.has("admin_discount_amount"),
+    admin_discount_label: found.has("admin_discount_label"),
+    discounted_by_admin_id: found.has("discounted_by_admin_id"),
+  };
+}
+
+async function getOrdersDiscountColsCached(pool) {
+  if (_ordersDiscountColsLoaded) return _ordersDiscountCols;
+  const conn = await pool.getConnection();
+  try {
+    _ordersDiscountCols = await detectOrdersDiscountCols(conn);
+    _ordersDiscountColsLoaded = true;
+    return _ordersDiscountCols;
+  } finally {
+    conn.release();
+  }
+}
+
+function buildAdminDiscountForRow(row, discountCols, itemsSubtotalFallback) {
+  const itemsSubtotal = discountCols?.items_subtotal
+    ? Number(row?.items_subtotal || 0)
+    : Number(itemsSubtotalFallback || 0);
+
+  const type = discountCols?.admin_discount_type
+    ? String(row?.admin_discount_type || "NONE").toUpperCase()
+    : "NONE";
+
+  const value = discountCols?.admin_discount_value
+    ? Number(row?.admin_discount_value || 0)
+    : 0;
+
+  const amount = discountCols?.admin_discount_amount
+    ? Number(row?.admin_discount_amount || 0)
+    : 0;
+
+  const label = discountCols?.admin_discount_label
+    ? row?.admin_discount_label || null
+    : null;
+
+  const by_admin_id = discountCols?.discounted_by_admin_id
+    ? row?.discounted_by_admin_id || null
+    : null;
+
+  const discountedItemsAmount = Math.max(0, itemsSubtotal - amount);
+
+  return {
+    items_subtotal: +Number(itemsSubtotal || 0).toFixed(2),
+    type: ["NONE", "AMOUNT", "PERCENT"].includes(type) ? type : "NONE",
+    value: +Number(value || 0).toFixed(2),
+    amount: +Number(amount || 0).toFixed(2),
+    label,
+    by_admin_id,
+    discounted_items_amount: +discountedItemsAmount.toFixed(2),
   };
 }
 
@@ -933,6 +1074,7 @@ router.get("/", authRequired, async (req, res) => {
 
   try {
     const payCols = await getOrdersPayColsCached(pool);
+    const discountCols = await getOrdersDiscountColsCached(pool);
 
     if (payFilter && !(payCols && payCols.payment_status)) {
       return res.status(400).json({
@@ -942,7 +1084,7 @@ router.get("/", authRequired, async (req, res) => {
       });
     }
 
-    const mapRowToItem = (r, user, payCols) => {
+    const mapRowToItem = (r, user, payCols, discountCols) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
       const contact =
@@ -963,23 +1105,33 @@ router.get("/", authRequired, async (req, res) => {
       const itemsAmount = Number(r.items_amount || 0);
       const currency = (r.currency || "MAD").toUpperCase();
 
-      const totalAmount = isVendorView
-        ? itemsAmount
-        : Number(r.total || itemsAmount);
+      const adminDiscount = buildAdminDiscountForRow(r, discountCols, itemsAmount);
+
       const deliveryFee = isVendorView
         ? 0
-        : Math.max(0, totalAmount - itemsAmount);
+        : discountCols?.delivery_fee
+          ? Number(r.delivery_fee || 0)
+          : Math.max(0, Number(r.total || itemsAmount) - itemsAmount);
+
+      const totalAmount = isVendorView
+        ? itemsAmount
+        : Number(r.total || adminDiscount.discounted_items_amount + deliveryFee);
 
       const paymentNorm = normalizePaymentForRow(
         r,
-        Number(r.total || itemsAmount),
+        totalAmount,
         currency,
         payCols,
       );
 
-      const duuminiCommission = isCancelledStatus(r.status)
+      const duuminiCommissionRaw = isCancelledStatus(r.status)
         ? 0
-        : computeDuuminiCommission(itemsAmount);
+        : normCommission(r.commission_duumini);
+
+      const duuminiCommission =
+        duuminiCommissionRaw != null
+          ? duuminiCommissionRaw
+          : computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
       const commissionDuumini = isVendorView
         ? null
@@ -994,10 +1146,32 @@ router.get("/", authRequired, async (req, res) => {
         address,
         contact,
         geo_link,
+        admin_discount: isVendorView
+          ? {
+              type: "NONE",
+              value: 0,
+              amount: 0,
+              label: null,
+              by_admin_id: null,
+            }
+          : {
+              type: adminDiscount.type,
+              value: adminDiscount.value,
+              amount: adminDiscount.amount,
+              label: adminDiscount.label,
+              by_admin_id: adminDiscount.by_admin_id,
+            },
         ...paymentNorm,
         totals: {
           items_amount: +itemsAmount.toFixed(2),
-          delivery_fee: +deliveryFee.toFixed(2),
+          items_subtotal: isVendorView
+            ? +itemsAmount.toFixed(2)
+            : adminDiscount.items_subtotal,
+          admin_discount_amount: isVendorView ? 0 : adminDiscount.amount,
+          discounted_items_amount: isVendorView
+            ? +itemsAmount.toFixed(2)
+            : adminDiscount.discounted_items_amount,
+          delivery_fee: +Number(deliveryFee || 0).toFixed(2),
           amount: +totalAmount.toFixed(2),
           currency,
           duumini_commission: commissionDuumini,
@@ -1005,7 +1179,6 @@ router.get("/", authRequired, async (req, res) => {
       };
     };
 
-    // mine => client
     if (mine) {
       const params = [req.user.id];
       let where = "o.user_id = ?";
@@ -1054,14 +1227,15 @@ router.get("/", authRequired, async (req, res) => {
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
-      const items = rows.map((r) => mapRowToItem(r, req.user, payCols));
+      const items = rows.map((r) =>
+        mapRowToItem(r, req.user, payCols, discountCols),
+      );
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
       });
     }
 
-    // admin => tout
     if (isAdmin(req.user)) {
       let where = "1=1";
       const params = [];
@@ -1109,14 +1283,15 @@ router.get("/", authRequired, async (req, res) => {
         [...params, limit, offset],
       );
 
-      const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
+      const items = rowsRaw.map((r) =>
+        mapRowToItem(r, req.user, payCols, discountCols),
+      );
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
       });
     }
 
-    // vendor => commandes contenant ses produits
     if (isVendor(req.user)) {
       let where = "s.owner_id = ?";
       const params = [req.user.id];
@@ -1181,14 +1356,15 @@ router.get("/", authRequired, async (req, res) => {
         [req.user.id, req.user.id, ...params, limit, offset],
       );
 
-      const items = rowsRaw.map((r) => mapRowToItem(r, req.user, payCols));
+      const items = rowsRaw.map((r) =>
+        mapRowToItem(r, req.user, payCols, discountCols),
+      );
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
       });
     }
 
-    // fallback client normal
     const params = [req.user.id];
     let where = "o.user_id = ?";
 
@@ -1236,7 +1412,9 @@ router.get("/", authRequired, async (req, res) => {
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
-    const items = rows.map((r) => mapRowToItem(r, req.user, payCols));
+    const items = rows.map((r) =>
+      mapRowToItem(r, req.user, payCols, discountCols),
+    );
     return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1245,7 +1423,6 @@ router.get("/", authRequired, async (req, res) => {
 
 /* =========================
  * Shared: build cleanItems with promo
- * ✅ Commission Duumini = 9% itemsAmount (pas besoin par ligne)
  * =======================*/
 async function buildCleanItemsWithPromo({ conn, items }) {
   let itemsAmount = 0;
@@ -1335,8 +1512,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     itemsAmount += unit_price * qty;
   }
 
-  const totalCommission = computeDuuminiCommission(itemsAmount);
-  return { cleanItems, itemsAmount, totalCommission };
+  return { cleanItems, itemsAmount };
 }
 
 /* =========================
@@ -1484,20 +1660,184 @@ router.put("/:id/payment", authRequired, async (req, res) => {
   }
 });
 
-//* =========================
-// ✅ Create order AS ADMIN (user OR guest)
-//POST /api/orders/admin
-//* body:
-//* - soit { customer_id, ... }   ✅ user existant
-//* - soit { contact: {phone,...}, ... } ✅ invité sans compte
-//* - compat: accepte aussi { customer: {phone,...} } (si ton front envoie customer)
-// =======================*//
+/* =========================
+ * Admin update order discount
+ * PUT /api/orders/:id/admin-discount
+ * =======================*/
+router.put("/:id/admin-discount", authRequired, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0)
+    return res.status(400).json({ error: "invalid id" });
+  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+
+  const pool = getPool();
+
+  try {
+    const discountCols = await getOrdersDiscountColsCached(pool);
+    const payCols = await getOrdersPayColsCached(pool);
+
+    const hasDiscountColumns =
+      discountCols?.items_subtotal &&
+      discountCols?.delivery_fee &&
+      discountCols?.admin_discount_type &&
+      discountCols?.admin_discount_value &&
+      discountCols?.admin_discount_amount;
+
+    if (!hasDiscountColumns) {
+      return res.status(409).json({
+        code: "ORDER_DISCOUNT_COLUMNS_MISSING",
+        message:
+          "Impossible d'appliquer une réduction admin: colonnes de réduction absentes dans orders. Ajoute la migration puis réessaie.",
+      });
+    }
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [[o]] = await conn.query(
+        `
+        SELECT *
+        FROM orders
+        WHERE id = ?
+        FOR UPDATE
+        `,
+        [id],
+      );
+
+      if (!o) {
+        await conn.rollback();
+        return res.status(404).json({ error: "Not found" });
+      }
+
+      if (String(o.status || "").toUpperCase() !== "OPEN") {
+        await conn.rollback();
+        return res.status(409).json({
+          code: "ORDER_NOT_EDITABLE",
+          message:
+            "La réduction admin ne peut être modifiée que sur une commande OPEN.",
+        });
+      }
+
+      const itemsSubtotal = Number(o.items_subtotal || 0);
+      const deliveryFee = Number(o.delivery_fee || 0);
+      const currency = String(o.currency || "MAD").toUpperCase();
+
+      const discountInput = normalizeAdminDiscount(req.body?.admin_discount);
+      const adminDiscountAmount = computeAdminDiscountAmount(
+        itemsSubtotal,
+        discountInput,
+      );
+
+      const discountedItemsAmount = Math.max(
+        0,
+        itemsSubtotal - adminDiscountAmount,
+      );
+      const newTotal = +(discountedItemsAmount + deliveryFee).toFixed(2);
+      const newCommission = computeDuuminiCommission(discountedItemsAmount);
+
+      const currentPayment = safeParseJSON(o.payment) || {};
+      const currentPaid = normMoney(o.paid_amount ?? currentPayment.paid_amount ?? 0);
+      const safePaid = Math.min(currentPaid, newTotal);
+
+      const paymentObj = buildPaymentFromPayload(
+        {
+          ...currentPayment,
+          paid_amount: safePaid,
+        },
+        newTotal,
+        currency,
+      );
+
+      const sets = [
+        "admin_discount_type = ?",
+        "admin_discount_value = ?",
+        "admin_discount_amount = ?",
+        "admin_discount_label = ?",
+        "discounted_by_admin_id = ?",
+        "total = ?",
+        "commission_duumini = ?",
+        "updated_at = NOW()",
+      ];
+
+      const vals = [
+        discountInput.type,
+        discountInput.type === "NONE" ? 0 : discountInput.value,
+        adminDiscountAmount,
+        discountInput.label,
+        adminDiscountAmount > 0 ? req.user.id : null,
+        newTotal,
+        newCommission,
+      ];
+
+      if (payCols?.payment) {
+        sets.push("payment = ?");
+        vals.push(JSON.stringify(paymentObj));
+      }
+      if (payCols?.payment_status) {
+        sets.push("payment_status = ?");
+        vals.push(paymentObj.status);
+      }
+      if (payCols?.paid_amount) {
+        sets.push("paid_amount = ?");
+        vals.push(paymentObj.paid_amount);
+      }
+      if (payCols?.remaining_amount) {
+        sets.push("remaining_amount = ?");
+        vals.push(paymentObj.remaining_amount);
+      }
+
+      await conn.query(
+        `UPDATE orders SET ${sets.join(", ")} WHERE id = ?`,
+        [...vals, id],
+      );
+
+      await conn.commit();
+
+      return res.json({
+        ok: true,
+        id,
+        display_code: buildDisplayCode(id),
+        admin_discount: {
+          type: discountInput.type,
+          value: discountInput.type === "NONE" ? 0 : discountInput.value,
+          amount: adminDiscountAmount,
+          label: discountInput.label,
+          by_admin_id: adminDiscountAmount > 0 ? req.user.id : null,
+        },
+        totals: {
+          items_subtotal: +itemsSubtotal.toFixed(2),
+          admin_discount_amount: +adminDiscountAmount.toFixed(2),
+          discounted_items_amount: +discountedItemsAmount.toFixed(2),
+          delivery_fee: +deliveryFee.toFixed(2),
+          amount: +newTotal.toFixed(2),
+          currency,
+          duumini_commission: +newCommission.toFixed(2),
+        },
+        payment: paymentObj,
+      });
+    } catch (e) {
+      try {
+        await conn.rollback();
+      } catch {}
+      return res.status(500).json({ error: e.message });
+    } finally {
+      conn.release();
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
+ * ✅ Create order AS ADMIN (user OR guest)
+ * POST /api/orders/admin
+ * =======================*/
 router.post("/admin", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const {
     customer_id,
-    // compat: certains fronts envoient "customer"
     customer = null,
     contact = null,
     address = {},
@@ -1505,6 +1845,7 @@ router.post("/admin", authRequired, async (req, res) => {
     items = [],
     totals = {},
     payment = null,
+    admin_discount = null,
   } = req.body || {};
 
   const customerId = Number(customer_id || 0);
@@ -1520,7 +1861,6 @@ router.post("/admin", authRequired, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // ✅ si customer_id présent => on charge le user, sinon guest
     let u = null;
     if (hasUser) {
       const [[row]] = await conn.query(
@@ -1540,10 +1880,6 @@ router.post("/admin", authRequired, async (req, res) => {
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
-    // ✅ contact: priorités
-    // 1) contact (si fourni)
-    // 2) customer (compat)
-    // 3) user (si hasUser)
     let contactObj = null;
 
     const rawContact = contact || customer || null;
@@ -1559,7 +1895,6 @@ router.post("/admin", authRequired, async (req, res) => {
       contactObj = buildContactFromUser(u);
     }
 
-    // ✅ si guest => téléphone obligatoire
     if (!hasUser) {
       if (!contactObj) contactObj = buildContactFromPayload({});
       if (!contactObj.phone) {
@@ -1573,12 +1908,12 @@ router.post("/admin", authRequired, async (req, res) => {
     }
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
+    const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount, totalCommission } =
-      await buildCleanItemsWithPromo({
-        conn,
-        items,
-      });
+    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+      conn,
+      items,
+    });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (
@@ -1586,7 +1921,25 @@ router.post("/admin", authRequired, async (req, res) => {
       totals?.currency ||
       "MAD"
     ).toUpperCase();
-    const orderTotal = itemsAmount + deliveryFee;
+
+    const hasDiscountColumns =
+      discountCols?.items_subtotal &&
+      discountCols?.delivery_fee &&
+      discountCols?.admin_discount_type &&
+      discountCols?.admin_discount_value &&
+      discountCols?.admin_discount_amount;
+
+    const discountInput = hasDiscountColumns
+      ? normalizeAdminDiscount(admin_discount)
+      : { type: "NONE", value: 0, amount: 0, label: null };
+
+    const adminDiscountAmount = hasDiscountColumns
+      ? computeAdminDiscountAmount(itemsAmount, discountInput)
+      : 0;
+
+    const discountedItemsAmount = Math.max(0, itemsAmount - adminDiscountAmount);
+    const orderTotal = discountedItemsAmount + deliveryFee;
+    const totalCommission = computeDuuminiCommission(discountedItemsAmount);
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
@@ -1594,7 +1947,6 @@ router.post("/admin", authRequired, async (req, res) => {
     const receiptCols = await detectOrdersReceiptCols(conn);
     const receiptToken = receiptCols.receipt_token ? genReceiptToken() : null;
 
-    // ✅ INSERT order (user_id NULL si guest)
     const cols = [
       "user_id",
       "created_by_admin_id",
@@ -1635,6 +1987,22 @@ router.post("/admin", authRequired, async (req, res) => {
       +totalCommission.toFixed(2),
       currency,
     ];
+
+    if (hasDiscountColumns) {
+      cols.splice(7, 0, "items_subtotal", "delivery_fee", "admin_discount_type", "admin_discount_value", "admin_discount_amount", "admin_discount_label", "discounted_by_admin_id");
+      placeholders.splice(7, 0, "?", "?", "?", "?", "?", "?", "?");
+      vals.splice(
+        7,
+        0,
+        +itemsAmount.toFixed(2),
+        +deliveryFee.toFixed(2),
+        discountInput.type,
+        discountInput.type === "NONE" ? 0 : discountInput.value,
+        +adminDiscountAmount.toFixed(2),
+        discountInput.label,
+        adminDiscountAmount > 0 ? req.user.id : null,
+      );
+    }
 
     if (receiptCols.receipt_number) {
       cols.push("receipt_number");
@@ -1684,7 +2052,6 @@ router.post("/admin", authRequired, async (req, res) => {
       ]);
     }
 
-    // ✅ order_items
     for (const it of cleanItems) {
       if (
         promoCols &&
@@ -1739,7 +2106,6 @@ router.post("/admin", authRequired, async (req, res) => {
       }
     }
 
-    // ✅ stock decrement
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -1776,7 +2142,6 @@ router.post("/admin", authRequired, async (req, res) => {
 
     await conn.commit();
 
-    // ✅ notifications admin/vendors (OK pour guest aussi)
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch {}
@@ -1784,7 +2149,6 @@ router.post("/admin", authRequired, async (req, res) => {
       await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
 
-    // ✅ notification client seulement si user existe
     if (hasUser) {
       try {
         const { notifyUser } = require("../services/notify");
@@ -1814,6 +2178,22 @@ router.post("/admin", authRequired, async (req, res) => {
       contact: contactObj || null,
       created_by_admin_id: req.user.id,
       created_via: "ADMIN",
+      admin_discount: {
+        type: discountInput.type,
+        value: discountInput.type === "NONE" ? 0 : discountInput.value,
+        amount: +adminDiscountAmount.toFixed(2),
+        label: discountInput.label,
+        by_admin_id: adminDiscountAmount > 0 ? req.user.id : null,
+      },
+      totals: {
+        items_subtotal: +itemsAmount.toFixed(2),
+        admin_discount_amount: +adminDiscountAmount.toFixed(2),
+        discounted_items_amount: +discountedItemsAmount.toFixed(2),
+        delivery_fee: +deliveryFee.toFixed(2),
+        amount: +orderTotal.toFixed(2),
+        currency,
+        duumini_commission: +totalCommission.toFixed(2),
+      },
     });
   } catch (e) {
     try {
@@ -1826,6 +2206,7 @@ router.post("/admin", authRequired, async (req, res) => {
     conn.release();
   }
 });
+
 /* =========================
  * Create order (auth)
  * =======================*/
@@ -1860,12 +2241,12 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
+    const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount, totalCommission } =
-      await buildCleanItemsWithPromo({
-        conn,
-        items,
-      });
+    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+      conn,
+      items,
+    });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (
@@ -1873,7 +2254,9 @@ router.post("/", authRequired, async (req, res) => {
       totals?.currency ||
       "MAD"
     ).toUpperCase();
+
     const orderTotal = itemsAmount + deliveryFee;
+    const totalCommission = computeDuuminiCommission(itemsAmount);
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
@@ -1916,6 +2299,42 @@ router.post("/", authRequired, async (req, res) => {
       currency,
     ];
 
+    if (discountCols?.items_subtotal) {
+      cols.splice(5, 0, "items_subtotal");
+      placeholders.splice(5, 0, "?");
+      vals.splice(5, 0, +itemsAmount.toFixed(2));
+    }
+    if (discountCols?.delivery_fee) {
+      cols.splice(cols.indexOf("total"), 0, "delivery_fee");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, +deliveryFee.toFixed(2));
+    }
+    if (discountCols?.admin_discount_type) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_type");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, "NONE");
+    }
+    if (discountCols?.admin_discount_value) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_value");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
+    }
+    if (discountCols?.admin_discount_amount) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_amount");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
+    }
+    if (discountCols?.admin_discount_label) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_label");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
+    }
+    if (discountCols?.discounted_by_admin_id) {
+      cols.splice(cols.indexOf("total"), 0, "discounted_by_admin_id");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
+    }
+
     if (receiptCols.receipt_number) {
       cols.push("receipt_number");
       placeholders.push("?");
@@ -2018,7 +2437,6 @@ router.post("/", authRequired, async (req, res) => {
       }
     }
 
-    // stock decrement
     for (const it of cleanItems) {
       if (it.current_stock === null || it.current_stock === undefined) continue;
 
@@ -2095,6 +2513,22 @@ router.post("/", authRequired, async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
+      admin_discount: {
+        type: "NONE",
+        value: 0,
+        amount: 0,
+        label: null,
+        by_admin_id: null,
+      },
+      totals: {
+        items_subtotal: +itemsAmount.toFixed(2),
+        admin_discount_amount: 0,
+        discounted_items_amount: +itemsAmount.toFixed(2),
+        delivery_fee: +deliveryFee.toFixed(2),
+        amount: +orderTotal.toFixed(2),
+        currency,
+        duumini_commission: +totalCommission.toFixed(2),
+      },
     });
   } catch (e) {
     try {
@@ -2143,12 +2577,12 @@ router.post("/guest", async (req, res) => {
     const geoLink = buildGeoLink(addressObj.gps);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
+    const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount, totalCommission } =
-      await buildCleanItemsWithPromo({
-        conn,
-        items,
-      });
+    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+      conn,
+      items,
+    });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
     const currency = (
@@ -2156,7 +2590,9 @@ router.post("/guest", async (req, res) => {
       totals?.currency ||
       "MAD"
     ).toUpperCase();
+
     const orderTotal = itemsAmount + deliveryFee;
+    const totalCommission = computeDuuminiCommission(itemsAmount);
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
@@ -2197,6 +2633,42 @@ router.post("/guest", async (req, res) => {
       +totalCommission.toFixed(2),
       currency,
     ];
+
+    if (discountCols?.items_subtotal) {
+      cols.splice(5, 0, "items_subtotal");
+      placeholders.splice(5, 0, "?");
+      vals.splice(4, 0, +itemsAmount.toFixed(2));
+    }
+    if (discountCols?.delivery_fee) {
+      cols.splice(cols.indexOf("total"), 0, "delivery_fee");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, +deliveryFee.toFixed(2));
+    }
+    if (discountCols?.admin_discount_type) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_type");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, "NONE");
+    }
+    if (discountCols?.admin_discount_value) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_value");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
+    }
+    if (discountCols?.admin_discount_amount) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_amount");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
+    }
+    if (discountCols?.admin_discount_label) {
+      cols.splice(cols.indexOf("total"), 0, "admin_discount_label");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
+    }
+    if (discountCols?.discounted_by_admin_id) {
+      cols.splice(cols.indexOf("total"), 0, "discounted_by_admin_id");
+      placeholders.splice(placeholders.length - 4, 0, "?");
+      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
+    }
 
     if (receiptCols.receipt_number) {
       cols.push("receipt_number");
@@ -2362,6 +2834,22 @@ router.post("/guest", async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
+      admin_discount: {
+        type: "NONE",
+        value: 0,
+        amount: 0,
+        label: null,
+        by_admin_id: null,
+      },
+      totals: {
+        items_subtotal: +itemsAmount.toFixed(2),
+        admin_discount_amount: 0,
+        discounted_items_amount: +itemsAmount.toFixed(2),
+        delivery_fee: +deliveryFee.toFixed(2),
+        amount: +orderTotal.toFixed(2),
+        currency,
+        duumini_commission: +totalCommission.toFixed(2),
+      },
     });
   } catch (e) {
     try {
@@ -2410,25 +2898,41 @@ router.get("/:id", authRequired, async (req, res) => {
     );
 
     const isVendorView = isVendor(req.user) && !isAdmin(req.user);
+    const currency = (o.currency || "MAD").toUpperCase();
+
+    const discountCols = await getOrdersDiscountColsCached(getPool());
+    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+
     const totalAmount = isVendorView
       ? itemsAmount
-      : Number(o.total || itemsAmount);
+      : Number(
+          o.total ||
+            adminDiscount.discounted_items_amount +
+              Number(o.delivery_fee || 0),
+        );
+
     const deliveryFee = isVendorView
       ? 0
-      : Math.max(0, totalAmount - itemsAmount);
-    const currency = (o.currency || "MAD").toUpperCase();
+      : discountCols?.delivery_fee
+        ? Number(o.delivery_fee || 0)
+        : Math.max(0, totalAmount - itemsAmount);
 
     const payCols = await getOrdersPayColsCached(getPool());
     const paymentNorm = normalizePaymentForRow(
       o,
-      Number(o.total || itemsAmount),
+      totalAmount,
       currency,
       payCols,
     );
 
-    const duuminiCommission = isCancelledStatus(o.status)
+    const duuminiCommissionRaw = isCancelledStatus(o.status)
       ? 0
-      : computeDuuminiCommission(itemsAmount);
+      : normCommission(o.commission_duumini);
+
+    const duuminiCommission =
+      duuminiCommissionRaw != null
+        ? duuminiCommissionRaw
+        : computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
     res.json({
       ...o,
@@ -2436,11 +2940,33 @@ router.get("/:id", authRequired, async (req, res) => {
       display_code: buildDisplayCode(o.id),
       contact,
       address: addr,
+      admin_discount: isVendorView
+        ? {
+            type: "NONE",
+            value: 0,
+            amount: 0,
+            label: null,
+            by_admin_id: null,
+          }
+        : {
+            type: adminDiscount.type,
+            value: adminDiscount.value,
+            amount: adminDiscount.amount,
+            label: adminDiscount.label,
+            by_admin_id: adminDiscount.by_admin_id,
+          },
       ...paymentNorm,
       items: result.items,
       totals: {
         items_amount: +itemsAmount.toFixed(2),
-        delivery_fee: +deliveryFee.toFixed(2),
+        items_subtotal: isVendorView
+          ? +itemsAmount.toFixed(2)
+          : adminDiscount.items_subtotal,
+        admin_discount_amount: isVendorView ? 0 : adminDiscount.amount,
+        discounted_items_amount: isVendorView
+          ? +itemsAmount.toFixed(2)
+          : adminDiscount.discounted_items_amount,
+        delivery_fee: +Number(deliveryFee || 0).toFixed(2),
         amount: +totalAmount.toFixed(2),
         currency,
         duumini_commission: isVendorView ? null : duuminiCommission,
@@ -2458,8 +2984,6 @@ router.get("/:id", authRequired, async (req, res) => {
  * ✅ RECEIPT JSON + PDF (with QR)
  * =======================*/
 
-// ✅ PUBLIC: get receipt JSON by token (no auth)
-// GET /api/orders/receipt/:token
 router.get("/receipt/:token", async (req, res) => {
   const token = String(req.params.token || "").trim();
   if (!token) return res.status(400).json({ error: "invalid token" });
@@ -2498,6 +3022,7 @@ router.get("/receipt/:token", async (req, res) => {
 
     const addr = safeParseJSON(o.address) || {};
     const contact = safeParseJSON(o.contact) || {};
+    const discountCols = await getOrdersDiscountColsCached(getPool());
 
     const itemsAmount = (items || []).reduce(
       (s, it) => s + Number(it.unit_price || 0) * Number(it.qty || 1),
@@ -2505,17 +3030,32 @@ router.get("/receipt/:token", async (req, res) => {
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
-    const totalAmount = Number(o.total || itemsAmount);
-    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const deliveryFee = discountCols?.delivery_fee
+      ? Number(o.delivery_fee || 0)
+      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+    const totalAmount = Number(
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    );
 
     res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
       address: addr,
       contact,
+      admin_discount: {
+        type: adminDiscount.type,
+        value: adminDiscount.value,
+        amount: adminDiscount.amount,
+        label: adminDiscount.label,
+        by_admin_id: adminDiscount.by_admin_id,
+      },
       items,
       totals: {
         items_amount: +itemsAmount.toFixed(2),
+        items_subtotal: adminDiscount.items_subtotal,
+        admin_discount_amount: adminDiscount.amount,
+        discounted_items_amount: adminDiscount.discounted_items_amount,
         delivery_fee: +deliveryFee.toFixed(2),
         amount: +totalAmount.toFixed(2),
         currency,
@@ -2529,8 +3069,6 @@ router.get("/receipt/:token", async (req, res) => {
   }
 });
 
-// ✅ PUBLIC: receipt PDF by token (no auth)
-// GET /api/orders/receipt/:token.pdf   (✅ align with your Twilio link usage)
 router.get("/receipt/:token.pdf", async (req, res) => {
   const token = String(req.params.token || "").trim();
   if (!token) return res.status(400).json({ error: "invalid token" });
@@ -2563,17 +3101,25 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     const currency = (o.currency || "MAD").toUpperCase();
     const address = safeParseJSON(o.address) || {};
     const contact = safeParseJSON(o.contact) || {};
+    const discountCols = await getOrdersDiscountColsCached(getPool());
 
     const itemsAmount = (items || []).reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0,
     );
-    const totalAmount = Number(o.total || itemsAmount);
-    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+
+    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const deliveryFee = discountCols?.delivery_fee
+      ? Number(o.delivery_fee || 0)
+      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+    const totalAmount = Number(
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    );
 
     const duuminiCommission = isCancelledStatus(o.status)
       ? 0
-      : computeDuuminiCommission(itemsAmount);
+      : normCommission(o.commission_duumini) ??
+        computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
     const base = String(
       env.PUBLIC_WEB_BASE ||
@@ -2655,7 +3201,17 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
-    doc.text(`Sous-total produits : ${itemsAmount.toFixed(2)} ${currency}`);
+    doc.text(
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+    );
+    if (adminDiscount.amount > 0) {
+      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+    }
+    doc.text(
+      `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
+        2,
+      )} ${currency}`,
+    );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
     doc.fontSize(12).text(`TOTAL : ${totalAmount.toFixed(2)} ${currency}`);
@@ -2685,8 +3241,6 @@ router.get("/receipt/:token.pdf", async (req, res) => {
   }
 });
 
-// ✅ AUTH: receipt PDF by order id
-// GET /api/orders/:id/receipt.pdf
 router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0)
@@ -2704,17 +3258,25 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     const address = safeParseJSON(o.address) || {};
     const contact = safeParseJSON(o.contact) || {};
+    const discountCols = await getOrdersDiscountColsCached(getPool());
 
     const itemsAmount = items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
       0,
     );
-    const totalAmount = Number(o.total || itemsAmount);
-    const deliveryFee = Math.max(0, totalAmount - itemsAmount);
+
+    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const deliveryFee = discountCols?.delivery_fee
+      ? Number(o.delivery_fee || 0)
+      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+    const totalAmount = Number(
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    );
 
     const duuminiCommission = isCancelledStatus(o.status)
       ? 0
-      : computeDuuminiCommission(itemsAmount);
+      : normCommission(o.commission_duumini) ??
+        computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
     const token = o.receipt_token ? String(o.receipt_token) : null;
     const base = String(
@@ -2797,7 +3359,17 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
-    doc.text(`Sous-total produits : ${itemsAmount.toFixed(2)} ${currency}`);
+    doc.text(
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+    );
+    if (adminDiscount.amount > 0) {
+      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+    }
+    doc.text(
+      `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
+        2,
+      )} ${currency}`,
+    );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
     doc.fontSize(12).text(`TOTAL : ${totalAmount.toFixed(2)} ${currency}`);
@@ -2827,8 +3399,9 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
   }
 });
 
-// ✅ SEND RECEIPT VIA WHATSAPP (ADMIN)
-// POST /api/orders/:id/send-receipt-whatsapp
+/* =========================
+ * ✅ SEND RECEIPT VIA WHATSAPP (ADMIN)
+ * =======================*/
 router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0)
@@ -2874,7 +3447,6 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
       });
     }
 
-    // ✅ align: route publique = /api/orders/receipt/:token.pdf
     const pdfUrl = `${apiBase}/api/orders/receipt/${o.receipt_token}.pdf`;
 
     const receiptNumber =
