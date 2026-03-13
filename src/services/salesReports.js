@@ -8,9 +8,9 @@ function pad2(n) {
 
 function toDateTimeSql(d) {
   const x = new Date(d);
-  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())} ${pad2(
-    x.getHours()
-  )}:${pad2(x.getMinutes())}:${pad2(x.getSeconds())}`;
+  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(
+    x.getDate()
+  )} ${pad2(x.getHours())}:${pad2(x.getMinutes())}:${pad2(x.getSeconds())}`;
 }
 
 function startOfDay(d) {
@@ -68,10 +68,21 @@ function endOfYear(d) {
 function getRangeForPeriod(type, anchorDate) {
   const d = new Date(anchorDate);
 
-  if (type === "DAILY") return { start: startOfDay(d), end: endOfDay(d) };
-  if (type === "WEEKLY") return { start: startOfWeek(d), end: endOfWeek(d) };
-  if (type === "MONTHLY") return { start: startOfMonth(d), end: endOfMonth(d) };
-  if (type === "YEARLY") return { start: startOfYear(d), end: endOfYear(d) };
+  if (type === "DAILY") {
+    return { start: startOfDay(d), end: endOfDay(d) };
+  }
+
+  if (type === "WEEKLY") {
+    return { start: startOfWeek(d), end: endOfWeek(d) };
+  }
+
+  if (type === "MONTHLY") {
+    return { start: startOfMonth(d), end: endOfMonth(d) };
+  }
+
+  if (type === "YEARLY") {
+    return { start: startOfYear(d), end: endOfYear(d) };
+  }
 
   throw new Error("Invalid period_type");
 }
@@ -83,14 +94,17 @@ function stepDate(period_type, d) {
     x.setDate(x.getDate() + 1);
     return x;
   }
+
   if (period_type === "WEEKLY") {
     x.setDate(x.getDate() + 7);
     return x;
   }
+
   if (period_type === "MONTHLY") {
     x.setMonth(x.getMonth() + 1, 1);
     return x;
   }
+
   if (period_type === "YEARLY") {
     x.setFullYear(x.getFullYear() + 1, 0, 1);
     return x;
@@ -104,6 +118,7 @@ function normalizeAnchor(period_type, d) {
   if (period_type === "WEEKLY") return startOfWeek(d);
   if (period_type === "MONTHLY") return startOfMonth(d);
   if (period_type === "YEARLY") return startOfYear(d);
+
   throw new Error("Invalid period_type");
 }
 
@@ -116,6 +131,7 @@ function normMoney(x) {
 function safeJsonParse(v) {
   if (!v) return null;
   if (typeof v === "object") return v;
+
   try {
     return JSON.parse(v);
   } catch {
@@ -124,11 +140,17 @@ function safeJsonParse(v) {
 }
 
 function normPayStatus(s) {
-  const v = String(s || "")
-    .trim()
-    .toUpperCase();
-  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING")
+  const v = String(s || "").trim().toUpperCase();
+
+  if (
+    v === "PAID" ||
+    v === "UNPAID" ||
+    v === "PARTIAL" ||
+    v === "PENDING"
+  ) {
     return v;
+  }
+
   return "UNKNOWN";
 }
 
@@ -138,7 +160,7 @@ function getIncludedStatuses() {
 
 /* =========================
  * Detect cols like orders.js
- * =======================*/
+ * ======================= */
 let _ordersReportCols = null;
 let _ordersReportColsLoaded = false;
 
@@ -166,10 +188,10 @@ async function detectOrdersReportCols(conn) {
 
   const [rows] = await conn.query(
     `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'orders'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'orders'
+       AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
     candidates
   );
 
@@ -199,7 +221,9 @@ async function detectOrdersReportCols(conn) {
 
 async function getOrdersReportColsCached(pool) {
   if (_ordersReportColsLoaded) return _ordersReportCols;
+
   const conn = await pool.getConnection();
+
   try {
     _ordersReportCols = await detectOrdersReportCols(conn);
     _ordersReportColsLoaded = true;
@@ -241,9 +265,14 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
   const total = normMoney(totalAmount);
   const paymentParsed = cols.payment ? safeJsonParse(row?.payment) : null;
 
-  const colStatus = cols.payment_status ? normPayStatus(row?.payment_status) : null;
+  const colStatus = cols.payment_status
+    ? normPayStatus(row?.payment_status)
+    : null;
+
   const colPaid = cols.paid_amount ? normMoney(row?.paid_amount) : null;
-  const colRemain = cols.remaining_amount ? normMoney(row?.remaining_amount) : null;
+  const colRemain = cols.remaining_amount
+    ? normMoney(row?.remaining_amount)
+    : null;
 
   const jsonPaid = paymentParsed
     ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0)
@@ -251,9 +280,12 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
 
   const paid = colPaid != null ? colPaid : jsonPaid;
   const remaining =
-    colRemain != null ? colRemain : Math.max(0, total - Math.min(paid, total));
+    colRemain != null
+      ? colRemain
+      : Math.max(0, total - Math.min(paid, total));
 
   let status = colStatus;
+
   if (!status || status === "UNKNOWN") {
     if (paid <= 0) status = "UNPAID";
     else if (paid >= total || total <= 0) status = "PAID";
@@ -270,7 +302,7 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
 
 /* =========================
  * Core compute
- * =======================*/
+ * ======================= */
 async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const pool = getPool();
   const cols = await getOrdersReportColsCached(pool);
@@ -299,7 +331,6 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   }
 
   const statuses = getIncludedStatuses();
-
   const where = [];
   const params = [];
 
@@ -338,6 +369,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const orderIds = (orderRows || []).map((r) => Number(r.id)).filter(Boolean);
 
   let itemsAmount = 0;
+
   if (orderIds.length) {
     const [itemRows] = await conn.query(
       `
@@ -352,7 +384,10 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     );
 
     const itemsMap = new Map(
-      (itemRows || []).map((r) => [Number(r.order_id), normMoney(r.items_total)])
+      (itemRows || []).map((r) => [
+        Number(r.order_id),
+        normMoney(r.items_total),
+      ])
     );
 
     itemsAmount = orderRows.reduce((sum, r) => {
@@ -361,14 +396,14 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   }
 
   const ordersCount = Number(orderRows?.length || 0);
-  const totalAmount = orderRows.reduce(
-    (sum, r) => sum + normMoney(r.total_amount),
-    0
-  );
-  const duuminiCommission = orderRows.reduce(
-    (sum, r) => sum + normMoney(r.duumini_commission),
-    0
-  );
+
+  const totalAmount = orderRows.reduce((sum, r) => {
+    return sum + normMoney(r.total_amount);
+  }, 0);
+
+  const duuminiCommission = orderRows.reduce((sum, r) => {
+    return sum + normMoney(r.duumini_commission);
+  }, 0);
 
   const paymentBreakdownMap = new Map();
   let paidAmount = 0;
@@ -394,14 +429,17 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
 
     prev.cnt += 1;
     prev.amount += normMoney(row.total_amount);
+
     paymentBreakdownMap.set(key, prev);
   }
 
-  const paymentBreakdown = Array.from(paymentBreakdownMap.values()).map((x) => ({
-    payment_status: x.payment_status,
-    cnt: Number(x.cnt || 0),
-    amount: normMoney(x.amount),
-  }));
+  const paymentBreakdown = Array.from(paymentBreakdownMap.values()).map(
+    (x) => ({
+      payment_status: x.payment_status,
+      cnt: Number(x.cnt || 0),
+      amount: normMoney(x.amount),
+    })
+  );
 
   const deliveryAmount = Math.max(0, normMoney(totalAmount - itemsAmount));
 
@@ -423,9 +461,11 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
 
 /* =========================
  * Single upsert
- * =======================*/
+ * ======================= */
 async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
-  if (!PERIODS.includes(period_type)) throw new Error("Invalid period_type");
+  if (!PERIODS.includes(period_type)) {
+    throw new Error("Invalid period_type");
+  }
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -437,7 +477,11 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
     const period_start = toDateTimeSql(start);
     const period_end = toDateTimeSql(end);
 
-    const metrics = await computeSalesMetrics(conn, { start, end, currency });
+    const metrics = await computeSalesMetrics(conn, {
+      start,
+      end,
+      currency,
+    });
 
     await conn.query(
       `
@@ -506,6 +550,7 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
     try {
       await conn.rollback();
     } catch {}
+
     throw e;
   } finally {
     conn.release();
@@ -514,7 +559,7 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
 
 /* =========================
  * Find first order date
- * =======================*/
+ * ======================= */
 async function findFirstOrderDate(conn, currency = "MAD") {
   const pool = getPool();
   const cols = await getOrdersReportColsCached(pool);
@@ -550,7 +595,7 @@ async function findFirstOrderDate(conn, currency = "MAD") {
 
 /* =========================
  * Backfill
- * =======================*/
+ * ======================= */
 async function backfillSalesReports({
   period_type,
   currency = "MAD",
@@ -558,13 +603,17 @@ async function backfillSalesReports({
   toDate = new Date(),
   onProgress = null,
 }) {
-  if (!PERIODS.includes(period_type)) throw new Error("Invalid period_type");
+  if (!PERIODS.includes(period_type)) {
+    throw new Error("Invalid period_type");
+  }
 
   const pool = getPool();
   const conn = await pool.getConnection();
 
   try {
-    let startDate = fromDate ? new Date(fromDate) : await findFirstOrderDate(conn, currency);
+    let startDate = fromDate
+      ? new Date(fromDate)
+      : await findFirstOrderDate(conn, currency);
 
     if (!startDate) {
       return {

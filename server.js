@@ -56,11 +56,13 @@ try {
 } catch (e) {
   console.warn("[delivery_zones] route missing:", e?.message || e);
 }
+
 try {
   supplierProducts = require("./src/routes/supplier_products");
 } catch (e) {
   console.warn("[supplier_products] route missing:", e?.message || e);
 }
+
 try {
   supplierOrders = require("./src/routes/supplier_orders");
 } catch (e) {
@@ -76,7 +78,9 @@ try {
 }
 
 // (optionnel) env-check admin-only
-let authRequired, isAdmin;
+let authRequired;
+let isAdmin;
+
 try {
   ({ authRequired, isAdmin } = require("./src/middlewares/auth"));
 } catch {}
@@ -91,9 +95,11 @@ let rateLimit = null;
 try {
   helmet = require("helmet");
 } catch {}
+
 try {
   compression = require("compression");
 } catch {}
+
 try {
   rateLimit = require("express-rate-limit");
 } catch {}
@@ -114,7 +120,7 @@ console.log("[ENV] DUUMINI_AI_MODE =", env.DUUMINI_AI_MODE || "SAFE");
 console.log("[ENV] OPENAI_API_KEY =", yn(env.OPENAI_API_KEY));
 console.log("[ENV] OPENAI_MODEL =", env.OPENAI_MODEL || "(default)");
 
-// ✅ Ads intentionally disabled (kept only for legacy env visibility)
+// ✅ Ads intentionally disabled
 console.log("[ENV] META_AD_ACCOUNT_ID =", yn(env.META_AD_ACCOUNT_ID));
 console.log("[ENV] META_AD_ACCESS_TOKEN =", yn(env.META_AD_ACCESS_TOKEN));
 console.log("[ENV] META_PAGE_ID =", yn(env.META_PAGE_ID));
@@ -136,6 +142,7 @@ app.use((req, res, next) => {
     (crypto.randomUUID
       ? crypto.randomUUID()
       : crypto.randomBytes(16).toString("hex"));
+
   req.id = String(rid);
   res.setHeader("X-Request-Id", String(rid));
   next();
@@ -174,14 +181,19 @@ const corsOrigins =
 function isOriginAllowed(origin) {
   if (corsOrigins === true) return true;
   if (!origin) return true;
+
   if (Array.isArray(corsOrigins)) {
     if (corsOrigins.includes(origin)) return true;
 
     const lower = origin.toLowerCase();
+
     for (const o of corsOrigins) {
-      if (o.startsWith(".") && lower.endsWith(o.toLowerCase())) return true;
+      if (o.startsWith(".") && lower.endsWith(o.toLowerCase())) {
+        return true;
+      }
     }
   }
+
   return false;
 }
 
@@ -248,6 +260,7 @@ app.use(cookieParser());
  * Logs
  * ========================= */
 morgan.token("id", (req) => req.id || "-");
+
 const logFormatDev =
   ":id :method :url :status :res[content-length] - :response-time ms";
 const logFormatProd = ":id :method :url :status - :response-time ms";
@@ -265,23 +278,34 @@ app.use("/media", express.static("media", { maxAge: "7d", index: false }));
 
 const UPLOAD_DIR =
   process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
+
 app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d", index: false }));
 
 /* =========================
  * Healthcheck
  * ========================= */
-app.get("/health", (_req, res) =>
-  res.status(200).json({ ok: true, ts: Date.now() })
-);
-app.get("/api/health", (_req, res) =>
-  res.status(200).json({ ok: true, pid: process.pid, uptime: process.uptime() })
-);
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, ts: Date.now() });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    pid: process.pid,
+    uptime: process.uptime(),
+  });
+});
 
 /* =========================
  * Root
  * ========================= */
-app.get("/", (_req, res) => res.json({ ok: true, service: "duumini-api" }));
-app.head("/", (_req, res) => res.status(200).end());
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "duumini-api" });
+});
+
+app.head("/", (_req, res) => {
+  res.status(200).end();
+});
 
 /* =========================
  * API routes
@@ -291,7 +315,9 @@ app.use("/api/auth", otpRoutes);
 
 app.use("/api/user", users);
 
-if (adminUsers) app.use("/api/admin/users", adminUsers);
+if (adminUsers) {
+  app.use("/api/admin/users", adminUsers);
+}
 
 app.use("/api/shops", shops);
 app.use("/api/categories", categories);
@@ -308,11 +334,21 @@ app.use("/api/products", productRatingsRouter);
 
 app.use("/api/locations", locations);
 
-if (reports) app.use("/api/reports", reports);
+if (reports) {
+  app.use("/api/reports", reports);
+}
 
-if (deliveryZones) app.use("/api/delivery-zones", deliveryZones);
-if (supplierProducts) app.use("/api/supplier-products", supplierProducts);
-if (supplierOrders) app.use("/api/supplier-orders", supplierOrders);
+if (deliveryZones) {
+  app.use("/api/delivery-zones", deliveryZones);
+}
+
+if (supplierProducts) {
+  app.use("/api/supplier-products", supplierProducts);
+}
+
+if (supplierOrders) {
+  app.use("/api/supplier-orders", supplierOrders);
+}
 
 /* =========================
  * Partage (OG tags)
@@ -355,6 +391,7 @@ app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
 app.use("/api/snapshots", require("./src/routes/snapshots"));
 app.use("/api/geo", require("./src/routes/geo"));
+
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
@@ -365,6 +402,8 @@ if (adminContentAiRoutes) {
 const RUN_CRON =
   String(process.env.RUN_CRON || "").trim() ||
   (env.NODE_ENV === "production" ? "1" : "0");
+
+console.log("[ENV] RUN_CRON =", RUN_CRON);
 
 if (RUN_CRON === "1") {
   try {
@@ -382,6 +421,8 @@ if (RUN_CRON === "1") {
   } catch (e) {
     console.warn("[cron] salesReportsCron failed to start:", e?.message || e);
   }
+} else {
+  console.log("[cron] disabled");
 }
 
 /* =========================
@@ -395,6 +436,7 @@ app.use("/api/ads", (_req, res) => {
  * 404 + Error handler
  * ========================= */
 app.use(notFound);
+
 app.use((err, req, res, next) => {
   if (err) {
     console.error("[error]", {
@@ -403,6 +445,7 @@ app.use((err, req, res, next) => {
       stack: err?.stack,
     });
   }
+
   return errorHandler(err, req, res, next);
 });
 
@@ -416,6 +459,7 @@ server.headersTimeout = 70_000;
 server.requestTimeout = 120_000;
 
 let io = null;
+
 try {
   const { attachSocket } = require("./src/ws");
   io = attachSocket(server);
@@ -436,9 +480,14 @@ const RUN_WORKER =
   String(process.env.RUN_WORKER || "").trim() ||
   (env.NODE_ENV === "production" ? "1" : "0");
 
+console.log("[ENV] RUN_WORKER =", RUN_WORKER);
+
 if (RUN_WORKER === "1" && io) {
   try {
-    const { startNotificationWorker } = require("./src/workers/notificationWorker");
+    const {
+      startNotificationWorker,
+    } = require("./src/workers/notificationWorker");
+
     startNotificationWorker(io);
     console.log("[worker] notificationWorker started");
   } catch (e) {
@@ -455,18 +504,22 @@ server.listen(env.PORT, "0.0.0.0", () => {
 
 function shutdown(signal) {
   console.log(`[shutdown] ${signal} received`);
+
   server.close(() => {
     console.log("[shutdown] http server closed");
     process.exit(0);
   });
+
   setTimeout(() => process.exit(1), 10_000).unref();
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (err) =>
-  console.error("[unhandledRejection]", err)
-);
-process.on("uncaughtException", (err) =>
-  console.error("[uncaughtException]", err)
-);
+
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandledRejection]", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
