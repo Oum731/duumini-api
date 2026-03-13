@@ -1,15 +1,15 @@
 const express = require("express");
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const {
-  authRequired,
-  isAdmin,
-  isVendor,
-  isRestaurant,
-  isSupplier,
-} = require("../middlewares/auth");
+const auth = require("../middlewares/auth");
 
 const router = express.Router();
+
+const authRequired = auth.authRequired;
+const isAdmin = auth.isAdmin || (() => false);
+const isVendor = auth.isVendor || (() => false);
+const isRestaurant = auth.isRestaurant || (() => false);
+const isSupplier = auth.isSupplier || (() => false);
 
 function toNum(v, fallback = 0) {
   const n = Number(v);
@@ -36,7 +36,12 @@ function normalizeDateOnly(v) {
 }
 
 function canManageExpenses(req) {
-  return isAdmin(req.user) || isVendor(req.user) || isRestaurant(req.user) || isSupplier(req.user);
+  return (
+    isAdmin(req.user) ||
+    isVendor(req.user) ||
+    isRestaurant(req.user) ||
+    isSupplier(req.user)
+  );
 }
 
 function requestShopId(req) {
@@ -49,8 +54,7 @@ function requestShopId(req) {
 function forbiddenByRole(req, shopId) {
   if (isAdmin(req.user)) return false;
   const myShopId = toNum(req.user?.shop_id, 0) || null;
-  if (!myShopId) return false;
-  if (!shopId) return false;
+  if (!myShopId || !shopId) return false;
   return Number(myShopId) !== Number(shopId);
 }
 
@@ -202,7 +206,10 @@ router.get("/", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("GET /expenses error:", e);
-    return res.status(500).json({ error: "Erreur serveur lors du chargement des dépenses." });
+    return res.status(500).json({
+      error: "Erreur serveur lors du chargement des dépenses.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -240,7 +247,10 @@ router.get("/summary", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("GET /expenses/summary error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors du calcul du résumé.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -289,7 +299,10 @@ router.get("/grouped", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("GET /expenses/grouped error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors du regroupement des dépenses.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -316,8 +329,9 @@ router.get("/by-category", authRequired, async (req, res) => {
       ${whereSql}
       GROUP BY e.category_id, e.category_name
       ORDER BY total DESC, e.category_name ASC
-      `
-    , params);
+      `,
+      params
+    );
 
     return res.json({
       items: rows.map((r) => ({
@@ -330,7 +344,10 @@ router.get("/by-category", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("GET /expenses/by-category error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors du calcul par catégorie.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -416,7 +433,10 @@ router.post("/", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("POST /expenses error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la création de la dépense.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -517,7 +537,10 @@ router.put("/:id", authRequired, async (req, res) => {
     });
   } catch (e) {
     console.error("PUT /expenses/:id error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la mise à jour.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -552,7 +575,10 @@ router.delete("/:id", authRequired, async (req, res) => {
     return res.json({ ok: true, id });
   } catch (e) {
     console.error("DELETE /expenses/:id error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la suppression.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 

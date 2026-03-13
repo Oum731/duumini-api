@@ -1,14 +1,14 @@
 const express = require("express");
 const { getPool } = require("../lib/db");
-const {
-  authRequired,
-  isAdmin,
-  isVendor,
-  isRestaurant,
-  isSupplier,
-} = require("../middlewares/auth");
+const auth = require("../middlewares/auth");
 
 const router = express.Router();
+
+const authRequired = auth.authRequired;
+const isAdmin = auth.isAdmin || (() => false);
+const isVendor = auth.isVendor || (() => false);
+const isRestaurant = auth.isRestaurant || (() => false);
+const isSupplier = auth.isSupplier || (() => false);
 
 function toNum(v, fallback = 0) {
   const n = Number(v);
@@ -23,7 +23,12 @@ function cleanStr(v, max = 255) {
 }
 
 function canManage(req) {
-  return isAdmin(req.user) || isVendor(req.user) || isRestaurant(req.user) || isSupplier(req.user);
+  return (
+    isAdmin(req.user) ||
+    isVendor(req.user) ||
+    isRestaurant(req.user) ||
+    isSupplier(req.user)
+  );
 }
 
 function currentShopId(req) {
@@ -70,7 +75,10 @@ router.get("/", authRequired, async (req, res) => {
     return res.json({ items: rows });
   } catch (e) {
     console.error("GET /expense-categories error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors du chargement des catégories de dépenses.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
@@ -125,7 +133,10 @@ router.post("/", authRequired, async (req, res) => {
     return res.status(201).json(created);
   } catch (e) {
     console.error("POST /expense-categories error:", e);
-    return res.status(500).json({ error: "Erreur serveur." });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la création de la catégorie.",
+      details: e?.message || "unknown_error",
+    });
   }
 });
 
