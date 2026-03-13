@@ -69,12 +69,7 @@ router.get("/sales/:id", authRequired, async (req, res) => {
 
   try {
     const [[row]] = await getPool().query(
-      `
-      SELECT *
-      FROM sales_reports
-      WHERE id = ?
-      LIMIT 1
-      `,
+      `SELECT * FROM sales_reports WHERE id = ? LIMIT 1`,
       [id]
     );
 
@@ -161,7 +156,6 @@ router.post("/sales/backfill-all", authRequired, async (req, res) => {
         fromDate,
         toDate,
       });
-
       results.push(out);
     }
 
