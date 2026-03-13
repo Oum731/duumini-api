@@ -59,18 +59,48 @@ async function generateAll(period_type, anchorDate = new Date()) {
   return results;
 }
 
+async function warmupReports() {
+  try {
+    console.log("[salesReportsCron] warmup DAILY...");
+    await generateAll("DAILY", addDays(new Date(), -1));
+    console.log("[salesReportsCron] warmup DAILY OK");
+  } catch (e) {
+    console.error("[salesReportsCron] warmup DAILY ERROR:", e?.message || e);
+  }
+
+  try {
+    console.log("[salesReportsCron] warmup WEEKLY...");
+    await generateAll("WEEKLY", addDays(new Date(), -7));
+    console.log("[salesReportsCron] warmup WEEKLY OK");
+  } catch (e) {
+    console.error("[salesReportsCron] warmup WEEKLY ERROR:", e?.message || e);
+  }
+
+  try {
+    console.log("[salesReportsCron] warmup MONTHLY...");
+    await generateAll("MONTHLY", addMonths(new Date(), -1));
+    console.log("[salesReportsCron] warmup MONTHLY OK");
+  } catch (e) {
+    console.error("[salesReportsCron] warmup MONTHLY ERROR:", e?.message || e);
+  }
+
+  try {
+    console.log("[salesReportsCron] warmup YEARLY...");
+    await generateAll("YEARLY", addYears(new Date(), -1));
+    console.log("[salesReportsCron] warmup YEARLY OK");
+  } catch (e) {
+    console.error("[salesReportsCron] warmup YEARLY ERROR:", e?.message || e);
+  }
+}
+
 function startSalesReportsCron() {
   console.log("[salesReportsCron] starting...");
   console.log("[salesReportsCron] timezone =", CRON_TZ);
 
-  setTimeout(async () => {
-    try {
-      console.log("[salesReportsCron] test DAILY...");
-      await generateAll("DAILY", addDays(new Date(), -1));
-      console.log("[salesReportsCron] test DAILY OK");
-    } catch (e) {
-      console.error("[salesReportsCron] test DAILY ERROR:", e?.message || e);
-    }
+  setTimeout(() => {
+    warmupReports().catch((e) => {
+      console.error("[salesReportsCron] warmup global ERROR:", e?.message || e);
+    });
   }, 5000);
 
   cron.schedule(
