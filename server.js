@@ -30,6 +30,21 @@ const aiRoutes = require("./src/routes/ai");
 const subCategories = require("./src/routes/subCategories");
 const locations = require("./src/routes/locations");
 
+// ✅ NEW: expenses routes
+let expenses = null;
+try {
+  expenses = require("./src/routes/expenses");
+} catch (e) {
+  console.warn("[expenses] route missing:", e?.message || e);
+}
+
+let expenseCategories = null;
+try {
+  expenseCategories = require("./src/routes/expense_categories");
+} catch (e) {
+  console.warn("[expense_categories] route missing:", e?.message || e);
+}
+
 // ✅ NEW: admin users route
 let adminUsers = null;
 try {
@@ -333,6 +348,14 @@ app.use("/api/events", events);
 app.use("/api/products", productRatingsRouter);
 
 app.use("/api/locations", locations);
+
+if (expenseCategories) {
+  app.use("/api/expense-categories", expenseCategories);
+}
+
+if (expenses) {
+  app.use("/api/expenses", expenses);
+}
 
 if (reports) {
   app.use("/api/reports", reports);
