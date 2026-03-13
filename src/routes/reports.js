@@ -10,23 +10,31 @@ const {
 const router = Router();
 
 router.get("/sales", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const type = String(req.query.type || "DAILY").toUpperCase();
   const from = req.query.from ? String(req.query.from) : null;
   const to = req.query.to ? String(req.query.to) : null;
   const currency = String(req.query.currency || "MAD").toUpperCase();
 
+  if (!PERIODS.includes(type)) {
+    return res.status(400).json({ error: "Invalid period_type" });
+  }
+
   const where = ["period_type = ?", "currency = ?"];
   const params = [type, currency];
 
-  if (from) {
-    where.push("period_start >= ?");
+  if (from && to) {
+    where.push("period_end >= ?");
+    where.push("period_start <= ?");
+    params.push(from, to);
+  } else if (from) {
+    where.push("period_end >= ?");
     params.push(from);
-  }
-
-  if (to) {
-    where.push("period_end <= ?");
+  } else if (to) {
+    where.push("period_start <= ?");
     params.push(to);
   }
 
@@ -36,42 +44,54 @@ router.get("/sales", authRequired, async (req, res) => {
       SELECT *
       FROM sales_reports
       WHERE ${where.join(" AND ")}
-      ORDER BY period_start DESC
+      ORDER BY period_start DESC, id DESC
       LIMIT 1000
       `,
       params
     );
 
-    res.json({ items: rows || [] });
+    return res.json({ items: rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
 router.get("/sales/:id", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
 
   try {
     const [[row]] = await getPool().query(
-      `SELECT * FROM sales_reports WHERE id = ? LIMIT 1`,
+      `
+      SELECT *
+      FROM sales_reports
+      WHERE id = ?
+      LIMIT 1
+      `,
       [id]
     );
 
-    if (!row) return res.status(404).json({ error: "Not found" });
+    if (!row) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
-    res.json(row);
+    return res.json(row);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
 router.post("/sales/run", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const period_type = String(req.body?.period_type || "DAILY").toUpperCase();
   const date = req.body?.date ? new Date(req.body.date) : new Date();
@@ -88,14 +108,16 @@ router.post("/sales/run", authRequired, async (req, res) => {
       currency,
     });
 
-    res.json({ ok: true, report: out });
+    return res.json({ ok: true, report: out });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
 router.post("/sales/backfill", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const period_type = String(req.body?.period_type || "DAILY").toUpperCase();
   const currency = String(req.body?.currency || "MAD").toUpperCase();
@@ -114,14 +136,16 @@ router.post("/sales/backfill", authRequired, async (req, res) => {
       toDate,
     });
 
-    res.json(out);
+    return res.json(out);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
 router.post("/sales/backfill-all", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const currency = String(req.body?.currency || "MAD").toUpperCase();
   const fromDate = req.body?.fromDate ? new Date(req.body.fromDate) : null;
@@ -137,16 +161,17 @@ router.post("/sales/backfill-all", authRequired, async (req, res) => {
         fromDate,
         toDate,
       });
+
       results.push(out);
     }
 
-    res.json({
+    return res.json({
       ok: true,
       currency,
       results,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
