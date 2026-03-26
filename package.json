@@ -1,12 +1,12 @@
 {
   "name": "duumini-api",
   "version": "1.0.0",
-  "description": "",
+  "description": "API backend de Duumini",
   "main": "server.js",
   "scripts": {
-    "dev": "node server.js",
+    "dev": "ts-node-dev --respawn --transpile-only server.js",
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No tests specified\" && exit 0",
     "sales:backfill": "node src/scripts/backfillSalesReports.js",
     "sales:backfill:daily": "node src/scripts/backfillSalesReports.js DAILY",
     "sales:backfill:weekly": "node src/scripts/backfillSalesReports.js WEEKLY",
@@ -17,7 +17,12 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": [],
+  "keywords": [
+    "duumini",
+    "express",
+    "mysql",
+    "api"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {

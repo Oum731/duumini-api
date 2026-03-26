@@ -73,21 +73,10 @@ function endOfYear(d) {
 function getRangeForPeriod(type, anchorDate) {
   const d = new Date(anchorDate);
 
-  if (type === "DAILY") {
-    return { start: startOfDay(d), end: endOfDay(d) };
-  }
-
-  if (type === "WEEKLY") {
-    return { start: startOfWeek(d), end: endOfWeek(d) };
-  }
-
-  if (type === "MONTHLY") {
-    return { start: startOfMonth(d), end: endOfMonth(d) };
-  }
-
-  if (type === "YEARLY") {
-    return { start: startOfYear(d), end: endOfYear(d) };
-  }
+  if (type === "DAILY") return { start: startOfDay(d), end: endOfDay(d) };
+  if (type === "WEEKLY") return { start: startOfWeek(d), end: endOfWeek(d) };
+  if (type === "MONTHLY") return { start: startOfMonth(d), end: endOfMonth(d) };
+  if (type === "YEARLY") return { start: startOfYear(d), end: endOfYear(d) };
 
   throw new Error("Invalid period_type");
 }
@@ -129,7 +118,7 @@ function normalizeAnchor(period_type, d) {
 
 function normMoney(x) {
   const n = Number(x);
-  if (!Number.isFinite(n) || n < 0) return 0;
+  if (!Number.isFinite(n)) return 0;
   return +n.toFixed(2);
 }
 
@@ -147,12 +136,7 @@ function safeJsonParse(v) {
 function normPayStatus(s) {
   const v = String(s || "").trim().toUpperCase();
 
-  if (
-    v === "PAID" ||
-    v === "UNPAID" ||
-    v === "PARTIAL" ||
-    v === "PENDING"
-  ) {
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") {
     return v;
   }
 
@@ -163,9 +147,6 @@ function getIncludedStatuses() {
   return ["DONE"];
 }
 
-/* =========================
- * Detect cols like orders.js
- * ======================= */
 let _ordersReportCols = null;
 let _ordersReportColsLoaded = false;
 
@@ -189,6 +170,11 @@ async function detectOrdersReportCols(conn) {
     "payment_status",
     "paid_amount",
     "remaining_amount",
+    "delivery_fee",
+    "shipping_fee",
+    "delivery_amount",
+    "items_subtotal",
+    "admin_discount_amount",
   ];
 
   const [rows] = await conn.query(
@@ -221,6 +207,11 @@ async function detectOrdersReportCols(conn) {
     payment_status: found.has("payment_status"),
     paid_amount: found.has("paid_amount"),
     remaining_amount: found.has("remaining_amount"),
+    delivery_fee: found.has("delivery_fee"),
+    shipping_fee: found.has("shipping_fee"),
+    delivery_amount: found.has("delivery_amount"),
+    items_subtotal: found.has("items_subtotal"),
+    admin_discount_amount: found.has("admin_discount_amount"),
   };
 }
 
@@ -228,7 +219,6 @@ async function getOrdersReportColsCached(pool) {
   if (_ordersReportColsLoaded) return _ordersReportCols;
 
   const conn = await pool.getConnection();
-
   try {
     _ordersReportCols = await detectOrdersReportCols(conn);
     _ordersReportColsLoaded = true;
@@ -266,6 +256,57 @@ function pickCommissionColumn(cols) {
   return null;
 }
 
+function pickDeliveryColumn(cols) {
+  if (cols.delivery_fee) return "delivery_fee";
+  if (cols.shipping_fee) return "shipping_fee";
+  if (cols.delivery_amount) return "delivery_amount";
+  return null;
+}
+
+function extractPaidAmount(paymentParsed, colPaid) {
+  if (Number.isFinite(Number(colPaid))) return normMoney(colPaid);
+
+  if (!paymentParsed) return 0;
+
+  const candidates = [
+    paymentParsed.paid_amount,
+    paymentParsed.paidAmount,
+    paymentParsed.amount_paid,
+    paymentParsed.total_paid,
+    paymentParsed.sum_paid,
+    paymentParsed.encaisse,
+  ];
+
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return normMoney(n);
+  }
+
+  return 0;
+}
+
+function extractRemainingAmount(paymentParsed, colRemain, total, paid) {
+  if (Number.isFinite(Number(colRemain))) return normMoney(colRemain);
+
+  if (paymentParsed) {
+    const candidates = [
+      paymentParsed.remaining_amount,
+      paymentParsed.remainingAmount,
+      paymentParsed.remaining,
+      paymentParsed.amount_remaining,
+      paymentParsed.reste_a_payer,
+      paymentParsed.rest_to_pay,
+    ];
+
+    for (const v of candidates) {
+      const n = Number(v);
+      if (Number.isFinite(n)) return normMoney(n);
+    }
+  }
+
+  return normMoney(Math.max(0, total - paid));
+}
+
 function buildPaymentFromRow(row, cols, totalAmount, currency) {
   const total = normMoney(totalAmount);
   const paymentParsed = cols.payment ? safeJsonParse(row?.payment) : null;
@@ -274,20 +315,20 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
     ? normPayStatus(row?.payment_status)
     : null;
 
-  const colPaid = cols.paid_amount ? normMoney(row?.paid_amount) : null;
-  const colRemain = cols.remaining_amount
-    ? normMoney(row?.remaining_amount)
-    : null;
+  const paid = Math.min(
+    extractPaidAmount(paymentParsed, cols.paid_amount ? row?.paid_amount : null),
+    total
+  );
 
-  const jsonPaid = paymentParsed
-    ? normMoney(paymentParsed.paid_amount ?? paymentParsed.paidAmount ?? 0)
-    : 0;
-
-  const paid = colPaid != null ? colPaid : jsonPaid;
-  const remaining =
-    colRemain != null
-      ? colRemain
-      : Math.max(0, total - Math.min(paid, total));
+  const remaining = Math.min(
+    extractRemainingAmount(
+      paymentParsed,
+      cols.remaining_amount ? row?.remaining_amount : null,
+      total,
+      paid
+    ),
+    total
+  );
 
   let status = colStatus;
 
@@ -299,15 +340,12 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
 
   return {
     status,
-    paid_amount: Math.min(paid, total),
-    remaining_amount: remaining,
+    paid_amount: normMoney(paid),
+    remaining_amount: normMoney(Math.max(0, remaining)),
     currency: String(currency || "MAD").toUpperCase(),
   };
 }
 
-/* =========================
- * Core compute
- * ======================= */
 async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const pool = getPool();
   const cols = await getOrdersReportColsCached(pool);
@@ -316,6 +354,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const dateCol = pickDateColumn(cols);
   const totalCol = pickTotalColumn(cols);
   const commissionCol = pickCommissionColumn(cols);
+  const deliveryCol = pickDeliveryColumn(cols);
 
   if (!statusCol) {
     throw new Error(
@@ -343,8 +382,8 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   params.push(...statuses);
 
   if (cols.currency) {
-    where.push(`o.currency = ?`);
-    params.push(currency);
+    where.push(`UPPER(o.currency) = ?`);
+    params.push(String(currency).toUpperCase());
   }
 
   where.push(`o.${dateCol} >= ?`);
@@ -359,6 +398,9 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
       o.id,
       o.${totalCol} AS total_amount,
       ${commissionCol ? `o.${commissionCol}` : "0"} AS duumini_commission
+      ${deliveryCol ? `, o.${deliveryCol} AS delivery_amount_exact` : ""}
+      ${cols.items_subtotal ? `, o.items_subtotal` : ""}
+      ${cols.admin_discount_amount ? `, o.admin_discount_amount` : ""}
       ${cols.payment ? ", o.payment" : ""}
       ${cols.payment_status ? ", o.payment_status" : ""}
       ${cols.paid_amount ? ", o.paid_amount" : ""}
@@ -389,10 +431,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     );
 
     const itemsMap = new Map(
-      (itemRows || []).map((r) => [
-        Number(r.order_id),
-        normMoney(r.items_total),
-      ])
+      (itemRows || []).map((r) => [Number(r.order_id), normMoney(r.items_total)])
     );
 
     itemsAmount = orderRows.reduce((sum, r) => {
@@ -409,6 +448,16 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const duuminiCommission = orderRows.reduce((sum, r) => {
     return sum + normMoney(r.duumini_commission);
   }, 0);
+
+  let deliveryAmount = 0;
+
+  if (deliveryCol) {
+    deliveryAmount = orderRows.reduce((sum, r) => {
+      return sum + normMoney(r.delivery_amount_exact);
+    }, 0);
+  } else {
+    deliveryAmount = Math.max(0, normMoney(totalAmount - itemsAmount));
+  }
 
   const paymentBreakdownMap = new Map();
   let paidAmount = 0;
@@ -430,23 +479,25 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
       payment_status: key,
       cnt: 0,
       amount: 0,
+      paid_amount: 0,
+      remaining_amount: 0,
     };
 
     prev.cnt += 1;
     prev.amount += normMoney(row.total_amount);
+    prev.paid_amount += normMoney(payment.paid_amount);
+    prev.remaining_amount += normMoney(payment.remaining_amount);
 
     paymentBreakdownMap.set(key, prev);
   }
 
-  const paymentBreakdown = Array.from(paymentBreakdownMap.values()).map(
-    (x) => ({
-      payment_status: x.payment_status,
-      cnt: Number(x.cnt || 0),
-      amount: normMoney(x.amount),
-    })
-  );
-
-  const deliveryAmount = Math.max(0, normMoney(totalAmount - itemsAmount));
+  const paymentBreakdown = Array.from(paymentBreakdownMap.values()).map((x) => ({
+    payment_status: x.payment_status,
+    cnt: Number(x.cnt || 0),
+    amount: normMoney(x.amount),
+    paid_amount: normMoney(x.paid_amount),
+    remaining_amount: normMoney(x.remaining_amount),
+  }));
 
   return {
     orders_count: ordersCount,
@@ -460,13 +511,11 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
       payment_breakdown: paymentBreakdown,
       included_statuses: statuses,
       date_column_used: dateCol,
+      delivery_column_used: deliveryCol || null,
     },
   };
 }
 
-/* =========================
- * Single upsert
- * ======================= */
 async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
   if (!PERIODS.includes(period_type)) {
     throw new Error("Invalid period_type");
@@ -518,7 +567,7 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
         period_type,
         period_start,
         period_end,
-        currency,
+        String(currency).toUpperCase(),
         metrics.orders_count,
         metrics.items_amount,
         metrics.delivery_amount,
@@ -538,34 +587,28 @@ async function upsertReport({ period_type, anchorDate, currency = "MAD" }) {
         AND period_end = ?
       LIMIT 1
       `,
-      [period_type, currency, period_start, period_end]
+      [period_type, String(currency).toUpperCase(), period_start, period_end]
     );
 
     await conn.commit();
 
-    return (
-      saved || {
-        period_type,
-        period_start,
-        period_end,
-        currency,
-        ...metrics,
-      }
-    );
+    return saved || {
+      period_type,
+      period_start,
+      period_end,
+      currency: String(currency).toUpperCase(),
+      ...metrics,
+    };
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
-
     throw e;
   } finally {
     conn.release();
   }
 }
 
-/* =========================
- * Find first order date
- * ======================= */
 async function findFirstOrderDate(conn, currency = "MAD") {
   const pool = getPool();
   const cols = await getOrdersReportColsCached(pool);
@@ -583,8 +626,8 @@ async function findFirstOrderDate(conn, currency = "MAD") {
   params.push(...statuses);
 
   if (cols.currency) {
-    where.push(`currency = ?`);
-    params.push(currency);
+    where.push(`UPPER(currency) = ?`);
+    params.push(String(currency).toUpperCase());
   }
 
   const [[row]] = await conn.query(
@@ -599,9 +642,6 @@ async function findFirstOrderDate(conn, currency = "MAD") {
   return row?.first_date ? new Date(row.first_date) : null;
 }
 
-/* =========================
- * Backfill
- * ======================= */
 async function backfillSalesReports({
   period_type,
   currency = "MAD",
