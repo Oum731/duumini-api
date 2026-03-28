@@ -1,6 +1,7 @@
 const { getPool } = require("../lib/db");
 
 const PERIODS = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
+const DUUMINI_COMMISSION_RATE = 0.09;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -145,6 +146,12 @@ function normPayStatus(s) {
 
 function getIncludedStatuses() {
   return ["DONE"];
+}
+
+function computeDuuminiCommission(itemsAmount) {
+  const base = Number(itemsAmount || 0);
+  if (!Number.isFinite(base) || base <= 0) return 0;
+  return normMoney(base * DUUMINI_COMMISSION_RATE);
 }
 
 let _ordersReportCols = null;
@@ -397,7 +404,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     SELECT
       o.id,
       o.${totalCol} AS total_amount,
-      ${commissionCol ? `o.${commissionCol}` : "0"} AS duumini_commission
+      ${commissionCol ? `o.${commissionCol}` : "NULL"} AS duumini_commission
       ${deliveryCol ? `, o.${deliveryCol} AS delivery_amount_exact` : ""}
       ${cols.items_subtotal ? `, o.items_subtotal` : ""}
       ${cols.admin_discount_amount ? `, o.admin_discount_amount` : ""}
@@ -413,9 +420,32 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     params
   );
 
-  const orderIds = (orderRows || []).map((r) => Number(r.id)).filter(Boolean);
+  const ordersCount = Number(orderRows?.length || 0);
 
-  let itemsAmount = 0;
+  if (!ordersCount) {
+    return {
+      orders_count: 0,
+      items_amount: 0,
+      delivery_amount: 0,
+      total_amount: 0,
+      duumini_commission: 0,
+      details_json: {
+        gross_items_amount: 0,
+        admin_discount_amount: 0,
+        net_items_amount: 0,
+        paid_amount: 0,
+        remaining_amount: 0,
+        payment_breakdown: [],
+        included_statuses: statuses,
+        date_column_used: dateCol,
+        delivery_column_used: deliveryCol || null,
+      },
+    };
+  }
+
+  const orderIds = orderRows.map((r) => Number(r.id)).filter(Boolean);
+
+  const itemsMap = new Map();
 
   if (orderIds.length) {
     const [itemRows] = await conn.query(
@@ -430,47 +460,57 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
       orderIds
     );
 
-    const itemsMap = new Map(
-      (itemRows || []).map((r) => [Number(r.order_id), normMoney(r.items_total)])
-    );
-
-    itemsAmount = orderRows.reduce((sum, r) => {
-      return sum + normMoney(itemsMap.get(Number(r.id)) || 0);
-    }, 0);
+    for (const row of itemRows || []) {
+      itemsMap.set(Number(row.order_id), normMoney(row.items_total));
+    }
   }
 
-  const ordersCount = Number(orderRows?.length || 0);
-
-  const totalAmount = orderRows.reduce((sum, r) => {
-    return sum + normMoney(r.total_amount);
-  }, 0);
-
-  const duuminiCommission = orderRows.reduce((sum, r) => {
-    return sum + normMoney(r.duumini_commission);
-  }, 0);
-
+  let grossItemsAmount = 0;
+  let adminDiscountAmount = 0;
+  let netItemsAmount = 0;
+  let totalAmount = 0;
   let deliveryAmount = 0;
-
-  if (deliveryCol) {
-    deliveryAmount = orderRows.reduce((sum, r) => {
-      return sum + normMoney(r.delivery_amount_exact);
-    }, 0);
-  } else {
-    deliveryAmount = Math.max(0, normMoney(totalAmount - itemsAmount));
-  }
-
-  const paymentBreakdownMap = new Map();
+  let duuminiCommission = 0;
   let paidAmount = 0;
   let remainingAmount = 0;
 
+  const paymentBreakdownMap = new Map();
+
   for (const row of orderRows) {
+    const rowTotal = normMoney(row.total_amount);
+
+    const rowGrossItems = cols.items_subtotal
+      ? normMoney(row.items_subtotal)
+      : normMoney(itemsMap.get(Number(row.id)) || 0);
+
+    const rowDiscount = cols.admin_discount_amount
+      ? normMoney(row.admin_discount_amount)
+      : 0;
+
+    const rowNetItems = normMoney(Math.max(0, rowGrossItems - rowDiscount));
+
+    const rowDelivery = deliveryCol
+      ? normMoney(row.delivery_amount_exact)
+      : normMoney(Math.max(0, rowTotal - rowNetItems));
+
+    const rowCommissionRaw = Number(row.duumini_commission);
+    const rowCommission = Number.isFinite(rowCommissionRaw)
+      ? normMoney(rowCommissionRaw)
+      : computeDuuminiCommission(rowNetItems);
+
     const payment = buildPaymentFromRow(
       row,
       cols,
-      Number(row.total_amount || 0),
+      rowTotal,
       cols.currency ? row.currency || currency : currency
     );
 
+    grossItemsAmount += rowGrossItems;
+    adminDiscountAmount += rowDiscount;
+    netItemsAmount += rowNetItems;
+    totalAmount += rowTotal;
+    deliveryAmount += rowDelivery;
+    duuminiCommission += rowCommission;
     paidAmount += normMoney(payment.paid_amount);
     remainingAmount += normMoney(payment.remaining_amount);
 
@@ -484,7 +524,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     };
 
     prev.cnt += 1;
-    prev.amount += normMoney(row.total_amount);
+    prev.amount += rowTotal;
     prev.paid_amount += normMoney(payment.paid_amount);
     prev.remaining_amount += normMoney(payment.remaining_amount);
 
@@ -501,11 +541,14 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
 
   return {
     orders_count: ordersCount,
-    items_amount: normMoney(itemsAmount),
+    items_amount: normMoney(netItemsAmount),
     delivery_amount: normMoney(deliveryAmount),
     total_amount: normMoney(totalAmount),
     duumini_commission: normMoney(duuminiCommission),
     details_json: {
+      gross_items_amount: normMoney(grossItemsAmount),
+      admin_discount_amount: normMoney(adminDiscountAmount),
+      net_items_amount: normMoney(netItemsAmount),
       paid_amount: normMoney(paidAmount),
       remaining_amount: normMoney(remainingAmount),
       payment_breakdown: paymentBreakdown,
