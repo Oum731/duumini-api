@@ -79,6 +79,17 @@ function buildAddressObj(input = {}) {
   };
 }
 
+function enrichContactWithAddress(contact = {}, address = {}) {
+  return {
+    ...contact,
+    city: address?.city ?? contact?.city ?? null,
+    commune: address?.commune ?? contact?.commune ?? null,
+    district: address?.district ?? contact?.district ?? null,
+    address_line: address?.address_line ?? contact?.address_line ?? null,
+    landmark: address?.landmark ?? contact?.landmark ?? null,
+  };
+}
+
 function buildGeoLink(gps) {
   if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number")
     return null;
@@ -95,11 +106,30 @@ function normPhone(p) {
 }
 
 function buildContactFromUser(u) {
-  if (!u) return { first_name: null, last_name: null, phone: null };
+  if (!u) {
+    return {
+      first_name: null,
+      last_name: null,
+      phone: null,
+      city: null,
+      commune: null,
+      district: null,
+      address_line: null,
+      landmark: null,
+      role: null,
+    };
+  }
+
   return {
     first_name: u.first_name || null,
     last_name: u.last_name || null,
     phone: normPhone(u.phone) || null,
+    city: u.city || u.ville || null,
+    commune: u.commune || null,
+    district: u.district || u.quartier || null,
+    address_line: u.address_line || u.address || null,
+    landmark: u.landmark || null,
+    role: u.role || null,
   };
 }
 
@@ -123,10 +153,25 @@ function buildContactFromPayload(c = {}) {
   }
 
   const phone = normPhone(c?.phone);
+
   return {
     first_name: first_name || null,
     last_name: last_name || null,
     phone: phone || null,
+    city: c?.city ?? c?.ville ?? null,
+    commune: c?.commune ?? null,
+    district: c?.district ?? c?.quartier ?? null,
+    address_line:
+      c?.address_line ??
+      c?.addressLine ??
+      c?.line1 ??
+      c?.street ??
+      c?.adresse ??
+      c?.address ??
+      null,
+    landmark:
+      c?.landmark ?? c?.repere ?? c?.reference ?? c?.note ?? null,
+    role: c?.role ?? null,
   };
 }
 
@@ -164,6 +209,136 @@ function computeDuuminiCommission(itemsAmount) {
   return +(+base * DUUMINI_COMMISSION_RATE).toFixed(2);
 }
 
+function isBlank(v) {
+  return v === null || v === undefined || String(v).trim() === "";
+}
+
+/* =========================
+ * ✅ Users columns detection
+ * =======================*/
+let _usersCols = null;
+let _usersColsLoaded = false;
+
+async function detectUsersCols(conn) {
+  const candidates = [
+    "id",
+    "first_name",
+    "last_name",
+    "phone",
+    "role",
+    "city",
+    "ville",
+    "commune",
+    "district",
+    "quartier",
+    "address_line",
+    "address",
+    "landmark",
+  ];
+
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'users'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates,
+  );
+
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    first_name: found.has("first_name"),
+    last_name: found.has("last_name"),
+    phone: found.has("phone"),
+    role: found.has("role"),
+    city: found.has("city"),
+    ville: found.has("ville"),
+    commune: found.has("commune"),
+    district: found.has("district"),
+    quartier: found.has("quartier"),
+    address_line: found.has("address_line"),
+    address: found.has("address"),
+    landmark: found.has("landmark"),
+  };
+}
+
+async function getUsersColsCached(pool) {
+  if (_usersColsLoaded) return _usersCols;
+  const conn = await pool.getConnection();
+  try {
+    _usersCols = await detectUsersCols(conn);
+    _usersColsLoaded = true;
+    return _usersCols;
+  } finally {
+    conn.release();
+  }
+}
+
+async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, addressObj = {}) {
+  if (!userId) return;
+  const usersCols = await getUsersColsCached(getPool());
+
+  const sets = [];
+  const vals = [];
+
+  const firstName = !isBlank(contactObj?.first_name) ? String(contactObj.first_name).trim() : null;
+  const lastName = !isBlank(contactObj?.last_name) ? String(contactObj.last_name).trim() : null;
+  const phone = normPhone(contactObj?.phone);
+
+  if (usersCols.first_name && firstName) {
+    sets.push("first_name = ?");
+    vals.push(firstName);
+  }
+  if (usersCols.last_name && lastName) {
+    sets.push("last_name = ?");
+    vals.push(lastName);
+  }
+  if (usersCols.phone && phone) {
+    sets.push("phone = ?");
+    vals.push(phone);
+  }
+
+  if (usersCols.city && !isBlank(addressObj?.city)) {
+    sets.push("city = ?");
+    vals.push(String(addressObj.city).trim());
+  }
+  if (usersCols.ville && !isBlank(addressObj?.city)) {
+    sets.push("ville = ?");
+    vals.push(String(addressObj.city).trim());
+  }
+  if (usersCols.commune && !isBlank(addressObj?.commune)) {
+    sets.push("commune = ?");
+    vals.push(String(addressObj.commune).trim());
+  }
+  if (usersCols.district && !isBlank(addressObj?.district)) {
+    sets.push("district = ?");
+    vals.push(String(addressObj.district).trim());
+  }
+  if (usersCols.quartier && !isBlank(addressObj?.district)) {
+    sets.push("quartier = ?");
+    vals.push(String(addressObj.district).trim());
+  }
+  if (usersCols.address_line && !isBlank(addressObj?.address_line)) {
+    sets.push("address_line = ?");
+    vals.push(String(addressObj.address_line).trim());
+  }
+  if (usersCols.address && !isBlank(addressObj?.address_line)) {
+    sets.push("address = ?");
+    vals.push(String(addressObj.address_line).trim());
+  }
+  if (usersCols.landmark && !isBlank(addressObj?.landmark)) {
+    sets.push("landmark = ?");
+    vals.push(String(addressObj.landmark).trim());
+  }
+
+  if (!sets.length) return;
+
+  await conn.query(
+    `UPDATE users SET ${sets.join(", ")} WHERE id = ?`,
+    [...vals, userId],
+  );
+}
+
 /* =========================
  * ✅ Auto-create client account
  * =======================*/
@@ -173,7 +348,7 @@ function generateAutoPassword(phone) {
   return `Duumini@${tail}`;
 }
 
-async function findOrCreateCustomerAccount(conn, contactObj) {
+async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   const phone = normPhone(contactObj?.phone);
   if (!phone) {
     const err = new Error("PHONE_REQUIRED");
@@ -186,9 +361,32 @@ async function findOrCreateCustomerAccount(conn, contactObj) {
     throw err;
   }
 
+  const usersCols = await getUsersColsCached(getPool());
+
+  const selectCols = [
+    "id",
+    usersCols.first_name ? "first_name" : "NULL AS first_name",
+    usersCols.last_name ? "last_name" : "NULL AS last_name",
+    usersCols.phone ? "phone" : "NULL AS phone",
+    usersCols.role ? "role" : "NULL AS role",
+    usersCols.city ? "city" : usersCols.ville ? "ville AS city" : "NULL AS city",
+    usersCols.commune ? "commune" : "NULL AS commune",
+    usersCols.district
+      ? "district"
+      : usersCols.quartier
+        ? "quartier AS district"
+        : "NULL AS district",
+    usersCols.address_line
+      ? "address_line"
+      : usersCols.address
+        ? "address AS address_line"
+        : "NULL AS address_line",
+    usersCols.landmark ? "landmark" : "NULL AS landmark",
+  ];
+
   const [[existing]] = await conn.query(
     `
-    SELECT id, first_name, last_name, phone
+    SELECT ${selectCols.join(", ")}
     FROM users
     WHERE phone = ?
     LIMIT 1
@@ -197,12 +395,30 @@ async function findOrCreateCustomerAccount(conn, contactObj) {
   );
 
   if (existing) {
+    await updateUserProfileFromAdminOrder(conn, existing.id, contactObj, addressObj);
+
+    const [[updated]] = await conn.query(
+      `
+      SELECT ${selectCols.join(", ")}
+      FROM users
+      WHERE id = ?
+      LIMIT 1
+      `,
+      [existing.id],
+    );
+
     return {
       user: {
-        id: existing.id,
-        first_name: existing.first_name || null,
-        last_name: existing.last_name || null,
-        phone: normPhone(existing.phone) || phone,
+        id: updated.id,
+        first_name: updated.first_name || null,
+        last_name: updated.last_name || null,
+        phone: normPhone(updated.phone) || phone,
+        role: updated.role || "CLIENT",
+        city: updated.city || null,
+        commune: updated.commune || null,
+        district: updated.district || null,
+        address_line: updated.address_line || null,
+        landmark: updated.landmark || null,
       },
       created: false,
       plainPassword: null,
@@ -217,12 +433,85 @@ async function findOrCreateCustomerAccount(conn, contactObj) {
   const lastName =
     String(contactObj?.last_name || "Duumini").trim() || "Duumini";
 
+  const insertCols = [];
+  const insertVals = [];
+  const insertQs = [];
+
+  if (usersCols.phone) {
+    insertCols.push("phone");
+    insertVals.push(phone);
+    insertQs.push("?");
+  }
+
+  insertCols.push("password");
+  insertVals.push(passwordHash);
+  insertQs.push("?");
+
+  if (usersCols.role) {
+    insertCols.push("role");
+    insertVals.push("CLIENT");
+    insertQs.push("?");
+  }
+
+  if (usersCols.first_name) {
+    insertCols.push("first_name");
+    insertVals.push(firstName);
+    insertQs.push("?");
+  }
+
+  if (usersCols.last_name) {
+    insertCols.push("last_name");
+    insertVals.push(lastName);
+    insertQs.push("?");
+  }
+
+  if (usersCols.city && !isBlank(addressObj?.city)) {
+    insertCols.push("city");
+    insertVals.push(String(addressObj.city).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.ville && !isBlank(addressObj?.city)) {
+    insertCols.push("ville");
+    insertVals.push(String(addressObj.city).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.commune && !isBlank(addressObj?.commune)) {
+    insertCols.push("commune");
+    insertVals.push(String(addressObj.commune).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.district && !isBlank(addressObj?.district)) {
+    insertCols.push("district");
+    insertVals.push(String(addressObj.district).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.quartier && !isBlank(addressObj?.district)) {
+    insertCols.push("quartier");
+    insertVals.push(String(addressObj.district).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.address_line && !isBlank(addressObj?.address_line)) {
+    insertCols.push("address_line");
+    insertVals.push(String(addressObj.address_line).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.address && !isBlank(addressObj?.address_line)) {
+    insertCols.push("address");
+    insertVals.push(String(addressObj.address_line).trim());
+    insertQs.push("?");
+  }
+  if (usersCols.landmark && !isBlank(addressObj?.landmark)) {
+    insertCols.push("landmark");
+    insertVals.push(String(addressObj.landmark).trim());
+    insertQs.push("?");
+  }
+
   const [result] = await conn.query(
     `
-    INSERT INTO users (phone, password, role, first_name, last_name)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO users (${insertCols.join(", ")})
+    VALUES (${insertQs.join(", ")})
     `,
-    [phone, passwordHash, "CLIENT", firstName, lastName],
+    insertVals,
   );
 
   return {
@@ -231,6 +520,12 @@ async function findOrCreateCustomerAccount(conn, contactObj) {
       first_name: firstName,
       last_name: lastName,
       phone,
+      role: "CLIENT",
+      city: addressObj?.city || null,
+      commune: addressObj?.commune || null,
+      district: addressObj?.district || null,
+      address_line: addressObj?.address_line || null,
+      landmark: addressObj?.landmark || null,
     },
     created: true,
     plainPassword,
@@ -437,9 +732,42 @@ async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
 }
 
 async function getOrderWithPerm(conn, id, user) {
-  const [[orderRaw]] = await conn.query(`SELECT * FROM orders WHERE id=?`, [
-    id,
-  ]);
+  const usersCols = await getUsersColsCached(getPool());
+
+  const userSelectCols = [
+    "u.id AS customer_id",
+    usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
+    usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
+    usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
+    usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+    usersCols.city ? "u.city AS u_city" : usersCols.ville ? "u.ville AS u_city" : "NULL AS u_city",
+    usersCols.commune ? "u.commune AS u_commune" : "NULL AS u_commune",
+    usersCols.district
+      ? "u.district AS u_district"
+      : usersCols.quartier
+        ? "u.quartier AS u_district"
+        : "NULL AS u_district",
+    usersCols.address_line
+      ? "u.address_line AS u_address_line"
+      : usersCols.address
+        ? "u.address AS u_address_line"
+        : "NULL AS u_address_line",
+    usersCols.landmark ? "u.landmark AS u_landmark" : "NULL AS u_landmark",
+  ];
+
+  const [[orderRaw]] = await conn.query(
+    `
+    SELECT
+      o.*,
+      ${userSelectCols.join(", ")}
+    FROM orders o
+    LEFT JOIN users u ON u.id = o.user_id
+    WHERE o.id = ?
+    LIMIT 1
+    `,
+    [id],
+  );
+
   if (!orderRaw) return { status: 404, error: "Not found" };
 
   if (!isAdmin(user)) {
@@ -1149,6 +1477,7 @@ router.get("/", authRequired, async (req, res) => {
   try {
     const payCols = await getOrdersPayColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
+    const usersCols = await getUsersColsCached(pool);
 
     if (payFilter && !(payCols && payCols.payment_status)) {
       return res.status(400).json({
@@ -1158,20 +1487,44 @@ router.get("/", authRequired, async (req, res) => {
       });
     }
 
+    const userSelectCols = [
+      usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
+      usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
+      usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
+      usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+    ];
+
     const mapRowToItem = (r, user, payCols, discountCols) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
+
+      const fallbackContact = buildContactFromUser({
+        first_name: r.u_first,
+        last_name: r.u_last,
+        phone: r.u_phone,
+        role: r.customer_role,
+      });
+
       const contact =
         contactFromOrder &&
-        (contactFromOrder.first_name ||
+        (
+          contactFromOrder.first_name ||
           contactFromOrder.last_name ||
-          contactFromOrder.phone)
-          ? contactFromOrder
-          : buildContactFromUser({
-              first_name: r.u_first,
-              last_name: r.u_last,
-              phone: r.u_phone,
-            });
+          contactFromOrder.phone ||
+          contactFromOrder.city ||
+          contactFromOrder.commune ||
+          contactFromOrder.district
+        )
+          ? {
+              ...fallbackContact,
+              ...contactFromOrder,
+              role:
+                contactFromOrder.role ||
+                r.customer_role ||
+                fallbackContact.role ||
+                null,
+            }
+          : fallbackContact;
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
       const isVendorView = isVendor(user) && !isAdmin(user);
@@ -1219,6 +1572,7 @@ router.get("/", authRequired, async (req, res) => {
         display_code: buildDisplayCode(r.id),
         address,
         contact,
+        customer_role: r.customer_role || contact?.role || null,
         geo_link,
         admin_discount: isVendorView
           ? {
@@ -1275,9 +1629,7 @@ router.get("/", authRequired, async (req, res) => {
         `
         SELECT 
           o.*,
-          u.first_name AS u_first,
-          u.last_name  AS u_last,
-          u.phone      AS u_phone,
+          ${userSelectCols.join(", ")},
           (
             SELECT SUM(oi2.qty * oi2.unit_price)
             FROM order_items oi2
@@ -1332,9 +1684,7 @@ router.get("/", authRequired, async (req, res) => {
         `
         SELECT 
           o.*,
-          u.first_name AS u_first,
-          u.last_name  AS u_last,
-          u.phone      AS u_phone,
+          ${userSelectCols.join(", ")},
           (
             SELECT SUM(oi2.qty * oi2.unit_price)
             FROM order_items oi2
@@ -1395,9 +1745,7 @@ router.get("/", authRequired, async (req, res) => {
         `
         SELECT 
           o.*,
-          u.first_name AS u_first,
-          u.last_name  AS u_last,
-          u.phone      AS u_phone,
+          ${userSelectCols.join(", ")},
           (
             SELECT SUM(oi_mine.qty * oi_mine.unit_price)
             FROM order_items oi_mine
@@ -1460,9 +1808,7 @@ router.get("/", authRequired, async (req, res) => {
       `
       SELECT 
         o.*,
-        u.first_name AS u_first,
-        u.last_name  AS u_last,
-        u.phone      AS u_phone,
+        ${userSelectCols.join(", ")},
         (
           SELECT SUM(oi2.qty * oi2.unit_price)
           FROM order_items oi2
@@ -1943,24 +2289,64 @@ router.post("/admin", authRequired, async (req, res) => {
     const rawContact = contact || customer || null;
     if (rawContact) contactObj = buildContactFromPayload(rawContact);
 
+    const addressObj = buildAddressObj(address);
+
+    if (isBlank(addressObj?.city)) {
+      await conn.rollback();
+      return res.status(400).json({
+        code: "CITY_REQUIRED",
+        message:
+          "La ville du client est obligatoire pour une commande passée par un admin.",
+      });
+    }
+
     if (hasUser) {
+      const usersCols = await getUsersColsCached(pool);
+      const userSelectCols = [
+        "id",
+        usersCols.first_name ? "first_name" : "NULL AS first_name",
+        usersCols.last_name ? "last_name" : "NULL AS last_name",
+        usersCols.phone ? "phone" : "NULL AS phone",
+        usersCols.role ? "role" : "NULL AS role",
+        usersCols.city ? "city" : usersCols.ville ? "ville AS city" : "NULL AS city",
+        usersCols.commune ? "commune" : "NULL AS commune",
+        usersCols.district
+          ? "district"
+          : usersCols.quartier
+            ? "quartier AS district"
+            : "NULL AS district",
+        usersCols.address_line
+          ? "address_line"
+          : usersCols.address
+            ? "address AS address_line"
+            : "NULL AS address_line",
+        usersCols.landmark ? "landmark" : "NULL AS landmark",
+      ];
+
       const [[row]] = await conn.query(
-        `SELECT id, first_name, last_name, phone
+        `SELECT ${userSelectCols.join(", ")}
            FROM users
           WHERE id = ?
           LIMIT 1`,
         [customerId],
       );
+
       if (!row) {
         await conn.rollback();
         return res.status(404).json({ error: "customer not found" });
       }
+
       u = row;
       effectiveCustomerId = row.id;
 
       if (
         !contactObj ||
-        (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)
+        (!contactObj.first_name &&
+          !contactObj.last_name &&
+          !contactObj.phone &&
+          !contactObj.city &&
+          !contactObj.commune &&
+          !contactObj.district)
       ) {
         contactObj = buildContactFromUser(u);
       } else {
@@ -1968,8 +2354,26 @@ router.post("/admin", authRequired, async (req, res) => {
           first_name: contactObj.first_name || row.first_name || null,
           last_name: contactObj.last_name || row.last_name || null,
           phone: contactObj.phone || normPhone(row.phone) || null,
+          city: contactObj.city || row.city || null,
+          commune: contactObj.commune || row.commune || null,
+          district: contactObj.district || row.district || null,
+          address_line: contactObj.address_line || row.address_line || null,
+          landmark: contactObj.landmark || row.landmark || null,
+          role: contactObj.role || row.role || null,
         };
       }
+
+      contactObj = enrichContactWithAddress(contactObj, addressObj);
+      await updateUserProfileFromAdminOrder(conn, row.id, contactObj, addressObj);
+
+      const [[freshUser]] = await conn.query(
+        `SELECT ${userSelectCols.join(", ")}
+           FROM users
+          WHERE id = ?
+          LIMIT 1`,
+        [row.id],
+      );
+      u = freshUser || row;
     } else {
       if (!contactObj) contactObj = buildContactFromPayload({});
       if (!contactObj.phone) {
@@ -1981,7 +2385,8 @@ router.post("/admin", authRequired, async (req, res) => {
         });
       }
 
-      autoAccount = await findOrCreateCustomerAccount(conn, contactObj);
+      contactObj = enrichContactWithAddress(contactObj, addressObj);
+      autoAccount = await findOrCreateCustomerAccount(conn, contactObj, addressObj);
       u = autoAccount.user;
       effectiveCustomerId = u.id;
 
@@ -1989,10 +2394,15 @@ router.post("/admin", authRequired, async (req, res) => {
         first_name: contactObj.first_name || u.first_name || null,
         last_name: contactObj.last_name || u.last_name || null,
         phone: contactObj.phone || u.phone || null,
+        city: addressObj.city || u.city || null,
+        commune: addressObj.commune || u.commune || null,
+        district: addressObj.district || u.district || null,
+        address_line: addressObj.address_line || u.address_line || null,
+        landmark: addressObj.landmark || u.landmark || null,
+        role: u.role || "CLIENT",
       };
     }
 
-    const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
@@ -2271,7 +2681,9 @@ router.post("/admin", authRequired, async (req, res) => {
       geo_link: geoLink || null,
       payment: paymentObj || null,
       user_id: effectiveCustomerId,
+      customer_role: u?.role || contactObj?.role || "CLIENT",
       contact: contactObj || null,
+      address: addressObj || null,
       created_by_admin_id: req.user.id,
       created_via: "ADMIN",
       auto_account: autoAccount
@@ -2339,10 +2751,17 @@ router.post("/", authRequired, async (req, res) => {
     let contactObj = contact ? buildContactFromPayload(contact) : null;
     if (
       !contactObj ||
-      (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)
+      (!contactObj.first_name &&
+        !contactObj.last_name &&
+        !contactObj.phone &&
+        !contactObj.city &&
+        !contactObj.commune &&
+        !contactObj.district)
     ) {
       contactObj = buildContactFromUser(req.user);
     }
+
+    contactObj = enrichContactWithAddress(contactObj, addressObj);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
@@ -2617,6 +3036,9 @@ router.post("/", authRequired, async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
+      contact: contactObj || null,
+      address: addressObj || null,
+      customer_role: req.user?.role || null,
       admin_discount: {
         type: "NONE",
         value: 0,
@@ -2662,7 +3084,7 @@ router.post("/guest", async (req, res) => {
   if (!Array.isArray(items) || items.length === 0)
     return res.status(400).json({ error: "items[] required" });
 
-  const contactObj = buildContactFromPayload(contact);
+  let contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
     return res.status(400).json({
       code: "PHONE_REQUIRED",
@@ -2679,6 +3101,7 @@ router.post("/guest", async (req, res) => {
 
     const addressObj = buildAddressObj(address);
     const geoLink = buildGeoLink(addressObj.gps);
+    contactObj = enrichContactWithAddress(contactObj, addressObj);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
@@ -2938,6 +3361,9 @@ router.post("/guest", async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
+      contact: contactObj || null,
+      address: addressObj || null,
+      customer_role: contactObj?.role || null,
       admin_discount: {
         type: "NONE",
         value: 0,
@@ -2982,19 +3408,33 @@ router.get("/:id", authRequired, async (req, res) => {
     const o = result.order;
     const addr = safeParseJSON(o.address);
 
-    const [[u]] = await conn.query(
-      "SELECT first_name, last_name, phone FROM users WHERE id=? LIMIT 1",
-      [o.user_id],
-    );
-
     const contactFromOrder = safeParseJSON(o.contact);
+
     const contact =
       contactFromOrder &&
-      (contactFromOrder.first_name ||
+      (
+        contactFromOrder.first_name ||
         contactFromOrder.last_name ||
-        contactFromOrder.phone)
-        ? contactFromOrder
-        : buildContactFromUser(u);
+        contactFromOrder.phone ||
+        contactFromOrder.city ||
+        contactFromOrder.commune ||
+        contactFromOrder.district
+      )
+        ? {
+            ...contactFromOrder,
+            role: contactFromOrder.role || o.customer_role || null,
+          }
+        : buildContactFromUser({
+            first_name: o.u_first,
+            last_name: o.u_last,
+            phone: o.u_phone,
+            role: o.customer_role,
+            city: o.u_city,
+            commune: o.u_commune,
+            district: o.u_district,
+            address_line: o.u_address_line,
+            landmark: o.u_landmark,
+          });
 
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
@@ -3042,6 +3482,7 @@ router.get("/:id", authRequired, async (req, res) => {
       ...o,
       commission_duumini: isVendorView ? null : duuminiCommission,
       display_code: buildDisplayCode(o.id),
+      customer_role: o.customer_role || contact?.role || null,
       contact,
       address: addr,
       admin_discount: isVendorView
@@ -3094,8 +3535,21 @@ router.get("/receipt/:token", async (req, res) => {
 
   const conn = await getPool().getConnection();
   try {
+    const usersCols = await getUsersColsCached(getPool());
+
+    const userSelectCols = [
+      usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+      usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
+      usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
+      usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
+    ];
+
     const [[o]] = await conn.query(
-      `SELECT * FROM orders WHERE receipt_token = ? LIMIT 1`,
+      `SELECT o.*, ${userSelectCols.join(", ")}
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+        WHERE o.receipt_token = ?
+        LIMIT 1`,
       [token],
     );
     if (!o) return res.status(404).json({ error: "Not found" });
@@ -3145,8 +3599,12 @@ router.get("/receipt/:token", async (req, res) => {
     res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
+      customer_role: o.customer_role || contact?.role || null,
       address: addr,
-      contact,
+      contact: {
+        ...contact,
+        role: contact?.role || o.customer_role || null,
+      },
       admin_discount: {
         type: adminDiscount.type,
         value: adminDiscount.value,
@@ -3179,8 +3637,17 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
   const conn = await getPool().getConnection();
   try {
+    const usersCols = await getUsersColsCached(getPool());
+    const userSelectCols = [
+      usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+    ];
+
     const [[o]] = await conn.query(
-      `SELECT * FROM orders WHERE receipt_token = ? LIMIT 1`,
+      `SELECT o.*, ${userSelectCols.join(", ")}
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+        WHERE o.receipt_token = ?
+        LIMIT 1`,
       [token],
     );
     if (!o) return res.status(404).json({ error: "Not found" });
@@ -3273,12 +3740,13 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
     if (contact.phone) doc.text(`Téléphone : ${contact.phone}`);
+    doc.text(`Rôle client : ${contact.role || o.customer_role || "CLIENT"}`);
     doc.moveDown(0.5);
 
     doc.fontSize(12).text("Adresse", { underline: true });
-    doc.fontSize(10).text(`Ville : ${address.city || "—"}`);
-    doc.text(`Commune : ${address.commune || "—"}`);
-    doc.text(`Quartier : ${address.district || "—"}`);
+    doc.fontSize(10).text(`Ville : ${address.city || contact.city || "—"}`);
+    doc.text(`Commune : ${address.commune || contact.commune || "—"}`);
+    doc.text(`Quartier : ${address.district || contact.district || "—"}`);
     doc.moveDown();
 
     doc.fontSize(12).text("Détails", { underline: true });
@@ -3431,12 +3899,13 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
     if (contact.phone) doc.text(`Téléphone : ${contact.phone}`);
+    doc.text(`Rôle client : ${contact.role || o.customer_role || "CLIENT"}`);
     doc.moveDown(0.5);
 
     doc.fontSize(12).text("Adresse", { underline: true });
-    doc.fontSize(10).text(`Ville : ${address.city || "—"}`);
-    doc.text(`Commune : ${address.commune || "—"}`);
-    doc.text(`Quartier : ${address.district || "—"}`);
+    doc.fontSize(10).text(`Ville : ${address.city || contact.city || "—"}`);
+    doc.text(`Commune : ${address.commune || contact.commune || "—"}`);
+    doc.text(`Quartier : ${address.district || contact.district || "—"}`);
     doc.moveDown();
 
     doc.fontSize(12).text("Détails", { underline: true });
