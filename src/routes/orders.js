@@ -3,6 +3,7 @@ const { Router } = require("express");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const PDFDocument = require("pdfkit");
+const bcrypt = require("bcryptjs");
 
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin, isVendor } = require("../middlewares/auth");
@@ -161,6 +162,79 @@ function computeDuuminiCommission(itemsAmount) {
   const base = Number(itemsAmount || 0);
   if (!Number.isFinite(base) || base <= 0) return 0;
   return +(+base * DUUMINI_COMMISSION_RATE).toFixed(2);
+}
+
+/* =========================
+ * ✅ Auto-create client account
+ * =======================*/
+function generateAutoPassword(phone) {
+  const digits = String(phone || "").replace(/\D+/g, "");
+  const tail = digits.slice(-4) || "0000";
+  return `Duumini@${tail}`;
+}
+
+async function findOrCreateCustomerAccount(conn, contactObj) {
+  const phone = normPhone(contactObj?.phone);
+  if (!phone) {
+    const err = new Error("PHONE_REQUIRED");
+    err.statusCode = 400;
+    err.payload = {
+      code: "PHONE_REQUIRED",
+      message:
+        "Le téléphone du client est obligatoire pour créer automatiquement son compte.",
+    };
+    throw err;
+  }
+
+  const [[existing]] = await conn.query(
+    `
+    SELECT id, first_name, last_name, phone
+    FROM users
+    WHERE phone = ?
+    LIMIT 1
+    `,
+    [phone],
+  );
+
+  if (existing) {
+    return {
+      user: {
+        id: existing.id,
+        first_name: existing.first_name || null,
+        last_name: existing.last_name || null,
+        phone: normPhone(existing.phone) || phone,
+      },
+      created: false,
+      plainPassword: null,
+    };
+  }
+
+  const plainPassword = generateAutoPassword(phone);
+  const passwordHash = await bcrypt.hash(plainPassword, 10);
+
+  const firstName =
+    String(contactObj?.first_name || "Client").trim() || "Client";
+  const lastName =
+    String(contactObj?.last_name || "Duumini").trim() || "Duumini";
+
+  const [result] = await conn.query(
+    `
+    INSERT INTO users (phone, password, role, first_name, last_name)
+    VALUES (?, ?, ?, ?, ?)
+    `,
+    [phone, passwordHash, "CLIENT", firstName, lastName],
+  );
+
+  return {
+    user: {
+      id: result.insertId,
+      first_name: firstName,
+      last_name: lastName,
+      phone,
+    },
+    created: true,
+    plainPassword,
+  };
 }
 
 /* =========================
@@ -1830,7 +1904,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
 });
 
 /* =========================
- * ✅ Create order AS ADMIN (user OR guest)
+ * ✅ Create order AS ADMIN (user OR auto-account)
  * POST /api/orders/admin
  * =======================*/
 router.post("/admin", authRequired, async (req, res) => {
@@ -1862,6 +1936,13 @@ router.post("/admin", authRequired, async (req, res) => {
     await conn.beginTransaction();
 
     let u = null;
+    let effectiveCustomerId = null;
+    let autoAccount = null;
+    let contactObj = null;
+
+    const rawContact = contact || customer || null;
+    if (rawContact) contactObj = buildContactFromPayload(rawContact);
+
     if (hasUser) {
       const [[row]] = await conn.query(
         `SELECT id, first_name, last_name, phone
@@ -1875,27 +1956,21 @@ router.post("/admin", authRequired, async (req, res) => {
         return res.status(404).json({ error: "customer not found" });
       }
       u = row;
-    }
+      effectiveCustomerId = row.id;
 
-    const addressObj = buildAddressObj(address);
-    const geoLink = buildGeoLink(addressObj.gps);
-
-    let contactObj = null;
-
-    const rawContact = contact || customer || null;
-    if (rawContact) contactObj = buildContactFromPayload(rawContact);
-
-    if (
-      (!contactObj ||
-        (!contactObj.first_name &&
-          !contactObj.last_name &&
-          !contactObj.phone)) &&
-      hasUser
-    ) {
-      contactObj = buildContactFromUser(u);
-    }
-
-    if (!hasUser) {
+      if (
+        !contactObj ||
+        (!contactObj.first_name && !contactObj.last_name && !contactObj.phone)
+      ) {
+        contactObj = buildContactFromUser(u);
+      } else {
+        contactObj = {
+          first_name: contactObj.first_name || row.first_name || null,
+          last_name: contactObj.last_name || row.last_name || null,
+          phone: contactObj.phone || normPhone(row.phone) || null,
+        };
+      }
+    } else {
       if (!contactObj) contactObj = buildContactFromPayload({});
       if (!contactObj.phone) {
         await conn.rollback();
@@ -1905,7 +1980,20 @@ router.post("/admin", authRequired, async (req, res) => {
             "Pour créer une commande admin sans compte, un numéro de téléphone est obligatoire (contact.phone).",
         });
       }
+
+      autoAccount = await findOrCreateCustomerAccount(conn, contactObj);
+      u = autoAccount.user;
+      effectiveCustomerId = u.id;
+
+      contactObj = {
+        first_name: contactObj.first_name || u.first_name || null,
+        last_name: contactObj.last_name || u.last_name || null,
+        phone: contactObj.phone || u.phone || null,
+      };
     }
+
+    const addressObj = buildAddressObj(address);
+    const geoLink = buildGeoLink(addressObj.gps);
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
@@ -1976,7 +2064,7 @@ router.post("/admin", authRequired, async (req, res) => {
       "NOW()",
     ];
     const vals = [
-      hasUser ? customerId : null,
+      effectiveCustomerId,
       req.user.id,
       "ADMIN",
       "OPEN",
@@ -1989,7 +2077,17 @@ router.post("/admin", authRequired, async (req, res) => {
     ];
 
     if (hasDiscountColumns) {
-      cols.splice(7, 0, "items_subtotal", "delivery_fee", "admin_discount_type", "admin_discount_value", "admin_discount_amount", "admin_discount_label", "discounted_by_admin_id");
+      cols.splice(
+        7,
+        0,
+        "items_subtotal",
+        "delivery_fee",
+        "admin_discount_type",
+        "admin_discount_value",
+        "admin_discount_amount",
+        "admin_discount_label",
+        "discounted_by_admin_id",
+      );
       placeholders.splice(7, 0, "?", "?", "?", "?", "?", "?", "?");
       vals.splice(
         7,
@@ -2149,22 +2247,20 @@ router.post("/admin", authRequired, async (req, res) => {
       await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
 
-    if (hasUser) {
-      try {
-        const { notifyUser } = require("../services/notify");
-        await notifyUser(customerId, "ORDER_CREATED", {
-          title: `Commande ${displayCode} créée`,
-          body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-            orderTotal || 0,
-          )} ${currency}.`,
-          order_id: orderId,
-          display_code: displayCode,
-          total: Number(orderTotal || 0),
-          currency,
-          status: "OPEN",
-        });
-      } catch {}
-    }
+    try {
+      const { notifyUser } = require("../services/notify");
+      await notifyUser(effectiveCustomerId, "ORDER_CREATED", {
+        title: `Commande ${displayCode} créée`,
+        body: `Votre commande ${displayCode} a été créée. Total: ${Number(
+          orderTotal || 0,
+        )} ${currency}.`,
+        order_id: orderId,
+        display_code: displayCode,
+        total: Number(orderTotal || 0),
+        currency,
+        status: "OPEN",
+      });
+    } catch {}
 
     return res.status(201).json({
       id: orderId,
@@ -2174,10 +2270,17 @@ router.post("/admin", authRequired, async (req, res) => {
       currency,
       geo_link: geoLink || null,
       payment: paymentObj || null,
-      user_id: hasUser ? customerId : null,
+      user_id: effectiveCustomerId,
       contact: contactObj || null,
       created_by_admin_id: req.user.id,
       created_via: "ADMIN",
+      auto_account: autoAccount
+        ? {
+            created: !!autoAccount.created,
+            login_phone: autoAccount.user?.phone || null,
+            default_password: autoAccount.plainPassword || null,
+          }
+        : null,
       admin_discount: {
         type: discountInput.type,
         value: discountInput.type === "NONE" ? 0 : discountInput.value,
@@ -2199,8 +2302,9 @@ router.post("/admin", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
-    if (e && e.statusCode === 400 && e.payload)
-      return res.status(400).json(e.payload);
+    if (e && e.statusCode && e.payload) {
+      return res.status(e.statusCode).json(e.payload);
+    }
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
