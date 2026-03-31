@@ -254,45 +254,82 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const { page, pageSize, offset } = getPagination(req.query);
-    const safePage = Math.max(1, toNum(page, 1));
-    const safePageSize = Math.max(1, Math.min(100, toNum(pageSize, 20)));
-    const safeOffset = Math.max(0, toNum(offset, 0));
 
-    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
+    // FIX pagination
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const { where, params } = buildExpenseWhere({
+      query: req.query,
+      user: req.user,
+    });
+
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
+    // COUNT SAFE
     const [[countRow]] = await pool.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM expenses e
-      ${whereSql}
-      `,
+      `SELECT COUNT(*) AS total FROM expenses e ${whereSql}`,
       params
     );
 
-    const rows = await queryExpenseList(pool, whereSql, params, safePageSize, safeOffset);
+    let rows = [];
+
+    try {
+      // VERSION AVEC CATEGORY (si table existe)
+      const [data] = await pool.query(
+        `
+        SELECT
+          e.*,
+          c.color AS category_color
+        FROM expenses e
+        LEFT JOIN expense_categories c ON c.id = e.category_id
+        ${whereSql}
+        ORDER BY e.expense_date DESC, e.id DESC
+        LIMIT ? OFFSET ?
+        `,
+        [...params, pageSize, offset]
+      );
+
+      rows = data;
+    } catch (err) {
+      console.log("Fallback sans categories:", err.message);
+
+      // FALLBACK SAFE (si table n'existe pas)
+      const [data] = await pool.query(
+        `
+        SELECT
+          e.*,
+          NULL AS category_color
+        FROM expenses e
+        ${whereSql}
+        ORDER BY e.expense_date DESC, e.id DESC
+        LIMIT ? OFFSET ?
+        `,
+        [...params, pageSize, offset]
+      );
+
+      rows = data;
+    }
 
     return res.json({
-      items: Array.isArray(rows) ? rows.map(normalizeExpenseRow) : [],
-      pageInfo: buildPageInfo({
-        page: safePage,
-        pageSize: safePageSize,
+      items: rows.map((r) => ({
+        ...r,
+        amount: Number(r.amount || 0),
+      })),
+      pageInfo: {
+        page,
+        pageSize,
         total: Number(countRow?.total || 0),
-      }),
+        pages: Math.ceil((countRow?.total || 0) / pageSize),
+      },
     });
   } catch (e) {
-    console.error("GET /expenses error:", {
-      message: e?.message,
-      sqlMessage: e?.sqlMessage,
-      code: e?.code,
-      errno: e?.errno,
-      stack: e?.stack,
-    });
+    console.error("ERROR EXPENSES:", e);
 
     return res.status(500).json({
-      error: "Erreur serveur lors du chargement des dépenses.",
-      details: e?.sqlMessage || e?.message || "unknown_error",
+      error: "Erreur serveur",
+      details: e?.message,
     });
   }
 });
