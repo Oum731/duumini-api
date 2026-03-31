@@ -1,6 +1,5 @@
 const express = require("express");
 const { getPool } = require("../lib/db");
-const { getPagination, buildPageInfo } = require("../utils/pagination");
 const auth = require("../middlewares/auth");
 
 const router = express.Router();
@@ -255,7 +254,6 @@ router.get("/", authRequired, async (req, res) => {
 
     const pool = getPool();
 
-    // FIX pagination
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
     const offset = (page - 1) * pageSize;
@@ -267,39 +265,48 @@ router.get("/", authRequired, async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    // COUNT SAFE
-    const [[countRow]] = await pool.query(
-      `SELECT COUNT(*) AS total FROM expenses e ${whereSql}`,
-      params
-    );
-
+    let total = 0;
     let rows = [];
 
     try {
-      // VERSION AVEC CATEGORY (si table existe)
-      const [data] = await pool.query(
-        `
-        SELECT
-          e.*,
-          c.color AS category_color
-        FROM expenses e
-        LEFT JOIN expense_categories c ON c.id = e.category_id
-        ${whereSql}
-        ORDER BY e.expense_date DESC, e.id DESC
-        LIMIT ? OFFSET ?
-        `,
-        [...params, pageSize, offset]
+      const [[countRow]] = await pool.query(
+        `SELECT COUNT(*) AS total FROM expenses e ${whereSql}`,
+        params
       );
+      total = Number(countRow?.total || 0);
 
-      rows = data;
+      rows = await queryExpenseList(pool, whereSql, params, pageSize, offset);
     } catch (err) {
-      console.log("Fallback sans categories:", err.message);
+      console.error("GET /expenses fallback error:", {
+        message: err?.message,
+        sqlMessage: err?.sqlMessage,
+        code: err?.code,
+      });
 
-      // FALLBACK SAFE (si table n'existe pas)
+      const [[countRow]] = await pool.query(
+        `SELECT COUNT(*) AS total FROM expenses e ${whereSql}`,
+        params
+      );
+      total = Number(countRow?.total || 0);
+
       const [data] = await pool.query(
         `
         SELECT
-          e.*,
+          e.id,
+          e.shop_id,
+          e.user_id,
+          e.category_id,
+          e.category_name,
+          e.label,
+          e.description,
+          e.amount,
+          e.expense_date,
+          e.payment_method,
+          e.reference,
+          e.status,
+          e.receipt_url,
+          e.created_at,
+          e.updated_at,
           NULL AS category_color
         FROM expenses e
         ${whereSql}
@@ -313,23 +320,26 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     return res.json({
-      items: rows.map((r) => ({
-        ...r,
-        amount: Number(r.amount || 0),
-      })),
+      items: Array.isArray(rows) ? rows.map(normalizeExpenseRow) : [],
       pageInfo: {
         page,
         pageSize,
-        total: Number(countRow?.total || 0),
-        pages: Math.ceil((countRow?.total || 0) / pageSize),
+        total,
+        pages: Math.max(1, Math.ceil(total / pageSize)),
       },
     });
   } catch (e) {
-    console.error("ERROR EXPENSES:", e);
+    console.error("ERROR EXPENSES:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+      errno: e?.errno,
+      stack: e?.stack,
+    });
 
     return res.status(500).json({
-      error: "Erreur serveur",
-      details: e?.message,
+      error: "Erreur serveur lors du chargement des dépenses.",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -578,7 +588,7 @@ router.post("/", authRequired, async (req, res) => {
       ]
     );
 
-    const [rows] = await queryExpenseList(pool, "WHERE e.id = ?", [result.insertId], 1, 0);
+    const rows = await queryExpenseList(pool, "WHERE e.id = ?", [result.insertId], 1, 0);
     return res.status(201).json(normalizeExpenseRow(rows?.[0] || {}));
   } catch (e) {
     console.error("POST /expenses error:", {
@@ -678,7 +688,7 @@ router.put("/:id", authRequired, async (req, res) => {
       ]
     );
 
-    const [rows] = await queryExpenseList(pool, "WHERE e.id = ?", [id], 1, 0);
+    const rows = await queryExpenseList(pool, "WHERE e.id = ?", [id], 1, 0);
     return res.json(normalizeExpenseRow(rows?.[0] || {}));
   } catch (e) {
     console.error("PUT /expenses/:id error:", {
