@@ -184,30 +184,8 @@ function normalizeExpenseRow(r) {
   };
 }
 
-router.get("/", authRequired, async (req, res) => {
+async function queryExpenseList(pool, whereSql, params, pageSize, offset) {
   try {
-    if (!canManageExpenses(req)) {
-      return res.status(403).json({ error: "Accès refusé." });
-    }
-
-    const pool = getPool();
-    const { page, pageSize, offset } = getPagination(req.query);
-    const safePage = Math.max(1, toNum(page, 1));
-    const safePageSize = Math.max(1, Math.min(100, toNum(pageSize, 20)));
-    const safeOffset = Math.max(0, toNum(offset, 0));
-
-    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    const [[countRow]] = await pool.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM expenses e
-      ${whereSql}
-      `,
-      params
-    );
-
     const [rows] = await pool.query(
       `
       SELECT
@@ -233,8 +211,67 @@ router.get("/", authRequired, async (req, res) => {
       ORDER BY e.expense_date DESC, e.id DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, safePageSize, safeOffset]
+      [...params, pageSize, offset]
     );
+
+    return rows;
+  } catch (e) {
+    const [rows] = await pool.query(
+      `
+      SELECT
+        e.id,
+        e.shop_id,
+        e.user_id,
+        e.category_id,
+        e.category_name,
+        e.label,
+        e.description,
+        e.amount,
+        e.expense_date,
+        e.payment_method,
+        e.reference,
+        e.status,
+        e.receipt_url,
+        e.created_at,
+        e.updated_at,
+        NULL AS category_color
+      FROM expenses e
+      ${whereSql}
+      ORDER BY e.expense_date DESC, e.id DESC
+      LIMIT ? OFFSET ?
+      `,
+      [...params, pageSize, offset]
+    );
+
+    return rows;
+  }
+}
+
+router.get("/", authRequired, async (req, res) => {
+  try {
+    if (!canManageExpenses(req)) {
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    const pool = getPool();
+    const { page, pageSize, offset } = getPagination(req.query);
+    const safePage = Math.max(1, toNum(page, 1));
+    const safePageSize = Math.max(1, Math.min(100, toNum(pageSize, 20)));
+    const safeOffset = Math.max(0, toNum(offset, 0));
+
+    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [[countRow]] = await pool.query(
+      `
+      SELECT COUNT(*) AS total
+      FROM expenses e
+      ${whereSql}
+      `,
+      params
+    );
+
+    const rows = await queryExpenseList(pool, whereSql, params, safePageSize, safeOffset);
 
     return res.json({
       items: Array.isArray(rows) ? rows.map(normalizeExpenseRow) : [],
@@ -375,22 +412,41 @@ router.get("/by-category", authRequired, async (req, res) => {
     const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const [rows] = await pool.query(
-      `
-      SELECT
-        e.category_id,
-        e.category_name,
-        COALESCE(SUM(e.amount), 0) AS total,
-        COUNT(*) AS count_items,
-        MAX(c.color) AS color
-      FROM expenses e
-      LEFT JOIN expense_categories c ON c.id = e.category_id
-      ${whereSql}
-      GROUP BY e.category_id, e.category_name
-      ORDER BY total DESC, e.category_name ASC
-      `,
-      params
-    );
+    let rows;
+    try {
+      [rows] = await pool.query(
+        `
+        SELECT
+          e.category_id,
+          e.category_name,
+          COALESCE(SUM(e.amount), 0) AS total,
+          COUNT(*) AS count_items,
+          MAX(c.color) AS color
+        FROM expenses e
+        LEFT JOIN expense_categories c ON c.id = e.category_id
+        ${whereSql}
+        GROUP BY e.category_id, e.category_name
+        ORDER BY total DESC, e.category_name ASC
+        `,
+        params
+      );
+    } catch {
+      [rows] = await pool.query(
+        `
+        SELECT
+          e.category_id,
+          e.category_name,
+          COALESCE(SUM(e.amount), 0) AS total,
+          COUNT(*) AS count_items,
+          NULL AS color
+        FROM expenses e
+        ${whereSql}
+        GROUP BY e.category_id, e.category_name
+        ORDER BY total DESC, e.category_name ASC
+        `,
+        params
+      );
+    }
 
     return res.json({
       items: Array.isArray(rows)
@@ -436,18 +492,11 @@ router.post("/", authRequired, async (req, res) => {
     const status = String(req.body?.status || "PAID").toUpperCase();
     const receiptUrl = cleanStr(req.body?.receipt_url, 1000);
 
-    if (!label) {
-      return res.status(400).json({ error: "Le libellé est obligatoire." });
-    }
-
+    if (!label) return res.status(400).json({ error: "Le libellé est obligatoire." });
     if (!Number.isFinite(amount) || amount < 0) {
       return res.status(400).json({ error: "Montant invalide." });
     }
-
-    if (!expenseDate) {
-      return res.status(400).json({ error: "Date invalide." });
-    }
-
+    if (!expenseDate) return res.status(400).json({ error: "Date invalide." });
     if (!["PAID", "PENDING"].includes(status)) {
       return res.status(400).json({ error: "Statut invalide." });
     }
@@ -492,34 +541,8 @@ router.post("/", authRequired, async (req, res) => {
       ]
     );
 
-    const [[created]] = await pool.query(
-      `
-      SELECT
-        e.id,
-        e.shop_id,
-        e.user_id,
-        e.category_id,
-        e.category_name,
-        e.label,
-        e.description,
-        e.amount,
-        e.expense_date,
-        e.payment_method,
-        e.reference,
-        e.status,
-        e.receipt_url,
-        e.created_at,
-        e.updated_at,
-        c.color AS category_color
-      FROM expenses e
-      LEFT JOIN expense_categories c ON c.id = e.category_id
-      WHERE e.id = ?
-      LIMIT 1
-      `,
-      [result.insertId]
-    );
-
-    return res.status(201).json(normalizeExpenseRow(created));
+    const [rows] = await queryExpenseList(pool, "WHERE e.id = ?", [result.insertId], 1, 0);
+    return res.status(201).json(normalizeExpenseRow(rows?.[0] || {}));
   } catch (e) {
     console.error("POST /expenses error:", {
       message: e?.message,
@@ -542,9 +565,7 @@ router.put("/:id", authRequired, async (req, res) => {
     }
 
     const id = toNum(req.params.id, 0);
-    if (!id) {
-      return res.status(400).json({ error: "ID invalide." });
-    }
+    if (!id) return res.status(400).json({ error: "ID invalide." });
 
     const pool = getPool();
 
@@ -558,10 +579,7 @@ router.put("/:id", authRequired, async (req, res) => {
       [id]
     );
 
-    if (!existing) {
-      return res.status(404).json({ error: "Dépense introuvable." });
-    }
-
+    if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
     if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
@@ -576,18 +594,11 @@ router.put("/:id", authRequired, async (req, res) => {
     const status = String(req.body?.status || "").toUpperCase();
     const receiptUrl = cleanStr(req.body?.receipt_url, 1000);
 
-    if (!label) {
-      return res.status(400).json({ error: "Le libellé est obligatoire." });
-    }
-
+    if (!label) return res.status(400).json({ error: "Le libellé est obligatoire." });
     if (!Number.isFinite(amount) || amount < 0) {
       return res.status(400).json({ error: "Montant invalide." });
     }
-
-    if (!expenseDate) {
-      return res.status(400).json({ error: "Date invalide." });
-    }
-
+    if (!expenseDate) return res.status(400).json({ error: "Date invalide." });
     if (!["PAID", "PENDING"].includes(status)) {
       return res.status(400).json({ error: "Statut invalide." });
     }
@@ -630,34 +641,8 @@ router.put("/:id", authRequired, async (req, res) => {
       ]
     );
 
-    const [[updated]] = await pool.query(
-      `
-      SELECT
-        e.id,
-        e.shop_id,
-        e.user_id,
-        e.category_id,
-        e.category_name,
-        e.label,
-        e.description,
-        e.amount,
-        e.expense_date,
-        e.payment_method,
-        e.reference,
-        e.status,
-        e.receipt_url,
-        e.created_at,
-        e.updated_at,
-        c.color AS category_color
-      FROM expenses e
-      LEFT JOIN expense_categories c ON c.id = e.category_id
-      WHERE e.id = ?
-      LIMIT 1
-      `,
-      [id]
-    );
-
-    return res.json(normalizeExpenseRow(updated));
+    const [rows] = await queryExpenseList(pool, "WHERE e.id = ?", [id], 1, 0);
+    return res.json(normalizeExpenseRow(rows?.[0] || {}));
   } catch (e) {
     console.error("PUT /expenses/:id error:", {
       message: e?.message,
@@ -680,9 +665,7 @@ router.delete("/:id", authRequired, async (req, res) => {
     }
 
     const id = toNum(req.params.id, 0);
-    if (!id) {
-      return res.status(400).json({ error: "ID invalide." });
-    }
+    if (!id) return res.status(400).json({ error: "ID invalide." });
 
     const pool = getPool();
 
@@ -696,10 +679,7 @@ router.delete("/:id", authRequired, async (req, res) => {
       [id]
     );
 
-    if (!existing) {
-      return res.status(404).json({ error: "Dépense introuvable." });
-    }
-
+    if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
     if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
