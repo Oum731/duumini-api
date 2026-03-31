@@ -58,7 +58,6 @@ async function generateUniqueExpenseReference(pool) {
     );
     if (!existing) return ref;
   }
-
   return `DEP-${Date.now()}`;
 }
 
@@ -175,6 +174,16 @@ async function resolveCategory(pool, categoryId, fallbackName) {
   };
 }
 
+function normalizeExpenseRow(r) {
+  return {
+    ...r,
+    amount: Number(r?.amount || 0),
+    category_color: r?.category_color || null,
+    created_at: r?.created_at || null,
+    updated_at: r?.updated_at || null,
+  };
+}
+
 router.get("/", authRequired, async (req, res) => {
   try {
     if (!canManageExpenses(req)) {
@@ -183,6 +192,10 @@ router.get("/", authRequired, async (req, res) => {
 
     const pool = getPool();
     const { page, pageSize, offset } = getPagination(req.query);
+    const safePage = Math.max(1, toNum(page, 1));
+    const safePageSize = Math.max(1, Math.min(100, toNum(pageSize, 20)));
+    const safeOffset = Math.max(0, toNum(offset, 0));
+
     const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -210,6 +223,7 @@ router.get("/", authRequired, async (req, res) => {
         e.payment_method,
         e.reference,
         e.status,
+        e.receipt_url,
         e.created_at,
         e.updated_at,
         c.color AS category_color
@@ -219,25 +233,29 @@ router.get("/", authRequired, async (req, res) => {
       ORDER BY e.expense_date DESC, e.id DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, pageSize, offset]
+      [...params, safePageSize, safeOffset]
     );
 
     return res.json({
-      items: rows.map((r) => ({
-        ...r,
-        amount: Number(r.amount || 0),
-      })),
+      items: Array.isArray(rows) ? rows.map(normalizeExpenseRow) : [],
       pageInfo: buildPageInfo({
-        page,
-        pageSize,
+        page: safePage,
+        pageSize: safePageSize,
         total: Number(countRow?.total || 0),
       }),
     });
   } catch (e) {
-    console.error("GET /expenses error:", e);
+    console.error("GET /expenses error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+      errno: e?.errno,
+      stack: e?.stack,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors du chargement des dépenses.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -275,10 +293,15 @@ router.get("/summary", authRequired, async (req, res) => {
       filtered_total: Number(row?.filtered_total || 0),
     });
   } catch (e) {
-    console.error("GET /expenses/summary error:", e);
+    console.error("GET /expenses/summary error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors du calcul du résumé.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -295,8 +318,7 @@ router.get("/grouped", authRequired, async (req, res) => {
 
     let selectPeriod = "DATE_FORMAT(e.expense_date, '%Y-%m-%d')";
     if (period === "week") {
-      selectPeriod =
-        "CONCAT(YEAR(e.expense_date), '-S', LPAD(WEEK(e.expense_date, 1), 2, '0'))";
+      selectPeriod = "CONCAT(YEAR(e.expense_date), '-S', LPAD(WEEK(e.expense_date, 1), 2, '0'))";
     } else if (period === "month") {
       selectPeriod = "DATE_FORMAT(e.expense_date, '%Y-%m')";
     } else if (period === "year") {
@@ -321,17 +343,24 @@ router.get("/grouped", authRequired, async (req, res) => {
 
     return res.json({
       period,
-      items: rows.map((r) => ({
-        period: r.period,
-        total: Number(r.total || 0),
-        count_items: Number(r.count_items || 0),
-      })),
+      items: Array.isArray(rows)
+        ? rows.map((r) => ({
+            period: r.period,
+            total: Number(r.total || 0),
+            count_items: Number(r.count_items || 0),
+          }))
+        : [],
     });
   } catch (e) {
-    console.error("GET /expenses/grouped error:", e);
+    console.error("GET /expenses/grouped error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors du regroupement des dépenses.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -364,19 +393,26 @@ router.get("/by-category", authRequired, async (req, res) => {
     );
 
     return res.json({
-      items: rows.map((r) => ({
-        category_id: r.category_id,
-        category_name: r.category_name,
-        total: Number(r.total || 0),
-        count_items: Number(r.count_items || 0),
-        color: r.color || null,
-      })),
+      items: Array.isArray(rows)
+        ? rows.map((r) => ({
+            category_id: r.category_id,
+            category_name: r.category_name,
+            total: Number(r.total || 0),
+            count_items: Number(r.count_items || 0),
+            color: r.color || null,
+          }))
+        : [],
     });
   } catch (e) {
-    console.error("GET /expenses/by-category error:", e);
+    console.error("GET /expenses/by-category error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors du calcul par catégorie.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -398,6 +434,7 @@ router.post("/", authRequired, async (req, res) => {
     const expenseDate = normalizeDateOnly(req.body?.expense_date);
     const paymentMethod = cleanStr(req.body?.payment_method, 50);
     const status = String(req.body?.status || "PAID").toUpperCase();
+    const receiptUrl = cleanStr(req.body?.receipt_url, 1000);
 
     if (!label) {
       return res.status(400).json({ error: "Le libellé est obligatoire." });
@@ -435,8 +472,9 @@ router.post("/", authRequired, async (req, res) => {
         expense_date,
         payment_method,
         reference,
-        status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status,
+        receipt_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         shopId,
@@ -450,13 +488,28 @@ router.post("/", authRequired, async (req, res) => {
         paymentMethod,
         reference,
         status,
+        receiptUrl,
       ]
     );
 
     const [[created]] = await pool.query(
       `
       SELECT
-        e.*,
+        e.id,
+        e.shop_id,
+        e.user_id,
+        e.category_id,
+        e.category_name,
+        e.label,
+        e.description,
+        e.amount,
+        e.expense_date,
+        e.payment_method,
+        e.reference,
+        e.status,
+        e.receipt_url,
+        e.created_at,
+        e.updated_at,
         c.color AS category_color
       FROM expenses e
       LEFT JOIN expense_categories c ON c.id = e.category_id
@@ -466,15 +519,18 @@ router.post("/", authRequired, async (req, res) => {
       [result.insertId]
     );
 
-    return res.status(201).json({
-      ...created,
-      amount: Number(created.amount || 0),
-    });
+    return res.status(201).json(normalizeExpenseRow(created));
   } catch (e) {
-    console.error("POST /expenses error:", e);
+    console.error("POST /expenses error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+      stack: e?.stack,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors de la création de la dépense.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -518,6 +574,7 @@ router.put("/:id", authRequired, async (req, res) => {
     const expenseDate = normalizeDateOnly(req.body?.expense_date);
     const paymentMethod = cleanStr(req.body?.payment_method, 50);
     const status = String(req.body?.status || "").toUpperCase();
+    const receiptUrl = cleanStr(req.body?.receipt_url, 1000);
 
     if (!label) {
       return res.status(400).json({ error: "Le libellé est obligatoire." });
@@ -554,7 +611,8 @@ router.put("/:id", authRequired, async (req, res) => {
         expense_date = ?,
         payment_method = ?,
         reference = ?,
-        status = ?
+        status = ?,
+        receipt_url = ?
       WHERE id = ?
       `,
       [
@@ -567,6 +625,7 @@ router.put("/:id", authRequired, async (req, res) => {
         paymentMethod,
         reference,
         status,
+        receiptUrl,
         id,
       ]
     );
@@ -574,7 +633,21 @@ router.put("/:id", authRequired, async (req, res) => {
     const [[updated]] = await pool.query(
       `
       SELECT
-        e.*,
+        e.id,
+        e.shop_id,
+        e.user_id,
+        e.category_id,
+        e.category_name,
+        e.label,
+        e.description,
+        e.amount,
+        e.expense_date,
+        e.payment_method,
+        e.reference,
+        e.status,
+        e.receipt_url,
+        e.created_at,
+        e.updated_at,
         c.color AS category_color
       FROM expenses e
       LEFT JOIN expense_categories c ON c.id = e.category_id
@@ -584,15 +657,18 @@ router.put("/:id", authRequired, async (req, res) => {
       [id]
     );
 
-    return res.json({
-      ...updated,
-      amount: Number(updated.amount || 0),
-    });
+    return res.json(normalizeExpenseRow(updated));
   } catch (e) {
-    console.error("PUT /expenses/:id error:", e);
+    console.error("PUT /expenses/:id error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+      stack: e?.stack,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors de la mise à jour.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
@@ -632,10 +708,15 @@ router.delete("/:id", authRequired, async (req, res) => {
 
     return res.json({ ok: true, id });
   } catch (e) {
-    console.error("DELETE /expenses/:id error:", e);
+    console.error("DELETE /expenses/:id error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
     return res.status(500).json({
       error: "Erreur serveur lors de la suppression.",
-      details: e?.message || "unknown_error",
+      details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
 });
