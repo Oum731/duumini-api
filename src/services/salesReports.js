@@ -251,12 +251,6 @@ function pickDateColumn(cols) {
   return null;
 }
 
-function pickTotalColumn(cols) {
-  if (cols.total) return "total";
-  if (cols.total_amount) return "total_amount";
-  return null;
-}
-
 function pickCommissionColumn(cols) {
   if (cols.commission_duumini) return "commission_duumini";
   if (cols.duumini_commission) return "duumini_commission";
@@ -272,7 +266,6 @@ function pickDeliveryColumn(cols) {
 
 function extractPaidAmount(paymentParsed, colPaid) {
   if (Number.isFinite(Number(colPaid))) return normMoney(colPaid);
-
   if (!paymentParsed) return 0;
 
   const candidates = [
@@ -327,15 +320,15 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
     total
   );
 
-  const remaining = Math.min(
-    extractRemainingAmount(
-      paymentParsed,
-      cols.remaining_amount ? row?.remaining_amount : null,
-      total,
-      paid
-    ),
-    total
+  let remaining = extractRemainingAmount(
+    paymentParsed,
+    cols.remaining_amount ? row?.remaining_amount : null,
+    total,
+    paid
   );
+
+  if (!Number.isFinite(remaining)) remaining = Math.max(0, total - paid);
+  remaining = normMoney(Math.max(0, Math.min(remaining, total)));
 
   let status = colStatus;
 
@@ -348,8 +341,34 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
   return {
     status,
     paid_amount: normMoney(paid),
-    remaining_amount: normMoney(Math.max(0, remaining)),
+    remaining_amount: remaining,
     currency: String(currency || "MAD").toUpperCase(),
+  };
+}
+
+function computeRowAmounts(row, cols, itemsMap) {
+  const rowGrossItems = cols.items_subtotal
+    ? normMoney(row.items_subtotal)
+    : normMoney(itemsMap.get(Number(row.id)) || 0);
+
+  const rowDiscount = cols.admin_discount_amount
+    ? normMoney(row.admin_discount_amount)
+    : 0;
+
+  const rowNetItems = normMoney(Math.max(0, rowGrossItems - rowDiscount));
+
+  const rowDelivery = pickDeliveryColumn(cols)
+    ? normMoney(row.delivery_amount_exact)
+    : 0;
+
+  const rowTotal = normMoney(rowNetItems + rowDelivery);
+
+  return {
+    gross_items_amount: rowGrossItems,
+    admin_discount_amount: rowDiscount,
+    net_items_amount: rowNetItems,
+    delivery_amount: rowDelivery,
+    total_amount: rowTotal,
   };
 }
 
@@ -359,7 +378,6 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
 
   const statusCol = pickStatusColumn(cols);
   const dateCol = pickDateColumn(cols);
-  const totalCol = pickTotalColumn(cols);
   const commissionCol = pickCommissionColumn(cols);
   const deliveryCol = pickDeliveryColumn(cols);
 
@@ -372,12 +390,6 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   if (!dateCol) {
     throw new Error(
       "Impossible de générer le rapport: aucune colonne de date exploitable trouvée dans orders."
-    );
-  }
-
-  if (!totalCol) {
-    throw new Error(
-      "Impossible de générer le rapport: aucune colonne total/total_amount trouvée dans orders."
     );
   }
 
@@ -402,17 +414,16 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const [orderRows] = await conn.query(
     `
     SELECT
-      o.id,
-      o.${totalCol} AS total_amount,
-      ${commissionCol ? `o.${commissionCol}` : "NULL"} AS duumini_commission
-      ${deliveryCol ? `, o.${deliveryCol} AS delivery_amount_exact` : ""}
-      ${cols.items_subtotal ? `, o.items_subtotal` : ""}
-      ${cols.admin_discount_amount ? `, o.admin_discount_amount` : ""}
-      ${cols.payment ? ", o.payment" : ""}
-      ${cols.payment_status ? ", o.payment_status" : ""}
-      ${cols.paid_amount ? ", o.paid_amount" : ""}
-      ${cols.remaining_amount ? ", o.remaining_amount" : ""}
-      ${cols.currency ? ", o.currency" : ""}
+      o.id
+      ${commissionCol ? `, o.${commissionCol} AS duumini_commission` : ", NULL AS duumini_commission"}
+      ${deliveryCol ? `, o.${deliveryCol} AS delivery_amount_exact` : ", NULL AS delivery_amount_exact"}
+      ${cols.items_subtotal ? `, o.items_subtotal` : ", NULL AS items_subtotal"}
+      ${cols.admin_discount_amount ? `, o.admin_discount_amount` : ", NULL AS admin_discount_amount"}
+      ${cols.payment ? ", o.payment" : ", NULL AS payment"}
+      ${cols.payment_status ? ", o.payment_status" : ", NULL AS payment_status"}
+      ${cols.paid_amount ? ", o.paid_amount" : ", NULL AS paid_amount"}
+      ${cols.remaining_amount ? ", o.remaining_amount" : ", NULL AS remaining_amount"}
+      ${cols.currency ? ", o.currency" : ", NULL AS currency"}
     FROM orders o
     WHERE ${whereSql}
     ORDER BY o.id ASC
@@ -444,7 +455,6 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   }
 
   const orderIds = orderRows.map((r) => Number(r.id)).filter(Boolean);
-
   const itemsMap = new Map();
 
   if (orderIds.length) {
@@ -477,39 +487,25 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const paymentBreakdownMap = new Map();
 
   for (const row of orderRows) {
-    const rowTotal = normMoney(row.total_amount);
-
-    const rowGrossItems = cols.items_subtotal
-      ? normMoney(row.items_subtotal)
-      : normMoney(itemsMap.get(Number(row.id)) || 0);
-
-    const rowDiscount = cols.admin_discount_amount
-      ? normMoney(row.admin_discount_amount)
-      : 0;
-
-    const rowNetItems = normMoney(Math.max(0, rowGrossItems - rowDiscount));
-
-    const rowDelivery = deliveryCol
-      ? normMoney(row.delivery_amount_exact)
-      : normMoney(Math.max(0, rowTotal - rowNetItems));
+    const amounts = computeRowAmounts(row, cols, itemsMap);
 
     const rowCommissionRaw = Number(row.duumini_commission);
     const rowCommission = Number.isFinite(rowCommissionRaw)
       ? normMoney(rowCommissionRaw)
-      : computeDuuminiCommission(rowNetItems);
+      : computeDuuminiCommission(amounts.net_items_amount);
 
     const payment = buildPaymentFromRow(
       row,
       cols,
-      rowTotal,
+      amounts.total_amount,
       cols.currency ? row.currency || currency : currency
     );
 
-    grossItemsAmount += rowGrossItems;
-    adminDiscountAmount += rowDiscount;
-    netItemsAmount += rowNetItems;
-    totalAmount += rowTotal;
-    deliveryAmount += rowDelivery;
+    grossItemsAmount += amounts.gross_items_amount;
+    adminDiscountAmount += amounts.admin_discount_amount;
+    netItemsAmount += amounts.net_items_amount;
+    deliveryAmount += amounts.delivery_amount;
+    totalAmount += amounts.total_amount;
     duuminiCommission += rowCommission;
     paidAmount += normMoney(payment.paid_amount);
     remainingAmount += normMoney(payment.remaining_amount);
@@ -524,7 +520,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     };
 
     prev.cnt += 1;
-    prev.amount += rowTotal;
+    prev.amount += amounts.total_amount;
     prev.paid_amount += normMoney(payment.paid_amount);
     prev.remaining_amount += normMoney(payment.remaining_amount);
 
