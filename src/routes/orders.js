@@ -16,14 +16,8 @@ const {
 
 const router = Router();
 
-/* =========================
- * ✅ DUUMINI COMMISSION CONFIG
- * =======================*/
 const DUUMINI_COMMISSION_RATE = 0.09;
 
-/* =========================
- * CONFIG WHATSAPP ADMIN
- * =======================*/
 const ADMIN_WHATSAPP_HARDCODED_RAW = "+212623677884";
 const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   .trim()
@@ -31,9 +25,6 @@ const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   ? String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()
   : `whatsapp:${String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()}`;
 
-/* =========================
- * Helpers
- * =======================*/
 function safeParseJSON(maybe) {
   if (!maybe) return null;
   if (typeof maybe === "object") return maybe;
@@ -213,9 +204,59 @@ function isBlank(v) {
   return v === null || v === undefined || String(v).trim() === "";
 }
 
-/* =========================
- * ✅ Users columns detection
- * =======================*/
+function normMoney(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return +n.toFixed(2);
+}
+
+function computeOrderAmountsFromRow(row, discountCols, itemsAmountFallback, opts = {}) {
+  const isVendorView = !!opts.isVendorView;
+
+  const itemsAmount = normMoney(itemsAmountFallback);
+
+  const itemsSubtotal = isVendorView
+    ? itemsAmount
+    : discountCols?.items_subtotal
+      ? normMoney(row?.items_subtotal)
+      : itemsAmount;
+
+  const adminDiscountAmount = isVendorView
+    ? 0
+    : discountCols?.admin_discount_amount
+      ? normMoney(row?.admin_discount_amount)
+      : 0;
+
+  const discountedItemsAmount = normMoney(
+    Math.max(0, itemsSubtotal - adminDiscountAmount)
+  );
+
+  let deliveryFee = 0;
+  if (!isVendorView) {
+    if (discountCols?.delivery_fee) {
+      deliveryFee = normMoney(row?.delivery_fee);
+    } else {
+      const totalRaw = Number(row?.total);
+      deliveryFee = Number.isFinite(totalRaw)
+        ? normMoney(Math.max(0, totalRaw - discountedItemsAmount))
+        : 0;
+    }
+  }
+
+  const totalAmount = isVendorView
+    ? discountedItemsAmount
+    : normMoney(discountedItemsAmount + deliveryFee);
+
+  return {
+    items_amount: itemsAmount,
+    items_subtotal: itemsSubtotal,
+    admin_discount_amount: adminDiscountAmount,
+    discounted_items_amount: discountedItemsAmount,
+    delivery_fee: deliveryFee,
+    amount: totalAmount,
+  };
+}
+
 let _usersCols = null;
 let _usersColsLoaded = false;
 
@@ -242,7 +283,7 @@ async function detectUsersCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'users'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -281,8 +322,12 @@ async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, ad
   const sets = [];
   const vals = [];
 
-  const firstName = !isBlank(contactObj?.first_name) ? String(contactObj.first_name).trim() : null;
-  const lastName = !isBlank(contactObj?.last_name) ? String(contactObj.last_name).trim() : null;
+  const firstName = !isBlank(contactObj?.first_name)
+    ? String(contactObj.first_name).trim()
+    : null;
+  const lastName = !isBlank(contactObj?.last_name)
+    ? String(contactObj.last_name).trim()
+    : null;
   const phone = normPhone(contactObj?.phone);
 
   if (usersCols.first_name && firstName) {
@@ -335,13 +380,10 @@ async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, ad
 
   await conn.query(
     `UPDATE users SET ${sets.join(", ")} WHERE id = ?`,
-    [...vals, userId],
+    [...vals, userId]
   );
 }
 
-/* =========================
- * ✅ Auto-create client account
- * =======================*/
 function generateAutoPassword(phone) {
   const digits = String(phone || "").replace(/\D+/g, "");
   const tail = digits.slice(-4) || "0000";
@@ -391,7 +433,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     WHERE phone = ?
     LIMIT 1
     `,
-    [phone],
+    [phone]
   );
 
   if (existing) {
@@ -404,7 +446,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
       WHERE id = ?
       LIMIT 1
       `,
-      [existing.id],
+      [existing.id]
     );
 
     return {
@@ -511,7 +553,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     INSERT INTO users (${insertCols.join(", ")})
     VALUES (${insertQs.join(", ")})
     `,
-    insertVals,
+    insertVals
   );
 
   return {
@@ -532,9 +574,6 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   };
 }
 
-/* =========================
- * ✅ Admin discount helpers
- * =======================*/
 function normalizeAdminDiscount(input) {
   const d = input && typeof input === "object" ? input : {};
 
@@ -588,9 +627,6 @@ function computeAdminDiscountAmount(itemsSubtotal, discount) {
   return +amount.toFixed(2);
 }
 
-/* =========================
- * ✅ Receipt helpers (token + number)
- * =======================*/
 function genReceiptToken() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -610,7 +646,7 @@ async function detectOrdersReceiptCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -619,9 +655,6 @@ async function detectOrdersReceiptCols(conn) {
   };
 }
 
-/* =========================
- * ✅ Order discount columns detection
- * =======================*/
 let _ordersDiscountCols = null;
 let _ordersDiscountColsLoaded = false;
 
@@ -641,7 +674,7 @@ async function detectOrdersDiscountCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -705,9 +738,6 @@ function buildAdminDiscountForRow(row, discountCols, itemsSubtotalFallback) {
   };
 }
 
-/* =========================
- * ✅ vérifier si une commande ne contient QUE les produits d'un vendeur
- * =======================*/
 async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
   const [[r]] = await conn.query(
     `
@@ -720,7 +750,7 @@ async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
     JOIN shops s    ON s.id = p.shop_id
     WHERE oi.order_id = ?
     `,
-    [vendorId, orderId],
+    [vendorId, orderId]
   );
 
   const mine = Number(r?.mine_count || 0);
@@ -765,7 +795,7 @@ async function getOrderWithPerm(conn, id, user) {
     WHERE o.id = ?
     LIMIT 1
     `,
-    [id],
+    [id]
   );
 
   if (!orderRaw) return { status: 404, error: "Not found" };
@@ -781,19 +811,20 @@ async function getOrderWithPerm(conn, id, user) {
         WHERE oi.order_id = ? AND s.owner_id = ?
         LIMIT 1
         `,
-        [id, user.id],
+        [id, user.id]
       );
       if (!own) return { status: 403, error: "Forbidden" };
     } else {
-      if (String(orderRaw.user_id) !== String(user.id))
+      if (String(orderRaw.user_id) !== String(user.id)) {
         return { status: 403, error: "Forbidden" };
+      }
     }
   }
 
   const order = stripCommissionFromOrderRow(orderRaw, user);
 
   let itemsSql = `
-    SELECT 
+    SELECT
       oi.*,
       p.name AS product_name,
       pv.size  AS variant_size,
@@ -829,13 +860,12 @@ async function getOrderWithPerm(conn, id, user) {
   return { status: 200, order, items };
 }
 
-/* ========= Notifications ========= */
 async function getAdminUserIds() {
   const [rows] = await getPool().query(
-    `SELECT id 
-       FROM users 
+    `SELECT id
+       FROM users
       WHERE role = 'ADMIN'
-        AND (is_active = 1 OR is_active IS NULL)`,
+        AND (is_active = 1 OR is_active IS NULL)`
   );
   return (rows || []).map((r) => r.id);
 }
@@ -851,7 +881,7 @@ async function getVendorsForOrder(orderId) {
      WHERE oi.order_id = ?
        AND (u.is_active = 1 OR u.is_active IS NULL)
     `,
-    [orderId],
+    [orderId]
   );
   return (rows || []).map((r) => r.user_id);
 }
@@ -861,9 +891,7 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     getAdminUserIds(),
     getVendorsForOrder(orderId),
   ]);
-  const allUserIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
-  );
+  const allUserIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
   if (!allUserIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -881,19 +909,14 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   };
 
   const payload = JSON.stringify(payloadObj);
-  const values = allUserIds.map((uid) => [
-    uid,
-    "ORDER_CREATED",
-    payload,
-    "queued",
-  ]);
+  const values = allUserIds.map((uid) => [uid, "ORDER_CREATED", payload, "queued"]);
 
   await getPool().query(
     `
     INSERT INTO notification_queue (user_id, type, payload, status)
     VALUES ?
     `,
-    [values],
+    [values]
   );
 }
 
@@ -909,9 +932,7 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
     getAdminUserIds(),
     getVendorsForOrder(orderId),
   ]);
-  const userIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
-  );
+  const userIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
   if (!userIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -930,8 +951,8 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
 
   await Promise.all(
     userIds.map((uid) =>
-      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false }),
-    ),
+      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false })
+    )
   );
 }
 
@@ -941,7 +962,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
        FROM orders
       WHERE id = ?
       LIMIT 1`,
-    [orderId],
+    [orderId]
   );
 
   if (!row || !row.user_id) return;
@@ -965,13 +986,10 @@ async function enqueueOrderStatusForClient(orderId, status) {
     INSERT INTO notification_queue (user_id, type, payload, status)
     VALUES (?, 'ORDER_STATUS', ?, 'queued')
     `,
-    [row.user_id, JSON.stringify(payloadObj)],
+    [row.user_id, JSON.stringify(payloadObj)]
   );
 }
 
-/* =========================
- * WhatsApp admin
- * =======================*/
 async function sendAdminWhatsAppForOrder({
   pool,
   orderId,
@@ -986,15 +1004,16 @@ async function sendAdminWhatsAppForOrder({
     env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM
   );
   if (!hasFrom) return;
-  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:"))
+  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) {
     return;
+  }
 
   let details = "";
 
   try {
     const [rows] = await pool.query(
       `
-      SELECT 
+      SELECT
         oi.qty,
         oi.unit_price,
         p.name AS product_name,
@@ -1006,7 +1025,7 @@ async function sendAdminWhatsAppForOrder({
       WHERE oi.order_id = ?
       ORDER BY oi.id ASC
       `,
-      [orderId],
+      [orderId]
     );
 
     if (rows && rows.length) {
@@ -1048,7 +1067,7 @@ async function sendAdminWhatsAppForOrder({
       ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
       LIMIT 1
       `,
-      [orderId],
+      [orderId]
     );
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
   } catch {}
@@ -1074,9 +1093,6 @@ async function sendAdminWhatsAppForOrder({
   } catch {}
 }
 
-/* =========================
- * STOCK helpers
- * =======================*/
 function normQty(x) {
   const n = Number(x);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -1089,13 +1105,8 @@ function parseVariantId(x) {
   return Math.floor(n);
 }
 
-/* =========================
- * PROMO helpers
- * =======================*/
 function normalizePromoType(value) {
-  const t = String(value || "")
-    .trim()
-    .toUpperCase();
+  const t = String(value || "").trim().toUpperCase();
   if (t === "AMOUNT") return "AMOUNT";
   if (t === "PERCENT") return "PERCENT";
   return "PERCENT";
@@ -1168,9 +1179,6 @@ function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   };
 }
 
-/* =========================
- * OPTIONAL: détecter colonnes promo dans order_items
- * =======================*/
 let _orderItemsPromoCols = null;
 let _orderItemsPromoColsLoaded = false;
 
@@ -1187,7 +1195,7 @@ async function detectOrderItemsPromoCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'order_items'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -1210,9 +1218,6 @@ async function getOrderItemsPromoColsCached(pool) {
   }
 }
 
-/* =========================
- * ✅ Payment columns detection + normalization
- * =======================*/
 let _ordersPayCols = null;
 let _ordersPayColsLoaded = false;
 
@@ -1229,7 +1234,7 @@ async function detectOrdersPayCols(conn) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+    candidates
   );
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
   return {
@@ -1252,25 +1257,16 @@ async function getOrdersPayColsCached(pool) {
   }
 }
 
-function normMoney(x) {
-  const n = Number(x);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return +n.toFixed(2);
-}
-
 function normPayStatus(s) {
-  const v = String(s || "")
-    .trim()
-    .toUpperCase();
-  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING")
+  const v = String(s || "").trim().toUpperCase();
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") {
     return v;
+  }
   return null;
 }
 
 function isBankTransferMethod(m) {
-  const v = String(m || "")
-    .trim()
-    .toUpperCase();
+  const v = String(m || "").trim().toUpperCase();
   return (
     v === "BANK_TRANSFER" ||
     v === "BANK" ||
@@ -1290,7 +1286,7 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
 
   const paid = Math.min(
     normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0),
-    total,
+    total
   );
   const remaining = Math.max(0, total - paid);
 
@@ -1386,7 +1382,7 @@ async function lockProductForItem(conn, productId) {
     FROM products p
     WHERE p.id=? FOR UPDATE
     `,
-    [productId],
+    [productId]
   );
   return p || null;
 }
@@ -1406,14 +1402,11 @@ async function lockVariantForItem(conn, productId, variantId) {
     FROM product_variants pv
     WHERE pv.id=? AND pv.product_id=? FOR UPDATE
     `,
-    [variantId, productId],
+    [variantId, productId]
   );
   return v || null;
 }
 
-/* =========================
- * ✅ Multi-status filter
- * =======================*/
 const ORDER_STATUSES = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
 
 function parseStatusesQuery(req) {
@@ -1445,19 +1438,18 @@ function parseStatusesQuery(req) {
 }
 
 function buildStatusWhere(statuses) {
-  if (!Array.isArray(statuses) || statuses.length === 0)
+  if (!Array.isArray(statuses) || statuses.length === 0) {
     return { sql: "", params: [] };
-  if (statuses.length === 1)
+  }
+  if (statuses.length === 1) {
     return { sql: " AND o.status = ?", params: [statuses[0]] };
+  }
   return {
     sql: ` AND o.status IN (${statuses.map(() => "?").join(",")})`,
     params: [...statuses],
   };
 }
 
-/* =========================
- * LIST
- * =======================*/
 router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const pool = getPool();
@@ -1494,7 +1486,7 @@ router.get("/", authRequired, async (req, res) => {
       usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
     ];
 
-    const mapRowToItem = (r, user, payCols, discountCols) => {
+    const mapRowToItem = (r, user, payColsArg, discountColsArg) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
 
@@ -1532,23 +1524,24 @@ router.get("/", authRequired, async (req, res) => {
       const itemsAmount = Number(r.items_amount || 0);
       const currency = (r.currency || "MAD").toUpperCase();
 
-      const adminDiscount = buildAdminDiscountForRow(r, discountCols, itemsAmount);
+      const adminDiscount = buildAdminDiscountForRow(
+        r,
+        discountColsArg,
+        itemsAmount
+      );
 
-      const deliveryFee = isVendorView
-        ? 0
-        : discountCols?.delivery_fee
-          ? Number(r.delivery_fee || 0)
-          : Math.max(0, Number(r.total || itemsAmount) - itemsAmount);
-
-      const totalAmount = isVendorView
-        ? itemsAmount
-        : Number(r.total || adminDiscount.discounted_items_amount + deliveryFee);
+      const totals = computeOrderAmountsFromRow(
+        r,
+        discountColsArg,
+        itemsAmount,
+        { isVendorView }
+      );
 
       const paymentNorm = normalizePaymentForRow(
         r,
-        totalAmount,
+        totals.amount,
         currency,
-        payCols,
+        payColsArg
       );
 
       const duuminiCommissionRaw = isCancelledStatus(r.status)
@@ -1558,7 +1551,7 @@ router.get("/", authRequired, async (req, res) => {
       const duuminiCommission =
         duuminiCommissionRaw != null
           ? duuminiCommissionRaw
-          : computeDuuminiCommission(adminDiscount.discounted_items_amount);
+          : computeDuuminiCommission(totals.discounted_items_amount);
 
       const commissionDuumini = isVendorView
         ? null
@@ -1591,16 +1584,12 @@ router.get("/", authRequired, async (req, res) => {
             },
         ...paymentNorm,
         totals: {
-          items_amount: +itemsAmount.toFixed(2),
-          items_subtotal: isVendorView
-            ? +itemsAmount.toFixed(2)
-            : adminDiscount.items_subtotal,
-          admin_discount_amount: isVendorView ? 0 : adminDiscount.amount,
-          discounted_items_amount: isVendorView
-            ? +itemsAmount.toFixed(2)
-            : adminDiscount.discounted_items_amount,
-          delivery_fee: +Number(deliveryFee || 0).toFixed(2),
-          amount: +totalAmount.toFixed(2),
+          items_amount: +totals.items_amount.toFixed(2),
+          items_subtotal: +totals.items_subtotal.toFixed(2),
+          admin_discount_amount: +totals.admin_discount_amount.toFixed(2),
+          discounted_items_amount: +totals.discounted_items_amount.toFixed(2),
+          delivery_fee: +totals.delivery_fee.toFixed(2),
+          amount: +totals.amount.toFixed(2),
           currency,
           duumini_commission: commissionDuumini,
         },
@@ -1622,12 +1611,12 @@ router.get("/", authRequired, async (req, res) => {
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
+        SELECT
           o.*,
           ${userSelectCols.join(", ")},
           (
@@ -1649,12 +1638,12 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
       const items = rows.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
       return res.json({
         items,
@@ -1677,12 +1666,12 @@ router.get("/", authRequired, async (req, res) => {
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
+        SELECT
           o.*,
           ${userSelectCols.join(", ")},
           (
@@ -1704,11 +1693,11 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
       return res.json({
         items,
@@ -1738,12 +1727,12 @@ router.get("/", authRequired, async (req, res) => {
         JOIN shops s        ON s.id = p.shop_id
         WHERE ${where}
         `,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
+        SELECT
           o.*,
           ${userSelectCols.join(", ")},
           (
@@ -1775,11 +1764,11 @@ router.get("/", authRequired, async (req, res) => {
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, ...params, limit, offset],
+        [req.user.id, req.user.id, ...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
       return res.json({
         items,
@@ -1801,12 +1790,12 @@ router.get("/", authRequired, async (req, res) => {
 
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-      params,
+      params
     );
 
     const [rowsRaw] = await pool.query(
       `
-      SELECT 
+      SELECT
         o.*,
         ${userSelectCols.join(", ")},
         (
@@ -1828,12 +1817,12 @@ router.get("/", authRequired, async (req, res) => {
       ORDER BY o.created_at DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset],
+      [...params, limit, offset]
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
     const items = rows.map((r) =>
-      mapRowToItem(r, req.user, payCols, discountCols),
+      mapRowToItem(r, req.user, payCols, discountCols)
     );
     return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
@@ -1841,9 +1830,6 @@ router.get("/", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Shared: build cleanItems with promo
- * =======================*/
 async function buildCleanItemsWithPromo({ conn, items }) {
   let itemsAmount = 0;
   const cleanItems = [];
@@ -1935,20 +1921,19 @@ async function buildCleanItemsWithPromo({ conn, items }) {
   return { cleanItems, itemsAmount };
 }
 
-/* =========================
- * Encaissement / update payment (ADMIN ONLY)
- * PUT /api/orders/:id/payment
- * =======================*/
 router.put("/:id/payment", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
+  }
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const pool = getPool();
 
   try {
     const payCols = await getOrdersPayColsCached(pool);
+    const discountCols = await getOrdersDiscountColsCached(pool);
+
     const hasAny =
       payCols?.payment ||
       payCols?.payment_status ||
@@ -1963,11 +1948,10 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       });
     }
 
-    const mode = String(req.body?.mode || "ADD")
-      .trim()
-      .toUpperCase();
-    if (mode !== "SET" && mode !== "ADD")
+    const mode = String(req.body?.mode || "ADD").trim().toUpperCase();
+    if (mode !== "SET" && mode !== "ADD") {
       return res.status(400).json({ error: "invalid mode (SET|ADD)" });
+    }
 
     const add_amount = req.body?.add_amount ?? req.body?.addAmount ?? null;
     const paid_amount =
@@ -1980,12 +1964,14 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
     if (mode === "ADD") {
       const v = Number(add_amount);
-      if (!Number.isFinite(v) || v <= 0)
+      if (!Number.isFinite(v) || v <= 0) {
         return res.status(400).json({ error: "add_amount required" });
+      }
     } else {
       const v = Number(paid_amount);
-      if (!Number.isFinite(v) || v < 0)
+      if (!Number.isFinite(v) || v < 0) {
         return res.status(400).json({ error: "paid_amount required" });
+      }
     }
 
     const conn = await pool.getConnection();
@@ -1994,12 +1980,13 @@ router.put("/:id/payment", authRequired, async (req, res) => {
 
       const [[o]] = await conn.query(
         `
-        SELECT id, status, total, currency, payment, paid_amount
+        SELECT id, status, total, currency, payment, paid_amount,
+               items_subtotal, delivery_fee, admin_discount_amount
         FROM orders
         WHERE id = ?
         FOR UPDATE
         `,
-        [id],
+        [id]
       );
 
       if (!o) {
@@ -2007,7 +1994,14 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         return res.status(404).json({ error: "Not found" });
       }
 
-      const total = Number(o.total || 0);
+      const totals = computeOrderAmountsFromRow(
+        o,
+        discountCols,
+        Number(o.items_subtotal || 0),
+        { isVendorView: false }
+      );
+
+      const total = totals.amount;
       const currency = (o.currency || "MAD").toUpperCase();
 
       const currentPayment = safeParseJSON(o.payment) || {};
@@ -2020,8 +2014,9 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       else nextPaid = Number(paid_amount || 0);
 
       if (!Number.isFinite(nextPaid) || nextPaid < 0) nextPaid = 0;
-      if (Number.isFinite(total) && total >= 0)
+      if (Number.isFinite(total) && total >= 0) {
         nextPaid = Math.min(nextPaid, total);
+      }
 
       const merged = {
         ...currentPayment,
@@ -2065,6 +2060,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         id,
         status: String(o.status || "").toUpperCase(),
         display_code: buildDisplayCode(id),
+        totals,
         payment: paymentObj,
       });
     } catch (e) {
@@ -2080,14 +2076,11 @@ router.put("/:id/payment", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Admin update order discount
- * PUT /api/orders/:id/admin-discount
- * =======================*/
 router.put("/:id/admin-discount", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
+  }
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const pool = getPool();
@@ -2122,7 +2115,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
         WHERE id = ?
         FOR UPDATE
         `,
-        [id],
+        [id]
       );
 
       if (!o) {
@@ -2146,18 +2139,17 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
       const discountInput = normalizeAdminDiscount(req.body?.admin_discount);
       const adminDiscountAmount = computeAdminDiscountAmount(
         itemsSubtotal,
-        discountInput,
+        discountInput
       );
 
-      const discountedItemsAmount = Math.max(
-        0,
-        itemsSubtotal - adminDiscountAmount,
-      );
+      const discountedItemsAmount = Math.max(0, itemsSubtotal - adminDiscountAmount);
       const newTotal = +(discountedItemsAmount + deliveryFee).toFixed(2);
       const newCommission = computeDuuminiCommission(discountedItemsAmount);
 
       const currentPayment = safeParseJSON(o.payment) || {};
-      const currentPaid = normMoney(o.paid_amount ?? currentPayment.paid_amount ?? 0);
+      const currentPaid = normMoney(
+        o.paid_amount ?? currentPayment.paid_amount ?? 0
+      );
       const safePaid = Math.min(currentPaid, newTotal);
 
       const paymentObj = buildPaymentFromPayload(
@@ -2166,7 +2158,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
           paid_amount: safePaid,
         },
         newTotal,
-        currency,
+        currency
       );
 
       const sets = [
@@ -2209,7 +2201,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
 
       await conn.query(
         `UPDATE orders SET ${sets.join(", ")} WHERE id = ?`,
-        [...vals, id],
+        [...vals, id]
       );
 
       await conn.commit();
@@ -2249,10 +2241,6 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * ✅ Create order AS ADMIN (user OR auto-account)
- * POST /api/orders/admin
- * =======================*/
 router.post("/admin", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
@@ -2328,7 +2316,7 @@ router.post("/admin", authRequired, async (req, res) => {
            FROM users
           WHERE id = ?
           LIMIT 1`,
-        [customerId],
+        [customerId]
       );
 
       if (!row) {
@@ -2371,7 +2359,7 @@ router.post("/admin", authRequired, async (req, res) => {
            FROM users
           WHERE id = ?
           LIMIT 1`,
-        [row.id],
+        [row.id]
       );
       u = freshUser || row;
     } else {
@@ -2496,7 +2484,7 @@ router.post("/admin", authRequired, async (req, res) => {
         "admin_discount_value",
         "admin_discount_amount",
         "admin_discount_label",
-        "discounted_by_admin_id",
+        "discounted_by_admin_id"
       );
       placeholders.splice(7, 0, "?", "?", "?", "?", "?", "?", "?");
       vals.splice(
@@ -2508,7 +2496,7 @@ router.post("/admin", authRequired, async (req, res) => {
         discountInput.type === "NONE" ? 0 : discountInput.value,
         +adminDiscountAmount.toFixed(2),
         discountInput.label,
-        adminDiscountAmount > 0 ? req.user.id : null,
+        adminDiscountAmount > 0 ? req.user.id : null
       );
     }
 
@@ -2546,7 +2534,7 @@ router.post("/admin", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -2604,12 +2592,12 @@ router.post("/admin", authRequired, async (req, res) => {
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -2662,7 +2650,7 @@ router.post("/admin", authRequired, async (req, res) => {
       await notifyUser(effectiveCustomerId, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0,
+          orderTotal || 0
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -2723,9 +2711,6 @@ router.post("/admin", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Create order (auth)
- * =======================*/
 router.post("/", authRequired, async (req, res) => {
   const {
     contact = null,
@@ -2736,8 +2721,9 @@ router.post("/", authRequired, async (req, res) => {
     payment = null,
   } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
+  if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items[] required" });
+  }
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -2892,7 +2878,7 @@ router.post("/", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -2950,12 +2936,12 @@ router.post("/", authRequired, async (req, res) => {
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -3004,7 +2990,7 @@ router.post("/", authRequired, async (req, res) => {
       await notifyUser(req.user.id, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0,
+          orderTotal || 0
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -3060,17 +3046,15 @@ router.post("/", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
-    if (e && e.statusCode === 400 && e.payload)
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
+    }
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
 });
 
-/* =========================
- * Create order guest
- * =======================*/
 router.post("/guest", async (req, res) => {
   const {
     contact = {},
@@ -3081,8 +3065,9 @@ router.post("/guest", async (req, res) => {
     payment = null,
   } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
+  if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items[] required" });
+  }
 
   let contactObj = buildContactFromPayload(contact);
   if (!contactObj.phone) {
@@ -3231,7 +3216,7 @@ router.post("/guest", async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -3289,12 +3274,12 @@ router.post("/guest", async (req, res) => {
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
           `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -3385,25 +3370,24 @@ router.post("/guest", async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
-    if (e && e.statusCode === 400 && e.payload)
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
+    }
     res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
 });
 
-/* =========================
- * Get one order
- * =======================*/
 router.get("/:id", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const conn = await getPool().getConnection();
 
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200)
+    if (result.status !== 200) {
       return res.status(result.status).json({ error: result.error });
+    }
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
@@ -3438,7 +3422,7 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const isVendorView = isVendor(req.user) && !isAdmin(req.user);
@@ -3446,27 +3430,19 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const discountCols = await getOrdersDiscountColsCached(getPool());
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
-
-    const totalAmount = isVendorView
-      ? itemsAmount
-      : Number(
-          o.total ||
-            adminDiscount.discounted_items_amount +
-              Number(o.delivery_fee || 0),
-        );
-
-    const deliveryFee = isVendorView
-      ? 0
-      : discountCols?.delivery_fee
-        ? Number(o.delivery_fee || 0)
-        : Math.max(0, totalAmount - itemsAmount);
+    const totals = computeOrderAmountsFromRow(
+      o,
+      discountCols,
+      itemsAmount,
+      { isVendorView }
+    );
 
     const payCols = await getOrdersPayColsCached(getPool());
     const paymentNorm = normalizePaymentForRow(
       o,
-      totalAmount,
+      totals.amount,
       currency,
-      payCols,
+      payCols
     );
 
     const duuminiCommissionRaw = isCancelledStatus(o.status)
@@ -3476,7 +3452,7 @@ router.get("/:id", authRequired, async (req, res) => {
     const duuminiCommission =
       duuminiCommissionRaw != null
         ? duuminiCommissionRaw
-        : computeDuuminiCommission(adminDiscount.discounted_items_amount);
+        : computeDuuminiCommission(totals.discounted_items_amount);
 
     res.json({
       ...o,
@@ -3503,16 +3479,12 @@ router.get("/:id", authRequired, async (req, res) => {
       ...paymentNorm,
       items: result.items,
       totals: {
-        items_amount: +itemsAmount.toFixed(2),
-        items_subtotal: isVendorView
-          ? +itemsAmount.toFixed(2)
-          : adminDiscount.items_subtotal,
-        admin_discount_amount: isVendorView ? 0 : adminDiscount.amount,
-        discounted_items_amount: isVendorView
-          ? +itemsAmount.toFixed(2)
-          : adminDiscount.discounted_items_amount,
-        delivery_fee: +Number(deliveryFee || 0).toFixed(2),
-        amount: +totalAmount.toFixed(2),
+        items_amount: +totals.items_amount.toFixed(2),
+        items_subtotal: +totals.items_subtotal.toFixed(2),
+        admin_discount_amount: +totals.admin_discount_amount.toFixed(2),
+        discounted_items_amount: +totals.discounted_items_amount.toFixed(2),
+        delivery_fee: +totals.delivery_fee.toFixed(2),
+        amount: +totals.amount.toFixed(2),
         currency,
         duumini_commission: isVendorView ? null : duuminiCommission,
       },
@@ -3524,10 +3496,6 @@ router.get("/:id", authRequired, async (req, res) => {
     conn.release();
   }
 });
-
-/* =========================
- * ✅ RECEIPT JSON + PDF (with QR)
- * =======================*/
 
 router.get("/receipt/:token", async (req, res) => {
   const token = String(req.params.token || "").trim();
@@ -3550,13 +3518,13 @@ router.get("/receipt/:token", async (req, res) => {
          LEFT JOIN users u ON u.id = o.user_id
         WHERE o.receipt_token = ?
         LIMIT 1`,
-      [token],
+      [token]
     );
     if (!o) return res.status(404).json({ error: "Not found" });
 
     const [items] = await conn.query(
       `
-      SELECT 
+      SELECT
         oi.*,
         p.name AS product_name,
         pv.size  AS variant_size,
@@ -3575,7 +3543,7 @@ router.get("/receipt/:token", async (req, res) => {
       WHERE oi.order_id = ?
       ORDER BY oi.id ASC
       `,
-      [o.id],
+      [o.id]
     );
 
     const addr = safeParseJSON(o.address) || {};
@@ -3584,16 +3552,16 @@ router.get("/receipt/:token", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (s, it) => s + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
-    const deliveryFee = discountCols?.delivery_fee
-      ? Number(o.delivery_fee || 0)
-      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
-    const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    const totals = computeOrderAmountsFromRow(
+      o,
+      discountCols,
+      itemsAmount,
+      { isVendorView: false }
     );
 
     res.json({
@@ -3614,12 +3582,12 @@ router.get("/receipt/:token", async (req, res) => {
       },
       items,
       totals: {
-        items_amount: +itemsAmount.toFixed(2),
-        items_subtotal: adminDiscount.items_subtotal,
-        admin_discount_amount: adminDiscount.amount,
-        discounted_items_amount: adminDiscount.discounted_items_amount,
-        delivery_fee: +deliveryFee.toFixed(2),
-        amount: +totalAmount.toFixed(2),
+        items_amount: +totals.items_amount.toFixed(2),
+        items_subtotal: +totals.items_subtotal.toFixed(2),
+        admin_discount_amount: +totals.admin_discount_amount.toFixed(2),
+        discounted_items_amount: +totals.discounted_items_amount.toFixed(2),
+        delivery_fee: +totals.delivery_fee.toFixed(2),
+        amount: +totals.amount.toFixed(2),
         currency,
       },
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
@@ -3648,13 +3616,13 @@ router.get("/receipt/:token.pdf", async (req, res) => {
          LEFT JOIN users u ON u.id = o.user_id
         WHERE o.receipt_token = ?
         LIMIT 1`,
-      [token],
+      [token]
     );
     if (!o) return res.status(404).json({ error: "Not found" });
 
     const [items] = await conn.query(
       `
-      SELECT 
+      SELECT
         oi.*,
         p.name AS product_name,
         pv.size  AS variant_size,
@@ -3666,7 +3634,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
       WHERE oi.order_id = ?
       ORDER BY oi.id ASC
       `,
-      [o.id],
+      [o.id]
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
@@ -3676,26 +3644,26 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
-    const deliveryFee = discountCols?.delivery_fee
-      ? Number(o.delivery_fee || 0)
-      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
-    const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    const totals = computeOrderAmountsFromRow(
+      o,
+      discountCols,
+      itemsAmount,
+      { isVendorView: false }
     );
 
     const duuminiCommission = isCancelledStatus(o.status)
       ? 0
       : normCommission(o.commission_duumini) ??
-        computeDuuminiCommission(adminDiscount.discounted_items_amount);
+        computeDuuminiCommission(totals.discounted_items_amount);
 
     const base = String(
       env.PUBLIC_WEB_BASE ||
         process.env.PUBLIC_WEB_BASE ||
-        "https://duumini.com",
+        "https://duumini.com"
     ).replace(/\/+$/, "");
     const verifyUrl = `${base}/r/${token}`;
 
@@ -3729,7 +3697,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`,
+      }`
     );
     doc.moveDown();
 
@@ -3764,8 +3732,8 @@ router.get("/receipt/:token.pdf", async (req, res) => {
       const suffix = variant ? ` (${variant})` : "";
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2,
-        )} ${currency}`,
+          2
+        )} ${currency}`
       );
     });
 
@@ -3774,25 +3742,23 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+      `Sous-total produits : ${totals.items_subtotal.toFixed(2)} ${currency}`
     );
-    if (adminDiscount.amount > 0) {
-      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+    if (totals.admin_discount_amount > 0) {
+      doc.text(`Réduction admin : -${totals.admin_discount_amount.toFixed(2)} ${currency}`);
     }
     doc.text(
-      `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2,
-      )} ${currency}`,
+      `Total produits net : ${totals.discounted_items_amount.toFixed(2)} ${currency}`
     );
-    doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
+    doc.text(`Frais de livraison : ${totals.delivery_fee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
-    doc.fontSize(12).text(`TOTAL : ${totalAmount.toFixed(2)} ${currency}`);
+    doc.fontSize(12).text(`TOTAL : ${totals.amount.toFixed(2)} ${currency}`);
     doc.moveDown(0.6);
 
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
       );
     doc.moveDown();
 
@@ -3815,14 +3781,16 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
 router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
+  }
 
   const conn = await getPool().getConnection();
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200)
+    if (result.status !== 200) {
       return res.status(result.status).json({ error: result.error });
+    }
 
     const o = result.order;
     const items = result.items || [];
@@ -3834,27 +3802,27 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     const itemsAmount = items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
-    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
-    const deliveryFee = discountCols?.delivery_fee
-      ? Number(o.delivery_fee || 0)
-      : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
-    const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+    const isVendorView = isVendor(req.user) && !isAdmin(req.user);
+    const totals = computeOrderAmountsFromRow(
+      o,
+      discountCols,
+      itemsAmount,
+      { isVendorView }
     );
 
     const duuminiCommission = isCancelledStatus(o.status)
       ? 0
       : normCommission(o.commission_duumini) ??
-        computeDuuminiCommission(adminDiscount.discounted_items_amount);
+        computeDuuminiCommission(totals.discounted_items_amount);
 
     const token = o.receipt_token ? String(o.receipt_token) : null;
     const base = String(
       env.PUBLIC_WEB_BASE ||
         process.env.PUBLIC_WEB_BASE ||
-        "https://duumini.com",
+        "https://duumini.com"
     ).replace(/\/+$/, "");
     const verifyUrl = token ? `${base}/r/${token}` : `${base}/orders/${id}`;
 
@@ -3888,7 +3856,7 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`,
+      }`
     );
     doc.moveDown();
 
@@ -3923,8 +3891,8 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
       const suffix = variant ? ` (${variant})` : "";
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2,
-        )} ${currency}`,
+          2
+        )} ${currency}`
       );
     });
 
@@ -3933,25 +3901,23 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+      `Sous-total produits : ${totals.items_subtotal.toFixed(2)} ${currency}`
     );
-    if (adminDiscount.amount > 0) {
-      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+    if (totals.admin_discount_amount > 0) {
+      doc.text(`Réduction admin : -${totals.admin_discount_amount.toFixed(2)} ${currency}`);
     }
     doc.text(
-      `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2,
-      )} ${currency}`,
+      `Total produits net : ${totals.discounted_items_amount.toFixed(2)} ${currency}`
     );
-    doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
+    doc.text(`Frais de livraison : ${totals.delivery_fee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
-    doc.fontSize(12).text(`TOTAL : ${totalAmount.toFixed(2)} ${currency}`);
+    doc.fontSize(12).text(`TOTAL : ${totals.amount.toFixed(2)} ${currency}`);
     doc.moveDown(0.6);
 
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
       );
     doc.moveDown();
 
@@ -3972,23 +3938,21 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * ✅ SEND RECEIPT VIA WHATSAPP (ADMIN)
- * =======================*/
 router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
+  }
   if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
 
   const conn = await getPool().getConnection();
   try {
     const [[o]] = await conn.query(
-      `SELECT id, receipt_token, receipt_number, contact, total, currency
+      `SELECT id, receipt_token, receipt_number, contact, total, currency, items_subtotal, delivery_fee, admin_discount_amount
          FROM orders
         WHERE id = ?
         LIMIT 1`,
-      [id],
+      [id]
     );
     if (!o) return res.status(404).json({ error: "Not found" });
 
@@ -4010,7 +3974,7 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
     }
 
     const apiBase = String(
-      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || "",
+      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || ""
     ).replace(/\/+$/, "");
     if (!apiBase) {
       return res.status(409).json({
@@ -4019,6 +3983,14 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
           "Définis PUBLIC_API_BASE (ex: https://duumini-api.onrender.com) pour générer un lien public du PDF.",
       });
     }
+
+    const discountCols = await getOrdersDiscountColsCached(getPool());
+    const totals = computeOrderAmountsFromRow(
+      o,
+      discountCols,
+      Number(o.items_subtotal || 0),
+      { isVendorView: false }
+    );
 
     const pdfUrl = `${apiBase}/api/orders/receipt/${o.receipt_token}.pdf`;
 
@@ -4032,12 +4004,12 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
       to: phone,
       receiptNumber,
       displayCode,
-      total: Number(o.total || 0),
+      total: Number(totals.amount || 0),
       currency: (o.currency || "MAD").toUpperCase(),
       pdfUrl,
     });
 
-    return res.json({ ok: true, to: phone, pdfUrl });
+    return res.json({ ok: true, to: phone, pdfUrl, totals });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   } finally {
@@ -4045,30 +4017,30 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Update status
- * =======================*/
 router.put("/:id/status", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const { status } = req.body || {};
   const allowed = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
-  if (!allowed.includes(status))
+  if (!allowed.includes(status)) {
     return res.status(400).json({ error: "invalid status" });
+  }
 
   const pool = getPool();
 
   try {
     if (!isAdmin(req.user)) {
-      if (!isVendor(req.user))
+      if (!isVendor(req.user)) {
         return res.status(403).json({ error: "Forbidden" });
+      }
 
       const conn = await pool.getConnection();
       try {
         const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
-        if (!ok)
+        if (!ok) {
           return res
             .status(403)
             .json({ error: "Forbidden (multi-vendor order)" });
+        }
       } finally {
         conn.release();
       }
@@ -4076,12 +4048,12 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
     await pool.query(
       `UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`,
-      [status, id],
+      [status, id]
     );
 
     const [[order]] = await pool.query(
       `SELECT user_id FROM orders WHERE id=?`,
-      [id],
+      [id]
     );
     if (order && order.user_id) {
       const displayCode = buildDisplayCode(id);
@@ -4107,9 +4079,6 @@ router.put("/:id/status", authRequired, async (req, res) => {
   }
 });
 
-/* =========================
- * Cancel (restock)
- * =======================*/
 router.post("/:id/cancel", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const pool = getPool();
@@ -4143,7 +4112,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     const [items] = await conn.query(
       `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
-      [id],
+      [id]
     );
 
     for (const it of items) {
@@ -4153,12 +4122,12 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       if (it.variant_id) {
         await conn.query(
           `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.variant_id],
+          [qty, it.variant_id]
         );
       } else if (it.product_id) {
         await conn.query(
           `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.product_id],
+          [qty, it.product_id]
         );
       }
     }
@@ -4169,7 +4138,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
           commission_duumini = 0,
           updated_at=NOW()
     WHERE id=?`,
-      [id],
+      [id]
     );
 
     await conn.commit();
