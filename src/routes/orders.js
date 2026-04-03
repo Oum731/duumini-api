@@ -91,8 +91,9 @@ function enrichContactWithAddress(contact = {}, address = {}) {
 }
 
 function buildGeoLink(gps) {
-  if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number")
+  if (!gps || typeof gps.lat !== "number" || typeof gps.lng !== "number") {
     return null;
+  }
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
 }
 
@@ -100,8 +101,8 @@ function normPhone(p) {
   const raw = String(p || "").replace(/\s+/g, "");
   if (!raw) return null;
   if (raw.startsWith("+")) return raw;
-  if (raw.startsWith("00")) return "+" + raw.slice(2);
-  if (/^0\d{9,}$/.test(raw)) return "+212" + raw.slice(1);
+  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
+  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
   return raw;
 }
 
@@ -169,8 +170,7 @@ function buildContactFromPayload(c = {}) {
       c?.adresse ??
       c?.address ??
       null,
-    landmark:
-      c?.landmark ?? c?.repere ?? c?.reference ?? c?.note ?? null,
+    landmark: c?.landmark ?? c?.repere ?? c?.reference ?? c?.note ?? null,
     role: c?.role ?? null,
   };
 }
@@ -196,17 +196,13 @@ function stripCommissionFromOrderRow(row, user) {
 }
 
 function isCancelledStatus(s) {
-  return (
-    String(s || "")
-      .trim()
-      .toUpperCase() === "CANCELLED"
-  );
+  return String(s || "").trim().toUpperCase() === "CANCELLED";
 }
 
 function computeDuuminiCommission(itemsAmount) {
   const base = Number(itemsAmount || 0);
   if (!Number.isFinite(base) || base <= 0) return 0;
-  return +(+base * DUUMINI_COMMISSION_RATE).toFixed(2);
+  return +(base * DUUMINI_COMMISSION_RATE).toFixed(2);
 }
 
 function isBlank(v) {
@@ -237,15 +233,18 @@ async function detectUsersCols(conn) {
   ];
 
   const [rows] = await conn.query(
-    `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'users'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
   return {
     first_name: found.has("first_name"),
     last_name: found.has("last_name"),
@@ -264,6 +263,7 @@ async function detectUsersCols(conn) {
 
 async function getUsersColsCached(pool) {
   if (_usersColsLoaded) return _usersCols;
+
   const conn = await pool.getConnection();
   try {
     _usersCols = await detectUsersCols(conn);
@@ -274,25 +274,37 @@ async function getUsersColsCached(pool) {
   }
 }
 
-async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, addressObj = {}) {
+async function updateUserProfileFromAdminOrder(
+  conn,
+  userId,
+  contactObj = {},
+  addressObj = {}
+) {
   if (!userId) return;
+
   const usersCols = await getUsersColsCached(getPool());
 
   const sets = [];
   const vals = [];
 
-  const firstName = !isBlank(contactObj?.first_name) ? String(contactObj.first_name).trim() : null;
-  const lastName = !isBlank(contactObj?.last_name) ? String(contactObj.last_name).trim() : null;
+  const firstName = !isBlank(contactObj?.first_name)
+    ? String(contactObj.first_name).trim()
+    : null;
+  const lastName = !isBlank(contactObj?.last_name)
+    ? String(contactObj.last_name).trim()
+    : null;
   const phone = normPhone(contactObj?.phone);
 
   if (usersCols.first_name && firstName) {
     sets.push("first_name = ?");
     vals.push(firstName);
   }
+
   if (usersCols.last_name && lastName) {
     sets.push("last_name = ?");
     vals.push(lastName);
   }
+
   if (usersCols.phone && phone) {
     sets.push("phone = ?");
     vals.push(phone);
@@ -302,30 +314,37 @@ async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, ad
     sets.push("city = ?");
     vals.push(String(addressObj.city).trim());
   }
+
   if (usersCols.ville && !isBlank(addressObj?.city)) {
     sets.push("ville = ?");
     vals.push(String(addressObj.city).trim());
   }
+
   if (usersCols.commune && !isBlank(addressObj?.commune)) {
     sets.push("commune = ?");
     vals.push(String(addressObj.commune).trim());
   }
+
   if (usersCols.district && !isBlank(addressObj?.district)) {
     sets.push("district = ?");
     vals.push(String(addressObj.district).trim());
   }
+
   if (usersCols.quartier && !isBlank(addressObj?.district)) {
     sets.push("quartier = ?");
     vals.push(String(addressObj.district).trim());
   }
+
   if (usersCols.address_line && !isBlank(addressObj?.address_line)) {
     sets.push("address_line = ?");
     vals.push(String(addressObj.address_line).trim());
   }
+
   if (usersCols.address && !isBlank(addressObj?.address_line)) {
     sets.push("address = ?");
     vals.push(String(addressObj.address_line).trim());
   }
+
   if (usersCols.landmark && !isBlank(addressObj?.landmark)) {
     sets.push("landmark = ?");
     vals.push(String(addressObj.landmark).trim());
@@ -333,10 +352,10 @@ async function updateUserProfileFromAdminOrder(conn, userId, contactObj = {}, ad
 
   if (!sets.length) return;
 
-  await conn.query(
-    `UPDATE users SET ${sets.join(", ")} WHERE id = ?`,
-    [...vals, userId],
-  );
+  await conn.query(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [
+    ...vals,
+    userId,
+  ]);
 }
 
 /* =========================
@@ -350,6 +369,7 @@ function generateAutoPassword(phone) {
 
 async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   const phone = normPhone(contactObj?.phone);
+
   if (!phone) {
     const err = new Error("PHONE_REQUIRED");
     err.statusCode = 400;
@@ -369,7 +389,11 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     usersCols.last_name ? "last_name" : "NULL AS last_name",
     usersCols.phone ? "phone" : "NULL AS phone",
     usersCols.role ? "role" : "NULL AS role",
-    usersCols.city ? "city" : usersCols.ville ? "ville AS city" : "NULL AS city",
+    usersCols.city
+      ? "city"
+      : usersCols.ville
+        ? "ville AS city"
+        : "NULL AS city",
     usersCols.commune ? "commune" : "NULL AS commune",
     usersCols.district
       ? "district"
@@ -386,25 +410,30 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
 
   const [[existing]] = await conn.query(
     `
-    SELECT ${selectCols.join(", ")}
-    FROM users
-    WHERE phone = ?
-    LIMIT 1
+      SELECT ${selectCols.join(", ")}
+      FROM users
+      WHERE phone = ?
+      LIMIT 1
     `,
-    [phone],
+    [phone]
   );
 
   if (existing) {
-    await updateUserProfileFromAdminOrder(conn, existing.id, contactObj, addressObj);
+    await updateUserProfileFromAdminOrder(
+      conn,
+      existing.id,
+      contactObj,
+      addressObj
+    );
 
     const [[updated]] = await conn.query(
       `
-      SELECT ${selectCols.join(", ")}
-      FROM users
-      WHERE id = ?
-      LIMIT 1
+        SELECT ${selectCols.join(", ")}
+        FROM users
+        WHERE id = ?
+        LIMIT 1
       `,
-      [existing.id],
+      [existing.id]
     );
 
     return {
@@ -428,10 +457,8 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   const plainPassword = generateAutoPassword(phone);
   const passwordHash = await bcrypt.hash(plainPassword, 10);
 
-  const firstName =
-    String(contactObj?.first_name || "Client").trim() || "Client";
-  const lastName =
-    String(contactObj?.last_name || "Duumini").trim() || "Duumini";
+  const firstName = String(contactObj?.first_name || "Client").trim() || "Client";
+  const lastName = String(contactObj?.last_name || "Duumini").trim() || "Duumini";
 
   const insertCols = [];
   const insertVals = [];
@@ -470,36 +497,43 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     insertVals.push(String(addressObj.city).trim());
     insertQs.push("?");
   }
+
   if (usersCols.ville && !isBlank(addressObj?.city)) {
     insertCols.push("ville");
     insertVals.push(String(addressObj.city).trim());
     insertQs.push("?");
   }
+
   if (usersCols.commune && !isBlank(addressObj?.commune)) {
     insertCols.push("commune");
     insertVals.push(String(addressObj.commune).trim());
     insertQs.push("?");
   }
+
   if (usersCols.district && !isBlank(addressObj?.district)) {
     insertCols.push("district");
     insertVals.push(String(addressObj.district).trim());
     insertQs.push("?");
   }
+
   if (usersCols.quartier && !isBlank(addressObj?.district)) {
     insertCols.push("quartier");
     insertVals.push(String(addressObj.district).trim());
     insertQs.push("?");
   }
+
   if (usersCols.address_line && !isBlank(addressObj?.address_line)) {
     insertCols.push("address_line");
     insertVals.push(String(addressObj.address_line).trim());
     insertQs.push("?");
   }
+
   if (usersCols.address && !isBlank(addressObj?.address_line)) {
     insertCols.push("address");
     insertVals.push(String(addressObj.address_line).trim());
     insertQs.push("?");
   }
+
   if (usersCols.landmark && !isBlank(addressObj?.landmark)) {
     insertCols.push("landmark");
     insertVals.push(String(addressObj.landmark).trim());
@@ -508,10 +542,10 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
 
   const [result] = await conn.query(
     `
-    INSERT INTO users (${insertCols.join(", ")})
-    VALUES (${insertQs.join(", ")})
+      INSERT INTO users (${insertCols.join(", ")})
+      VALUES (${insertQs.join(", ")})
     `,
-    insertVals,
+    insertVals
   );
 
   return {
@@ -604,15 +638,20 @@ function formatReceiptNumber(orderId, createdAt = null) {
 
 async function detectOrdersReceiptCols(conn) {
   const candidates = ["receipt_number", "receipt_token"];
+
   const [rows] = await conn.query(
-    `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates
   );
+
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
   return {
     receipt_number: found.has("receipt_number"),
     receipt_token: found.has("receipt_token"),
@@ -635,15 +674,20 @@ async function detectOrdersDiscountCols(conn) {
     "admin_discount_label",
     "discounted_by_admin_id",
   ];
+
   const [rows] = await conn.query(
-    `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates
   );
+
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
   return {
     items_subtotal: found.has("items_subtotal"),
     delivery_fee: found.has("delivery_fee"),
@@ -657,6 +701,7 @@ async function detectOrdersDiscountCols(conn) {
 
 async function getOrdersDiscountColsCached(pool) {
   if (_ordersDiscountColsLoaded) return _ordersDiscountCols;
+
   const conn = await pool.getConnection();
   try {
     _ordersDiscountCols = await detectOrdersDiscountCols(conn);
@@ -711,16 +756,16 @@ function buildAdminDiscountForRow(row, discountCols, itemsSubtotalFallback) {
 async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
   const [[r]] = await conn.query(
     `
-    SELECT
-      SUM(CASE WHEN s.owner_id = ? THEN 1 ELSE 0 END) AS mine_count,
-      COUNT(*) AS total_count,
-      COUNT(DISTINCT s.owner_id) AS vendors_count
-    FROM order_items oi
-    JOIN products p ON p.id = oi.product_id
-    JOIN shops s    ON s.id = p.shop_id
-    WHERE oi.order_id = ?
+      SELECT
+        SUM(CASE WHEN s.owner_id = ? THEN 1 ELSE 0 END) AS mine_count,
+        COUNT(*) AS total_count,
+        COUNT(DISTINCT s.owner_id) AS vendors_count
+      FROM order_items oi
+      JOIN products p ON p.id = oi.product_id
+      JOIN shops s ON s.id = p.shop_id
+      WHERE oi.order_id = ?
     `,
-    [vendorId, orderId],
+    [vendorId, orderId]
   );
 
   const mine = Number(r?.mine_count || 0);
@@ -740,7 +785,11 @@ async function getOrderWithPerm(conn, id, user) {
     usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
     usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
     usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
-    usersCols.city ? "u.city AS u_city" : usersCols.ville ? "u.ville AS u_city" : "NULL AS u_city",
+    usersCols.city
+      ? "u.city AS u_city"
+      : usersCols.ville
+        ? "u.ville AS u_city"
+        : "NULL AS u_city",
     usersCols.commune ? "u.commune AS u_commune" : "NULL AS u_commune",
     usersCols.district
       ? "u.district AS u_district"
@@ -757,15 +806,15 @@ async function getOrderWithPerm(conn, id, user) {
 
   const [[orderRaw]] = await conn.query(
     `
-    SELECT
-      o.*,
-      ${userSelectCols.join(", ")}
-    FROM orders o
-    LEFT JOIN users u ON u.id = o.user_id
-    WHERE o.id = ?
-    LIMIT 1
+      SELECT
+        o.*,
+        ${userSelectCols.join(", ")}
+      FROM orders o
+      LEFT JOIN users u ON u.id = o.user_id
+      WHERE o.id = ?
+      LIMIT 1
     `,
-    [id],
+    [id]
   );
 
   if (!orderRaw) return { status: 404, error: "Not found" };
@@ -774,31 +823,31 @@ async function getOrderWithPerm(conn, id, user) {
     if (isVendor(user)) {
       const [[own]] = await conn.query(
         `
-        SELECT 1
-        FROM order_items oi
-        JOIN products p ON p.id = oi.product_id
-        JOIN shops s    ON s.id = p.shop_id
-        WHERE oi.order_id = ? AND s.owner_id = ?
-        LIMIT 1
+          SELECT 1
+          FROM order_items oi
+          JOIN products p ON p.id = oi.product_id
+          JOIN shops s ON s.id = p.shop_id
+          WHERE oi.order_id = ? AND s.owner_id = ?
+          LIMIT 1
         `,
-        [id, user.id],
+        [id, user.id]
       );
+
       if (!own) return { status: 403, error: "Forbidden" };
-    } else {
-      if (String(orderRaw.user_id) !== String(user.id))
-        return { status: 403, error: "Forbidden" };
+    } else if (String(orderRaw.user_id) !== String(user.id)) {
+      return { status: 403, error: "Forbidden" };
     }
   }
 
   const order = stripCommissionFromOrderRow(orderRaw, user);
 
   let itemsSql = `
-    SELECT 
+    SELECT
       oi.*,
       p.name AS product_name,
-      pv.size  AS variant_size,
+      pv.size AS variant_size,
       pv.color AS variant_color,
-      pv.sku   AS variant_sku,
+      pv.sku AS variant_sku,
       (
         SELECT pi.url
         FROM product_images pi
@@ -812,6 +861,7 @@ async function getOrderWithPerm(conn, id, user) {
   `;
 
   const params = [];
+
   if (isVendor(user) && !isAdmin(user)) {
     itemsSql += `
       LEFT JOIN shops s ON s.id = p.shop_id
@@ -832,10 +882,12 @@ async function getOrderWithPerm(conn, id, user) {
 /* ========= Notifications ========= */
 async function getAdminUserIds() {
   const [rows] = await getPool().query(
-    `SELECT id 
-       FROM users 
+    `
+      SELECT id
+      FROM users
       WHERE role = 'ADMIN'
-        AND (is_active = 1 OR is_active IS NULL)`,
+        AND (is_active = 1 OR is_active IS NULL)
+    `
   );
   return (rows || []).map((r) => r.id);
 }
@@ -843,15 +895,15 @@ async function getAdminUserIds() {
 async function getVendorsForOrder(orderId) {
   const [rows] = await getPool().query(
     `
-    SELECT DISTINCT u.id AS user_id
+      SELECT DISTINCT u.id AS user_id
       FROM order_items oi
       JOIN products p ON p.id = oi.product_id
-      JOIN shops   s ON s.id = p.shop_id
-      JOIN users   u ON u.id = s.owner_id
-     WHERE oi.order_id = ?
-       AND (u.is_active = 1 OR u.is_active IS NULL)
+      JOIN shops s ON s.id = p.shop_id
+      JOIN users u ON u.id = s.owner_id
+      WHERE oi.order_id = ?
+        AND (u.is_active = 1 OR u.is_active IS NULL)
     `,
-    [orderId],
+    [orderId]
   );
   return (rows || []).map((r) => r.user_id);
 }
@@ -861,9 +913,8 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     getAdminUserIds(),
     getVendorsForOrder(orderId),
   ]);
-  const allUserIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
-  );
+
+  const allUserIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
   if (!allUserIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -881,19 +932,14 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   };
 
   const payload = JSON.stringify(payloadObj);
-  const values = allUserIds.map((uid) => [
-    uid,
-    "ORDER_CREATED",
-    payload,
-    "queued",
-  ]);
+  const values = allUserIds.map((uid) => [uid, "ORDER_CREATED", payload, "queued"]);
 
   await getPool().query(
     `
-    INSERT INTO notification_queue (user_id, type, payload, status)
-    VALUES ?
+      INSERT INTO notification_queue (user_id, type, payload, status)
+      VALUES ?
     `,
-    [values],
+    [values]
   );
 }
 
@@ -909,9 +955,8 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
     getAdminUserIds(),
     getVendorsForOrder(orderId),
   ]);
-  const userIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
-  );
+
+  const userIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
   if (!userIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -930,18 +975,20 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
 
   await Promise.all(
     userIds.map((uid) =>
-      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false }),
-    ),
+      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false })
+    )
   );
 }
 
 async function enqueueOrderStatusForClient(orderId, status) {
   const [[row]] = await getPool().query(
-    `SELECT user_id, total, currency
-       FROM orders
+    `
+      SELECT user_id, total, currency
+      FROM orders
       WHERE id = ?
-      LIMIT 1`,
-    [orderId],
+      LIMIT 1
+    `,
+    [orderId]
   );
 
   if (!row || !row.user_id) return;
@@ -962,10 +1009,10 @@ async function enqueueOrderStatusForClient(orderId, status) {
 
   await getPool().query(
     `
-    INSERT INTO notification_queue (user_id, type, payload, status)
-    VALUES (?, 'ORDER_STATUS', ?, 'queued')
+      INSERT INTO notification_queue (user_id, type, payload, status)
+      VALUES (?, 'ORDER_STATUS', ?, 'queued')
     `,
-    [row.user_id, JSON.stringify(payloadObj)],
+    [row.user_id, JSON.stringify(payloadObj)]
   );
 }
 
@@ -986,27 +1033,28 @@ async function sendAdminWhatsAppForOrder({
     env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM
   );
   if (!hasFrom) return;
-  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:"))
+  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) {
     return;
+  }
 
   let details = "";
 
   try {
     const [rows] = await pool.query(
       `
-      SELECT 
-        oi.qty,
-        oi.unit_price,
-        p.name AS product_name,
-        pv.size AS v_size,
-        pv.color AS v_color
-      FROM order_items oi
-      JOIN products p ON p.id = oi.product_id
-      LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-      WHERE oi.order_id = ?
-      ORDER BY oi.id ASC
+        SELECT
+          oi.qty,
+          oi.unit_price,
+          p.name AS product_name,
+          pv.size AS v_size,
+          pv.color AS v_color
+        FROM order_items oi
+        JOIN products p ON p.id = oi.product_id
+        LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+        WHERE oi.order_id = ?
+        ORDER BY oi.id ASC
       `,
-      [orderId],
+      [orderId]
     );
 
     if (rows && rows.length) {
@@ -1028,9 +1076,7 @@ async function sendAdminWhatsAppForOrder({
           const label = it?.name || `Produit #${it?.product_id || ""}`.trim();
           const qty = it?.qty || 1;
           const price =
-            it?.price != null
-              ? `${it.price} ${(currency || "MAD").toUpperCase()}`
-              : "";
+            it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
           return `• ${label} ×${qty}${price ? ` — ${price}` : ""}`;
         })
         .join("\n");
@@ -1038,17 +1084,18 @@ async function sendAdminWhatsAppForOrder({
   }
 
   let firstProductImage = null;
+
   try {
     const [[rowImg]] = await pool.query(
       `
-      SELECT pi.url
-      FROM order_items oi
-      JOIN product_images pi ON pi.product_id = oi.product_id
-      WHERE oi.order_id = ?
-      ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
-      LIMIT 1
+        SELECT pi.url
+        FROM order_items oi
+        JOIN product_images pi ON pi.product_id = oi.product_id
+        WHERE oi.order_id = ?
+        ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+        LIMIT 1
       `,
-      [orderId],
+      [orderId]
     );
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
   } catch {}
@@ -1093,9 +1140,7 @@ function parseVariantId(x) {
  * PROMO helpers
  * =======================*/
 function normalizePromoType(value) {
-  const t = String(value || "")
-    .trim()
-    .toUpperCase();
+  const t = String(value || "").trim().toUpperCase();
   if (t === "AMOUNT") return "AMOUNT";
   if (t === "PERCENT") return "PERCENT";
   return "PERCENT";
@@ -1123,6 +1168,7 @@ function computePromoPrice(basePrice, promoEligible, type, value) {
 
 function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   const base = Number(baseUnitPrice || 0);
+
   if (!Number.isFinite(base) || base < 0) {
     return {
       base_unit_price: 0,
@@ -1149,6 +1195,7 @@ function calcLineUnitPriceWithPromo({ baseUnitPrice, p }) {
   }
 
   const promoPrice = computePromoPrice(base, true, promoType, promoValue);
+
   if (promoPrice == null) {
     return {
       base_unit_price: +base.toFixed(2),
@@ -1181,15 +1228,20 @@ async function detectOrderItemsPromoCols(conn) {
     "promo_value",
     "base_unit_price",
   ];
+
   const [rows] = await conn.query(
-    `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'order_items'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates
   );
+
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
   return {
     promo_applied: found.has("promo_applied"),
     promo_type: found.has("promo_type"),
@@ -1200,6 +1252,7 @@ async function detectOrderItemsPromoCols(conn) {
 
 async function getOrderItemsPromoColsCached(pool) {
   if (_orderItemsPromoColsLoaded) return _orderItemsPromoCols;
+
   const conn = await pool.getConnection();
   try {
     _orderItemsPromoCols = await detectOrderItemsPromoCols(conn);
@@ -1223,15 +1276,20 @@ async function detectOrdersPayCols(conn) {
     "paid_amount",
     "remaining_amount",
   ];
+
   const [rows] = await conn.query(
-    `SELECT COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'orders'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
-    candidates,
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates
   );
+
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
   return {
     payment: found.has("payment"),
     payment_status: found.has("payment_status"),
@@ -1242,6 +1300,7 @@ async function detectOrdersPayCols(conn) {
 
 async function getOrdersPayColsCached(pool) {
   if (_ordersPayColsLoaded) return _ordersPayCols;
+
   const conn = await pool.getConnection();
   try {
     _ordersPayCols = await detectOrdersPayCols(conn);
@@ -1259,18 +1318,15 @@ function normMoney(x) {
 }
 
 function normPayStatus(s) {
-  const v = String(s || "")
-    .trim()
-    .toUpperCase();
-  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING")
+  const v = String(s || "").trim().toUpperCase();
+  if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") {
     return v;
+  }
   return null;
 }
 
 function isBankTransferMethod(m) {
-  const v = String(m || "")
-    .trim()
-    .toUpperCase();
+  const v = String(m || "").trim().toUpperCase();
   return (
     v === "BANK_TRANSFER" ||
     v === "BANK" ||
@@ -1290,7 +1346,7 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
 
   const paid = Math.min(
     normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0),
-    total,
+    total
   );
   const remaining = Math.max(0, total - paid);
 
@@ -1375,18 +1431,18 @@ function normalizePaymentForRow(row, orderTotal, currency, payCols) {
 async function lockProductForItem(conn, productId) {
   const [[p]] = await conn.query(
     `
-    SELECT
-      p.id,
-      p.price,
-      p.stock,
-      p.shop_id,
-      p.promo_eligible,
-      p.promo_discount_type,
-      p.promo_discount_value
-    FROM products p
-    WHERE p.id=? FOR UPDATE
+      SELECT
+        p.id,
+        p.price,
+        p.stock,
+        p.shop_id,
+        p.promo_eligible,
+        p.promo_discount_type,
+        p.promo_discount_value
+      FROM products p
+      WHERE p.id = ? FOR UPDATE
     `,
-    [productId],
+    [productId]
   );
   return p || null;
 }
@@ -1394,19 +1450,19 @@ async function lockProductForItem(conn, productId) {
 async function lockVariantForItem(conn, productId, variantId) {
   const [[v]] = await conn.query(
     `
-    SELECT
-      pv.id,
-      pv.product_id,
-      pv.stock,
-      pv.price_override,
-      pv.is_active,
-      pv.size,
-      pv.color,
-      pv.sku
-    FROM product_variants pv
-    WHERE pv.id=? AND pv.product_id=? FOR UPDATE
+      SELECT
+        pv.id,
+        pv.product_id,
+        pv.stock,
+        pv.price_override,
+        pv.is_active,
+        pv.size,
+        pv.color,
+        pv.sku
+      FROM product_variants pv
+      WHERE pv.id = ? AND pv.product_id = ? FOR UPDATE
     `,
-    [variantId, productId],
+    [variantId, productId]
   );
   return v || null;
 }
@@ -1429,7 +1485,9 @@ function parseStatusesQuery(req) {
       .map((s) => String(s).trim().toUpperCase())
       .filter(Boolean);
   } else if (Array.isArray(rawArray)) {
-    list = rawArray.map((s) => String(s).trim().toUpperCase()).filter(Boolean);
+    list = rawArray
+      .map((s) => String(s).trim().toUpperCase())
+      .filter(Boolean);
   } else if (rawArray != null) {
     list = String(rawArray)
       .split(",")
@@ -1445,10 +1503,14 @@ function parseStatusesQuery(req) {
 }
 
 function buildStatusWhere(statuses) {
-  if (!Array.isArray(statuses) || statuses.length === 0)
+  if (!Array.isArray(statuses) || statuses.length === 0) {
     return { sql: "", params: [] };
-  if (statuses.length === 1)
+  }
+
+  if (statuses.length === 1) {
     return { sql: " AND o.status = ?", params: [statuses[0]] };
+  }
+
   return {
     sql: ` AND o.status IN (${statuses.map(() => "?").join(",")})`,
     params: [...statuses],
@@ -1494,7 +1556,7 @@ router.get("/", authRequired, async (req, res) => {
       usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
     ];
 
-    const mapRowToItem = (r, user, payCols, discountCols) => {
+    const mapRowToItem = (r, user, payColsArg, discountColsArg) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
 
@@ -1532,11 +1594,15 @@ router.get("/", authRequired, async (req, res) => {
       const itemsAmount = Number(r.items_amount || 0);
       const currency = (r.currency || "MAD").toUpperCase();
 
-      const adminDiscount = buildAdminDiscountForRow(r, discountCols, itemsAmount);
+      const adminDiscount = buildAdminDiscountForRow(
+        r,
+        discountColsArg,
+        itemsAmount
+      );
 
       const deliveryFee = isVendorView
         ? 0
-        : discountCols?.delivery_fee
+        : discountColsArg?.delivery_fee
           ? Number(r.delivery_fee || 0)
           : Math.max(0, Number(r.total || itemsAmount) - itemsAmount);
 
@@ -1548,7 +1614,7 @@ router.get("/", authRequired, async (req, res) => {
         r,
         totalAmount,
         currency,
-        payCols,
+        payColsArg
       );
 
       const duuminiCommissionRaw = isCancelledStatus(r.status)
@@ -1622,40 +1688,41 @@ router.get("/", authRequired, async (req, res) => {
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
-          o.*,
-          ${userSelectCols.join(", ")},
-          (
-            SELECT SUM(oi2.qty * oi2.unit_price)
-            FROM order_items oi2
-            WHERE oi2.order_id = o.id
-          ) AS items_amount,
-          (
-            SELECT pi.url
-            FROM order_items oi
-            JOIN product_images pi ON pi.product_id = oi.product_id
-            WHERE oi.order_id = o.id
-            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
-            LIMIT 1
-          ) AS first_product_cover
-        FROM orders o
-        LEFT JOIN users u ON u.id = o.user_id
-        WHERE ${where}
-        ORDER BY o.created_at DESC
-        LIMIT ? OFFSET ?
+          SELECT
+            o.*,
+            ${userSelectCols.join(", ")},
+            (
+              SELECT SUM(oi2.qty * oi2.unit_price)
+              FROM order_items oi2
+              WHERE oi2.order_id = o.id
+            ) AS items_amount,
+            (
+              SELECT pi.url
+              FROM order_items oi
+              JOIN product_images pi ON pi.product_id = oi.product_id
+              WHERE oi.order_id = o.id
+              ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+              LIMIT 1
+            ) AS first_product_cover
+          FROM orders o
+          LEFT JOIN users u ON u.id = o.user_id
+          WHERE ${where}
+          ORDER BY o.created_at DESC
+          LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
       const items = rows.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
+
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
@@ -1677,39 +1744,40 @@ router.get("/", authRequired, async (req, res) => {
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
-          o.*,
-          ${userSelectCols.join(", ")},
-          (
-            SELECT SUM(oi2.qty * oi2.unit_price)
-            FROM order_items oi2
-            WHERE oi2.order_id = o.id
-          ) AS items_amount,
-          (
-            SELECT pi.url
-            FROM order_items oi
-            JOIN product_images pi ON pi.product_id = oi.product_id
-            WHERE oi.order_id = o.id
-            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
-            LIMIT 1
-          ) AS first_product_cover
-        FROM orders o
-        LEFT JOIN users u ON u.id = o.user_id
-        WHERE ${where}
-        ORDER BY o.created_at DESC
-        LIMIT ? OFFSET ?
+          SELECT
+            o.*,
+            ${userSelectCols.join(", ")},
+            (
+              SELECT SUM(oi2.qty * oi2.unit_price)
+              FROM order_items oi2
+              WHERE oi2.order_id = o.id
+            ) AS items_amount,
+            (
+              SELECT pi.url
+              FROM order_items oi
+              JOIN product_images pi ON pi.product_id = oi.product_id
+              WHERE oi.order_id = o.id
+              ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+              LIMIT 1
+            ) AS first_product_cover
+          FROM orders o
+          LEFT JOIN users u ON u.id = o.user_id
+          WHERE ${where}
+          ORDER BY o.created_at DESC
+          LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset],
+        [...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
+
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
@@ -1731,56 +1799,57 @@ router.get("/", authRequired, async (req, res) => {
 
       const [[{ total }]] = await pool.query(
         `
-        SELECT COUNT(DISTINCT o.id) AS total
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        JOIN products p     ON p.id = oi.product_id
-        JOIN shops s        ON s.id = p.shop_id
-        WHERE ${where}
+          SELECT COUNT(DISTINCT o.id) AS total
+          FROM orders o
+          JOIN order_items oi ON oi.order_id = o.id
+          JOIN products p ON p.id = oi.product_id
+          JOIN shops s ON s.id = p.shop_id
+          WHERE ${where}
         `,
-        params,
+        params
       );
 
       const [rowsRaw] = await pool.query(
         `
-        SELECT 
-          o.*,
-          ${userSelectCols.join(", ")},
-          (
-            SELECT SUM(oi_mine.qty * oi_mine.unit_price)
-            FROM order_items oi_mine
-            JOIN products p_mine ON p_mine.id = oi_mine.product_id
-            JOIN shops s_mine    ON s_mine.id = p_mine.shop_id
-            WHERE oi_mine.order_id = o.id
-              AND s_mine.owner_id = ?
-          ) AS items_amount,
-          (
-            SELECT pi.url
-            FROM order_items oi2
-            JOIN products p2       ON p2.id = oi2.product_id
-            JOIN shops s2          ON s2.id = p2.shop_id
-            JOIN product_images pi ON pi.product_id = p2.id
-            WHERE oi2.order_id = o.id
-              AND s2.owner_id = ?
-            ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
-            LIMIT 1
-          ) AS first_product_cover
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        JOIN products p     ON p.id = oi.product_id
-        JOIN shops s        ON s.id = p.shop_id
-        LEFT JOIN users u   ON u.id = o.user_id
-        WHERE ${where}
-        GROUP BY o.id
-        ORDER BY o.created_at DESC
-        LIMIT ? OFFSET ?
+          SELECT
+            o.*,
+            ${userSelectCols.join(", ")},
+            (
+              SELECT SUM(oi_mine.qty * oi_mine.unit_price)
+              FROM order_items oi_mine
+              JOIN products p_mine ON p_mine.id = oi_mine.product_id
+              JOIN shops s_mine ON s_mine.id = p_mine.shop_id
+              WHERE oi_mine.order_id = o.id
+                AND s_mine.owner_id = ?
+            ) AS items_amount,
+            (
+              SELECT pi.url
+              FROM order_items oi2
+              JOIN products p2 ON p2.id = oi2.product_id
+              JOIN shops s2 ON s2.id = p2.shop_id
+              JOIN product_images pi ON pi.product_id = p2.id
+              WHERE oi2.order_id = o.id
+                AND s2.owner_id = ?
+              ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
+              LIMIT 1
+            ) AS first_product_cover
+          FROM orders o
+          JOIN order_items oi ON oi.order_id = o.id
+          JOIN products p ON p.id = oi.product_id
+          JOIN shops s ON s.id = p.shop_id
+          LEFT JOIN users u ON u.id = o.user_id
+          WHERE ${where}
+          GROUP BY o.id
+          ORDER BY o.created_at DESC
+          LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, ...params, limit, offset],
+        [req.user.id, req.user.id, ...params, limit, offset]
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols),
+        mapRowToItem(r, req.user, payCols, discountCols)
       );
+
       return res.json({
         items,
         pageInfo: buildPageInfo(total, page, pageSize),
@@ -1801,43 +1870,47 @@ router.get("/", authRequired, async (req, res) => {
 
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-      params,
+      params
     );
 
     const [rowsRaw] = await pool.query(
       `
-      SELECT 
-        o.*,
-        ${userSelectCols.join(", ")},
-        (
-          SELECT SUM(oi2.qty * oi2.unit_price)
-          FROM order_items oi2
-          WHERE oi2.order_id = o.id
-        ) AS items_amount,
-        (
-          SELECT pi.url
-          FROM order_items oi
-          JOIN product_images pi ON pi.product_id = oi.product_id
-          WHERE oi.order_id = o.id
-          ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
-          LIMIT 1
-        ) AS first_product_cover
-      FROM orders o
-      LEFT JOIN users u ON u.id = o.user_id
-      WHERE ${where}
-      ORDER BY o.created_at DESC
-      LIMIT ? OFFSET ?
+        SELECT
+          o.*,
+          ${userSelectCols.join(", ")},
+          (
+            SELECT SUM(oi2.qty * oi2.unit_price)
+            FROM order_items oi2
+            WHERE oi2.order_id = o.id
+          ) AS items_amount,
+          (
+            SELECT pi.url
+            FROM order_items oi
+            JOIN product_images pi ON pi.product_id = oi.product_id
+            WHERE oi.order_id = o.id
+            ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS first_product_cover
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
+        WHERE ${where}
+        ORDER BY o.created_at DESC
+        LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset],
+      [...params, limit, offset]
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
     const items = rows.map((r) =>
-      mapRowToItem(r, req.user, payCols, discountCols),
+      mapRowToItem(r, req.user, payCols, discountCols)
     );
-    return res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
+
+    return res.json({
+      items,
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -1864,8 +1937,9 @@ async function buildCleanItemsWithPromo({ conn, items }) {
     }
 
     const p = await lockProductForItem(conn, product_id);
+
     if (!p) {
-      const err = new Error("Product not found: " + product_id);
+      const err = new Error(`Product not found: ${product_id}`);
       err.statusCode = 400;
       err.payload = {
         code: "PRODUCT_NOT_FOUND",
@@ -1882,6 +1956,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 
     if (variant_id) {
       const v = await lockVariantForItem(conn, product_id, variant_id);
+
       if (!v || Number(v.is_active || 0) !== 1) {
         const err = new Error("VARIANT_NOT_FOUND");
         err.statusCode = 400;
@@ -1913,6 +1988,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       baseUnitPrice: base_unit_price,
       p,
     });
+
     const unit_price = promoPack.unit_price;
 
     cleanItems.push({
@@ -1941,9 +2017,14 @@ async function buildCleanItemsWithPromo({ conn, items }) {
  * =======================*/
 router.put("/:id/payment", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const pool = getPool();
 
@@ -1963,11 +2044,11 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       });
     }
 
-    const mode = String(req.body?.mode || "ADD")
-      .trim()
-      .toUpperCase();
-    if (mode !== "SET" && mode !== "ADD")
+    const mode = String(req.body?.mode || "ADD").trim().toUpperCase();
+
+    if (mode !== "SET" && mode !== "ADD") {
       return res.status(400).json({ error: "invalid mode (SET|ADD)" });
+    }
 
     const add_amount = req.body?.add_amount ?? req.body?.addAmount ?? null;
     const paid_amount =
@@ -1976,30 +2057,34 @@ router.put("/:id/payment", authRequired, async (req, res) => {
     const method = req.body?.method
       ? String(req.body.method).toUpperCase()
       : null;
+
     const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
 
     if (mode === "ADD") {
       const v = Number(add_amount);
-      if (!Number.isFinite(v) || v <= 0)
+      if (!Number.isFinite(v) || v <= 0) {
         return res.status(400).json({ error: "add_amount required" });
+      }
     } else {
       const v = Number(paid_amount);
-      if (!Number.isFinite(v) || v < 0)
+      if (!Number.isFinite(v) || v < 0) {
         return res.status(400).json({ error: "paid_amount required" });
+      }
     }
 
     const conn = await pool.getConnection();
+
     try {
       await conn.beginTransaction();
 
       const [[o]] = await conn.query(
         `
-        SELECT id, status, total, currency, payment, paid_amount
-        FROM orders
-        WHERE id = ?
-        FOR UPDATE
+          SELECT id, status, total, currency, payment, paid_amount
+          FROM orders
+          WHERE id = ?
+          FOR UPDATE
         `,
-        [id],
+        [id]
       );
 
       if (!o) {
@@ -2016,12 +2101,14 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         : Number(currentPayment.paid_amount || 0) || 0;
 
       let nextPaid = currentPaid;
+
       if (mode === "ADD") nextPaid = currentPaid + Number(add_amount || 0);
       else nextPaid = Number(paid_amount || 0);
 
       if (!Number.isFinite(nextPaid) || nextPaid < 0) nextPaid = 0;
-      if (Number.isFinite(total) && total >= 0)
+      if (Number.isFinite(total) && total >= 0) {
         nextPaid = Math.min(nextPaid, total);
+      }
 
       const merged = {
         ...currentPayment,
@@ -2039,20 +2126,24 @@ router.put("/:id/payment", authRequired, async (req, res) => {
         sets.push("payment = ?");
         vals.push(JSON.stringify(paymentObj));
       }
+
       if (payCols.payment_status) {
         sets.push("payment_status = ?");
         vals.push(paymentObj.status);
       }
+
       if (payCols.paid_amount) {
         sets.push("paid_amount = ?");
         vals.push(paymentObj.paid_amount);
       }
+
       if (payCols.remaining_amount) {
         sets.push("remaining_amount = ?");
         vals.push(paymentObj.remaining_amount);
       }
 
       sets.push("updated_at = NOW()");
+
       await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [
         ...vals,
         id,
@@ -2086,9 +2177,14 @@ router.put("/:id/payment", authRequired, async (req, res) => {
  * =======================*/
 router.put("/:id/admin-discount", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const pool = getPool();
 
@@ -2112,17 +2208,18 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
     }
 
     const conn = await pool.getConnection();
+
     try {
       await conn.beginTransaction();
 
       const [[o]] = await conn.query(
         `
-        SELECT *
-        FROM orders
-        WHERE id = ?
-        FOR UPDATE
+          SELECT *
+          FROM orders
+          WHERE id = ?
+          FOR UPDATE
         `,
-        [id],
+        [id]
       );
 
       if (!o) {
@@ -2146,18 +2243,20 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
       const discountInput = normalizeAdminDiscount(req.body?.admin_discount);
       const adminDiscountAmount = computeAdminDiscountAmount(
         itemsSubtotal,
-        discountInput,
+        discountInput
       );
 
       const discountedItemsAmount = Math.max(
         0,
-        itemsSubtotal - adminDiscountAmount,
+        itemsSubtotal - adminDiscountAmount
       );
       const newTotal = +(discountedItemsAmount + deliveryFee).toFixed(2);
       const newCommission = computeDuuminiCommission(discountedItemsAmount);
 
       const currentPayment = safeParseJSON(o.payment) || {};
-      const currentPaid = normMoney(o.paid_amount ?? currentPayment.paid_amount ?? 0);
+      const currentPaid = normMoney(
+        o.paid_amount ?? currentPayment.paid_amount ?? 0
+      );
       const safePaid = Math.min(currentPaid, newTotal);
 
       const paymentObj = buildPaymentFromPayload(
@@ -2166,7 +2265,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
           paid_amount: safePaid,
         },
         newTotal,
-        currency,
+        currency
       );
 
       const sets = [
@@ -2194,23 +2293,26 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
         sets.push("payment = ?");
         vals.push(JSON.stringify(paymentObj));
       }
+
       if (payCols?.payment_status) {
         sets.push("payment_status = ?");
         vals.push(paymentObj.status);
       }
+
       if (payCols?.paid_amount) {
         sets.push("paid_amount = ?");
         vals.push(paymentObj.paid_amount);
       }
+
       if (payCols?.remaining_amount) {
         sets.push("remaining_amount = ?");
         vals.push(paymentObj.remaining_amount);
       }
 
-      await conn.query(
-        `UPDATE orders SET ${sets.join(", ")} WHERE id = ?`,
-        [...vals, id],
-      );
+      await conn.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [
+        ...vals,
+        id,
+      ]);
 
       await conn.commit();
 
@@ -2302,13 +2404,18 @@ router.post("/admin", authRequired, async (req, res) => {
 
     if (hasUser) {
       const usersCols = await getUsersColsCached(pool);
+
       const userSelectCols = [
         "id",
         usersCols.first_name ? "first_name" : "NULL AS first_name",
         usersCols.last_name ? "last_name" : "NULL AS last_name",
         usersCols.phone ? "phone" : "NULL AS phone",
         usersCols.role ? "role" : "NULL AS role",
-        usersCols.city ? "city" : usersCols.ville ? "ville AS city" : "NULL AS city",
+        usersCols.city
+          ? "city"
+          : usersCols.ville
+            ? "ville AS city"
+            : "NULL AS city",
         usersCols.commune ? "commune" : "NULL AS commune",
         usersCols.district
           ? "district"
@@ -2324,11 +2431,13 @@ router.post("/admin", authRequired, async (req, res) => {
       ];
 
       const [[row]] = await conn.query(
-        `SELECT ${userSelectCols.join(", ")}
-           FROM users
+        `
+          SELECT ${userSelectCols.join(", ")}
+          FROM users
           WHERE id = ?
-          LIMIT 1`,
-        [customerId],
+          LIMIT 1
+        `,
+        [customerId]
       );
 
       if (!row) {
@@ -2367,12 +2476,15 @@ router.post("/admin", authRequired, async (req, res) => {
       await updateUserProfileFromAdminOrder(conn, row.id, contactObj, addressObj);
 
       const [[freshUser]] = await conn.query(
-        `SELECT ${userSelectCols.join(", ")}
-           FROM users
+        `
+          SELECT ${userSelectCols.join(", ")}
+          FROM users
           WHERE id = ?
-          LIMIT 1`,
-        [row.id],
+          LIMIT 1
+        `,
+        [row.id]
       );
+
       u = freshUser || row;
     } else {
       if (!contactObj) contactObj = buildContactFromPayload({});
@@ -2387,6 +2499,7 @@ router.post("/admin", authRequired, async (req, res) => {
 
       contactObj = enrichContactWithAddress(contactObj, addressObj);
       autoAccount = await findOrCreateCustomerAccount(conn, contactObj, addressObj);
+
       u = autoAccount.user;
       effectiveCustomerId = u.id;
 
@@ -2414,11 +2527,7 @@ router.post("/admin", authRequired, async (req, res) => {
     });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (
-      delivery?.currency ||
-      totals?.currency ||
-      "MAD"
-    ).toUpperCase();
+    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
 
     const hasDiscountColumns =
       discountCols?.items_subtotal &&
@@ -2459,6 +2568,7 @@ router.post("/admin", authRequired, async (req, res) => {
       "created_at",
       "updated_at",
     ];
+
     const placeholders = [
       "?",
       "?",
@@ -2473,6 +2583,7 @@ router.post("/admin", authRequired, async (req, res) => {
       "NOW()",
       "NOW()",
     ];
+
     const vals = [
       effectiveCustomerId,
       req.user.id,
@@ -2496,9 +2607,11 @@ router.post("/admin", authRequired, async (req, res) => {
         "admin_discount_value",
         "admin_discount_amount",
         "admin_discount_label",
-        "discounted_by_admin_id",
+        "discounted_by_admin_id"
       );
+
       placeholders.splice(7, 0, "?", "?", "?", "?", "?", "?", "?");
+
       vals.splice(
         7,
         0,
@@ -2508,7 +2621,7 @@ router.post("/admin", authRequired, async (req, res) => {
         discountInput.type === "NONE" ? 0 : discountInput.value,
         +adminDiscountAmount.toFixed(2),
         discountInput.label,
-        adminDiscountAmount > 0 ? req.user.id : null,
+        adminDiscountAmount > 0 ? req.user.id : null
       );
     }
 
@@ -2517,6 +2630,7 @@ router.post("/admin", authRequired, async (req, res) => {
       placeholders.push("?");
       vals.push(null);
     }
+
     if (receiptCols.receipt_token) {
       cols.push("receipt_token");
       placeholders.push("?");
@@ -2528,16 +2642,19 @@ router.post("/admin", authRequired, async (req, res) => {
       placeholders.push("?");
       vals.push(JSON.stringify(paymentObj));
     }
+
     if (payCols?.payment_status) {
       cols.push("payment_status");
       placeholders.push("?");
       vals.push(paymentObj.status);
     }
+
     if (payCols?.paid_amount) {
       cols.push("paid_amount");
       placeholders.push("?");
       vals.push(paymentObj.paid_amount);
     }
+
     if (payCols?.remaining_amount) {
       cols.push("remaining_amount");
       placeholders.push("?");
@@ -2546,7 +2663,7 @@ router.post("/admin", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -2563,10 +2680,12 @@ router.post("/admin", authRequired, async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (promoCols.promo_applied ||
+        (
+          promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price
+        )
       ) {
         const cols2 = [
           "order_id",
@@ -2575,6 +2694,7 @@ router.post("/admin", authRequired, async (req, res) => {
           "qty",
           "unit_price",
         ];
+
         const vals2 = [
           orderId,
           it.product_id,
@@ -2587,29 +2707,38 @@ router.post("/admin", authRequired, async (req, res) => {
           cols2.push("base_unit_price");
           vals2.push(it.base_unit_price);
         }
+
         if (promoCols.promo_applied) {
           cols2.push("promo_applied");
           vals2.push(it.promo_applied || 0);
         }
+
         if (promoCols.promo_type) {
           cols2.push("promo_type");
           vals2.push(it.promo_type || null);
         }
+
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+          vals2.push(
+            it.promo_value != null ? Number(it.promo_value) : null
+          );
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
-          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          `
+            INSERT INTO order_items
+            (order_id, product_id, variant_id, qty, unit_price)
+            VALUES (?,?,?,?,?)
+          `,
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -2636,12 +2765,12 @@ router.post("/admin", authRequired, async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE product_variants SET stock = ? WHERE id = ?`, [
           newStock,
           it.variant_id,
         ]);
       } else {
-        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE products SET stock = ? WHERE id = ?`, [
           newStock,
           it.product_id,
         ]);
@@ -2653,6 +2782,7 @@ router.post("/admin", authRequired, async (req, res) => {
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch {}
+
     try {
       await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
@@ -2662,7 +2792,7 @@ router.post("/admin", authRequired, async (req, res) => {
       await notifyUser(effectiveCustomerId, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0,
+          orderTotal || 0
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -2714,9 +2844,11 @@ router.post("/admin", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
+
     if (e && e.statusCode && e.payload) {
       return res.status(e.statusCode).json(e.payload);
     }
+
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -2736,8 +2868,9 @@ router.post("/", authRequired, async (req, res) => {
     payment = null,
   } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
+  if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items[] required" });
+  }
 
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -2749,6 +2882,7 @@ router.post("/", authRequired, async (req, res) => {
     const geoLink = buildGeoLink(addressObj.gps);
 
     let contactObj = contact ? buildContactFromPayload(contact) : null;
+
     if (
       !contactObj ||
       (!contactObj.first_name &&
@@ -2772,11 +2906,7 @@ router.post("/", authRequired, async (req, res) => {
     });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (
-      delivery?.currency ||
-      totals?.currency ||
-      "MAD"
-    ).toUpperCase();
+    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
 
     const orderTotal = itemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(itemsAmount);
@@ -2799,6 +2929,7 @@ router.post("/", authRequired, async (req, res) => {
       "created_at",
       "updated_at",
     ];
+
     const placeholders = [
       "?",
       "?",
@@ -2811,6 +2942,7 @@ router.post("/", authRequired, async (req, res) => {
       "NOW()",
       "NOW()",
     ];
+
     const vals = [
       req.user.id,
       "OPEN",
@@ -2827,31 +2959,37 @@ router.post("/", authRequired, async (req, res) => {
       placeholders.splice(5, 0, "?");
       vals.splice(5, 0, +itemsAmount.toFixed(2));
     }
+
     if (discountCols?.delivery_fee) {
       cols.splice(cols.indexOf("total"), 0, "delivery_fee");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, +deliveryFee.toFixed(2));
     }
+
     if (discountCols?.admin_discount_type) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_type");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, "NONE");
     }
+
     if (discountCols?.admin_discount_value) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_value");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
     }
+
     if (discountCols?.admin_discount_amount) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_amount");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
     }
+
     if (discountCols?.admin_discount_label) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_label");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
     }
+
     if (discountCols?.discounted_by_admin_id) {
       cols.splice(cols.indexOf("total"), 0, "discounted_by_admin_id");
       placeholders.splice(placeholders.length - 4, 0, "?");
@@ -2863,6 +3001,7 @@ router.post("/", authRequired, async (req, res) => {
       placeholders.push("?");
       vals.push(null);
     }
+
     if (receiptCols.receipt_token) {
       cols.push("receipt_token");
       placeholders.push("?");
@@ -2874,16 +3013,19 @@ router.post("/", authRequired, async (req, res) => {
       placeholders.push("?");
       vals.push(JSON.stringify(paymentObj));
     }
+
     if (payCols?.payment_status) {
       cols.push("payment_status");
       placeholders.push("?");
       vals.push(paymentObj.status);
     }
+
     if (payCols?.paid_amount) {
       cols.push("paid_amount");
       placeholders.push("?");
       vals.push(paymentObj.paid_amount);
     }
+
     if (payCols?.remaining_amount) {
       cols.push("remaining_amount");
       placeholders.push("?");
@@ -2892,7 +3034,7 @@ router.post("/", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -2909,10 +3051,12 @@ router.post("/", authRequired, async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (promoCols.promo_applied ||
+        (
+          promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price
+        )
       ) {
         const cols2 = [
           "order_id",
@@ -2921,6 +3065,7 @@ router.post("/", authRequired, async (req, res) => {
           "qty",
           "unit_price",
         ];
+
         const vals2 = [
           orderId,
           it.product_id,
@@ -2933,29 +3078,38 @@ router.post("/", authRequired, async (req, res) => {
           cols2.push("base_unit_price");
           vals2.push(it.base_unit_price);
         }
+
         if (promoCols.promo_applied) {
           cols2.push("promo_applied");
           vals2.push(it.promo_applied || 0);
         }
+
         if (promoCols.promo_type) {
           cols2.push("promo_type");
           vals2.push(it.promo_type || null);
         }
+
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+          vals2.push(
+            it.promo_value != null ? Number(it.promo_value) : null
+          );
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
-          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          `
+            INSERT INTO order_items
+            (order_id, product_id, variant_id, qty, unit_price)
+            VALUES (?,?,?,?,?)
+          `,
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -2982,12 +3136,12 @@ router.post("/", authRequired, async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE product_variants SET stock = ? WHERE id = ?`, [
           newStock,
           it.variant_id,
         ]);
       } else {
-        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE products SET stock = ? WHERE id = ?`, [
           newStock,
           it.product_id,
         ]);
@@ -2999,12 +3153,13 @@ router.post("/", authRequired, async (req, res) => {
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch {}
+
     try {
       const { notifyUser } = require("../services/notify");
       await notifyUser(req.user.id, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0,
+          orderTotal || 0
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -3013,6 +3168,7 @@ router.post("/", authRequired, async (req, res) => {
         status: "OPEN",
       });
     } catch {}
+
     try {
       await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
@@ -3028,7 +3184,7 @@ router.post("/", authRequired, async (req, res) => {
       items,
     }).catch(() => {});
 
-    res.status(201).json({
+    return res.status(201).json({
       id: orderId,
       display_code: displayCode,
       status: "OPEN",
@@ -3060,9 +3216,12 @@ router.post("/", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
-    if (e && e.statusCode === 400 && e.payload)
+
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
-    res.status(500).json({ error: e.message });
+    }
+
+    return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
@@ -3081,10 +3240,12 @@ router.post("/guest", async (req, res) => {
     payment = null,
   } = req.body || {};
 
-  if (!Array.isArray(items) || items.length === 0)
+  if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items[] required" });
+  }
 
   let contactObj = buildContactFromPayload(contact);
+
   if (!contactObj.phone) {
     return res.status(400).json({
       code: "PHONE_REQUIRED",
@@ -3112,11 +3273,7 @@ router.post("/guest", async (req, res) => {
     });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (
-      delivery?.currency ||
-      totals?.currency ||
-      "MAD"
-    ).toUpperCase();
+    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
 
     const orderTotal = itemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(itemsAmount);
@@ -3139,6 +3296,7 @@ router.post("/guest", async (req, res) => {
       "created_at",
       "updated_at",
     ];
+
     const placeholders = [
       "NULL",
       "?",
@@ -3151,6 +3309,7 @@ router.post("/guest", async (req, res) => {
       "NOW()",
       "NOW()",
     ];
+
     const vals = [
       "OPEN",
       JSON.stringify(addressObj),
@@ -3166,31 +3325,37 @@ router.post("/guest", async (req, res) => {
       placeholders.splice(5, 0, "?");
       vals.splice(4, 0, +itemsAmount.toFixed(2));
     }
+
     if (discountCols?.delivery_fee) {
       cols.splice(cols.indexOf("total"), 0, "delivery_fee");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, +deliveryFee.toFixed(2));
     }
+
     if (discountCols?.admin_discount_type) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_type");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, "NONE");
     }
+
     if (discountCols?.admin_discount_value) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_value");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
     }
+
     if (discountCols?.admin_discount_amount) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_amount");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, 0);
     }
+
     if (discountCols?.admin_discount_label) {
       cols.splice(cols.indexOf("total"), 0, "admin_discount_label");
       placeholders.splice(placeholders.length - 4, 0, "?");
       vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, null);
     }
+
     if (discountCols?.discounted_by_admin_id) {
       cols.splice(cols.indexOf("total"), 0, "discounted_by_admin_id");
       placeholders.splice(placeholders.length - 4, 0, "?");
@@ -3202,6 +3367,7 @@ router.post("/guest", async (req, res) => {
       placeholders.push("?");
       vals.push(null);
     }
+
     if (receiptCols.receipt_token) {
       cols.push("receipt_token");
       placeholders.push("?");
@@ -3213,16 +3379,19 @@ router.post("/guest", async (req, res) => {
       placeholders.push("?");
       vals.push(JSON.stringify(paymentObj));
     }
+
     if (payCols?.payment_status) {
       cols.push("payment_status");
       placeholders.push("?");
       vals.push(paymentObj.status);
     }
+
     if (payCols?.paid_amount) {
       cols.push("paid_amount");
       placeholders.push("?");
       vals.push(paymentObj.paid_amount);
     }
+
     if (payCols?.remaining_amount) {
       cols.push("remaining_amount");
       placeholders.push("?");
@@ -3231,7 +3400,7 @@ router.post("/guest", async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals,
+      vals
     );
 
     const orderId = r.insertId;
@@ -3248,10 +3417,12 @@ router.post("/guest", async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (promoCols.promo_applied ||
+        (
+          promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price
+        )
       ) {
         const cols2 = [
           "order_id",
@@ -3260,6 +3431,7 @@ router.post("/guest", async (req, res) => {
           "qty",
           "unit_price",
         ];
+
         const vals2 = [
           orderId,
           it.product_id,
@@ -3272,29 +3444,38 @@ router.post("/guest", async (req, res) => {
           cols2.push("base_unit_price");
           vals2.push(it.base_unit_price);
         }
+
         if (promoCols.promo_applied) {
           cols2.push("promo_applied");
           vals2.push(it.promo_applied || 0);
         }
+
         if (promoCols.promo_type) {
           cols2.push("promo_type");
           vals2.push(it.promo_type || null);
         }
+
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+          vals2.push(
+            it.promo_value != null ? Number(it.promo_value) : null
+          );
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2,
+          vals2
         );
       } else {
         await conn.query(
-          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price) VALUES (?,?,?,?,?)`,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
+          `
+            INSERT INTO order_items
+            (order_id, product_id, variant_id, qty, unit_price)
+            VALUES (?,?,?,?,?)
+          `,
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
         );
       }
     }
@@ -3321,12 +3502,12 @@ router.post("/guest", async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(`UPDATE product_variants SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE product_variants SET stock = ? WHERE id = ?`, [
           newStock,
           it.variant_id,
         ]);
       } else {
-        await conn.query(`UPDATE products SET stock=? WHERE id=?`, [
+        await conn.query(`UPDATE products SET stock = ? WHERE id = ?`, [
           newStock,
           it.product_id,
         ]);
@@ -3338,6 +3519,7 @@ router.post("/guest", async (req, res) => {
     try {
       await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
     } catch {}
+
     try {
       await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
     } catch {}
@@ -3353,7 +3535,7 @@ router.post("/guest", async (req, res) => {
       items,
     }).catch(() => {});
 
-    res.status(201).json({
+    return res.status(201).json({
       id: orderId,
       display_code: displayCode,
       status: "OPEN",
@@ -3385,9 +3567,12 @@ router.post("/guest", async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
-    if (e && e.statusCode === 400 && e.payload)
+
+    if (e && e.statusCode === 400 && e.payload) {
       return res.status(400).json(e.payload);
-    res.status(500).json({ error: e.message });
+    }
+
+    return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
@@ -3402,8 +3587,10 @@ router.get("/:id", authRequired, async (req, res) => {
 
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200)
+
+    if (result.status !== 200) {
       return res.status(result.status).json({ error: result.error });
+    }
 
     const o = result.order;
     const addr = safeParseJSON(o.address);
@@ -3438,7 +3625,7 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const itemsAmount = result.items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const isVendorView = isVendor(req.user) && !isAdmin(req.user);
@@ -3451,8 +3638,7 @@ router.get("/:id", authRequired, async (req, res) => {
       ? itemsAmount
       : Number(
           o.total ||
-            adminDiscount.discounted_items_amount +
-              Number(o.delivery_fee || 0),
+            adminDiscount.discounted_items_amount + Number(o.delivery_fee || 0)
         );
 
     const deliveryFee = isVendorView
@@ -3466,7 +3652,7 @@ router.get("/:id", authRequired, async (req, res) => {
       o,
       totalAmount,
       currency,
-      payCols,
+      payCols
     );
 
     const duuminiCommissionRaw = isCancelledStatus(o.status)
@@ -3478,7 +3664,7 @@ router.get("/:id", authRequired, async (req, res) => {
         ? duuminiCommissionRaw
         : computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
-    res.json({
+    return res.json({
       ...o,
       commission_duumini: isVendorView ? null : duuminiCommission,
       display_code: buildDisplayCode(o.id),
@@ -3519,7 +3705,7 @@ router.get("/:id", authRequired, async (req, res) => {
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
@@ -3528,12 +3714,15 @@ router.get("/:id", authRequired, async (req, res) => {
 /* =========================
  * ✅ RECEIPT JSON + PDF (with QR)
  * =======================*/
-
 router.get("/receipt/:token", async (req, res) => {
   const token = String(req.params.token || "").trim();
-  if (!token) return res.status(400).json({ error: "invalid token" });
+
+  if (!token) {
+    return res.status(400).json({ error: "invalid token" });
+  }
 
   const conn = await getPool().getConnection();
+
   try {
     const usersCols = await getUsersColsCached(getPool());
 
@@ -3545,37 +3734,42 @@ router.get("/receipt/:token", async (req, res) => {
     ];
 
     const [[o]] = await conn.query(
-      `SELECT o.*, ${userSelectCols.join(", ")}
-         FROM orders o
-         LEFT JOIN users u ON u.id = o.user_id
+      `
+        SELECT o.*, ${userSelectCols.join(", ")}
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
         WHERE o.receipt_token = ?
-        LIMIT 1`,
-      [token],
+        LIMIT 1
+      `,
+      [token]
     );
-    if (!o) return res.status(404).json({ error: "Not found" });
+
+    if (!o) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     const [items] = await conn.query(
       `
-      SELECT 
-        oi.*,
-        p.name AS product_name,
-        pv.size  AS variant_size,
-        pv.color AS variant_color,
-        pv.sku   AS variant_sku,
-        (
-          SELECT pi.url
-          FROM product_images pi
-          WHERE pi.product_id = oi.product_id
-          ORDER BY pi.sort_order ASC, pi.id ASC
-          LIMIT 1
-        ) AS product_cover
-      FROM order_items oi
-      LEFT JOIN products p ON p.id = oi.product_id
-      LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-      WHERE oi.order_id = ?
-      ORDER BY oi.id ASC
+        SELECT
+          oi.*,
+          p.name AS product_name,
+          pv.size AS variant_size,
+          pv.color AS variant_color,
+          pv.sku AS variant_sku,
+          (
+            SELECT pi.url
+            FROM product_images pi
+            WHERE pi.product_id = oi.product_id
+            ORDER BY pi.sort_order ASC, pi.id ASC
+            LIMIT 1
+          ) AS product_cover
+        FROM order_items oi
+        LEFT JOIN products p ON p.id = oi.product_id
+        LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+        WHERE oi.order_id = ?
+        ORDER BY oi.id ASC
       `,
-      [o.id],
+      [o.id]
     );
 
     const addr = safeParseJSON(o.address) || {};
@@ -3584,19 +3778,21 @@ router.get("/receipt/:token", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (s, it) => s + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+      o.total || adminDiscount.discounted_items_amount + deliveryFee
     );
 
-    res.json({
+    return res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
       customer_role: o.customer_role || contact?.role || null,
@@ -3625,7 +3821,7 @@ router.get("/receipt/:token", async (req, res) => {
       geo_link: o.geo_link || buildGeoLink(addr?.gps) || null,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
@@ -3633,40 +3829,50 @@ router.get("/receipt/:token", async (req, res) => {
 
 router.get("/receipt/:token.pdf", async (req, res) => {
   const token = String(req.params.token || "").trim();
-  if (!token) return res.status(400).json({ error: "invalid token" });
+
+  if (!token) {
+    return res.status(400).json({ error: "invalid token" });
+  }
 
   const conn = await getPool().getConnection();
+
   try {
     const usersCols = await getUsersColsCached(getPool());
+
     const userSelectCols = [
       usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
     ];
 
     const [[o]] = await conn.query(
-      `SELECT o.*, ${userSelectCols.join(", ")}
-         FROM orders o
-         LEFT JOIN users u ON u.id = o.user_id
+      `
+        SELECT o.*, ${userSelectCols.join(", ")}
+        FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id
         WHERE o.receipt_token = ?
-        LIMIT 1`,
-      [token],
+        LIMIT 1
+      `,
+      [token]
     );
-    if (!o) return res.status(404).json({ error: "Not found" });
+
+    if (!o) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     const [items] = await conn.query(
       `
-      SELECT 
-        oi.*,
-        p.name AS product_name,
-        pv.size  AS variant_size,
-        pv.color AS variant_color,
-        pv.sku   AS variant_sku
-      FROM order_items oi
-      LEFT JOIN products p ON p.id = oi.product_id
-      LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-      WHERE oi.order_id = ?
-      ORDER BY oi.id ASC
+        SELECT
+          oi.*,
+          p.name AS product_name,
+          pv.size AS variant_size,
+          pv.color AS variant_color,
+          pv.sku AS variant_sku
+        FROM order_items oi
+        LEFT JOIN products p ON p.id = oi.product_id
+        LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+        WHERE oi.order_id = ?
+        ORDER BY oi.id ASC
       `,
-      [o.id],
+      [o.id]
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
@@ -3676,27 +3882,29 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+      o.total || adminDiscount.discounted_items_amount + deliveryFee
     );
 
-    const duuminiCommission = isCancelledStatus(o.status)
-      ? 0
-      : normCommission(o.commission_duumini) ??
-        computeDuuminiCommission(adminDiscount.discounted_items_amount);
+    const duuminiCommission =
+      isCancelledStatus(o.status)
+        ? 0
+        : normCommission(o.commission_duumini) ??
+          computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
     const base = String(
-      env.PUBLIC_WEB_BASE ||
-        process.env.PUBLIC_WEB_BASE ||
-        "https://duumini.com",
+      env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com"
     ).replace(/\/+$/, "");
+
     const verifyUrl = `${base}/r/${token}`;
 
     const qrDataUrl = await QRCode.toDataURL(verifyUrl, {
@@ -3719,6 +3927,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     const receiptNo =
       o.receipt_number ||
       `DM-${new Date().getFullYear()}-${String(o.id).padStart(6, "0")}`;
+
     const displayCode = buildDisplayCode(o.id);
 
     doc.fontSize(12).text(`Reçu N° : ${receiptNo}`);
@@ -3729,13 +3938,12 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`,
+      }`
     );
     doc.moveDown();
 
     const fullName =
-      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() ||
-      "Client";
+      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || "Client";
 
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
@@ -3762,10 +3970,11 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         .filter(Boolean)
         .join(" / ");
       const suffix = variant ? ` (${variant})` : "";
+
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2,
-        )} ${currency}`,
+          2
+        )} ${currency}`
       );
     });
 
@@ -3774,15 +3983,15 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`
     );
     if (adminDiscount.amount > 0) {
       doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
     }
     doc.text(
       `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2,
-      )} ${currency}`,
+        2
+      )} ${currency}`
     );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
@@ -3792,12 +4001,13 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
       );
     doc.moveDown();
 
     const qrBase64 = qrDataUrl.split(",")[1];
     const qrBuf = Buffer.from(qrBase64, "base64");
+
     doc.fontSize(10).text("Scanner pour vérifier le reçu :", { align: "left" });
     doc.image(qrBuf, doc.x, doc.y + 6, { width: 110 });
     doc.moveDown(6);
@@ -3815,14 +4025,19 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
 router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
+  }
 
   const conn = await getPool().getConnection();
+
   try {
     const result = await getOrderWithPerm(conn, id, req.user);
-    if (result.status !== 200)
+
+    if (result.status !== 200) {
       return res.status(result.status).json({ error: result.error });
+    }
 
     const o = result.order;
     const items = result.items || [];
@@ -3834,28 +4049,31 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     const itemsAmount = items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0,
+      0
     );
 
     const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
+
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee,
+      o.total || adminDiscount.discounted_items_amount + deliveryFee
     );
 
-    const duuminiCommission = isCancelledStatus(o.status)
-      ? 0
-      : normCommission(o.commission_duumini) ??
-        computeDuuminiCommission(adminDiscount.discounted_items_amount);
+    const duuminiCommission =
+      isCancelledStatus(o.status)
+        ? 0
+        : normCommission(o.commission_duumini) ??
+          computeDuuminiCommission(adminDiscount.discounted_items_amount);
 
     const token = o.receipt_token ? String(o.receipt_token) : null;
+
     const base = String(
-      env.PUBLIC_WEB_BASE ||
-        process.env.PUBLIC_WEB_BASE ||
-        "https://duumini.com",
+      env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com"
     ).replace(/\/+$/, "");
+
     const verifyUrl = token ? `${base}/r/${token}` : `${base}/orders/${id}`;
 
     const qrDataUrl = await QRCode.toDataURL(verifyUrl, {
@@ -3878,6 +4096,7 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     const receiptNo =
       o.receipt_number ||
       `DM-${new Date().getFullYear()}-${String(id).padStart(6, "0")}`;
+
     const displayCode = buildDisplayCode(id);
 
     doc.fontSize(12).text(`Reçu N° : ${receiptNo}`);
@@ -3888,13 +4107,12 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`,
+      }`
     );
     doc.moveDown();
 
     const fullName =
-      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() ||
-      "Client";
+      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || "Client";
 
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
@@ -3921,10 +4139,11 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
         .filter(Boolean)
         .join(" / ");
       const suffix = variant ? ` (${variant})` : "";
+
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2,
-        )} ${currency}`,
+          2
+        )} ${currency}`
       );
     });
 
@@ -3933,15 +4152,17 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`
     );
+
     if (adminDiscount.amount > 0) {
       doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
     }
+
     doc.text(
       `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2,
-      )} ${currency}`,
+        2
+      )} ${currency}`
     );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
@@ -3951,12 +4172,13 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
       );
     doc.moveDown();
 
     const qrBase64 = qrDataUrl.split(",")[1];
     const qrBuf = Buffer.from(qrBase64, "base64");
+
     doc.fontSize(10).text("Scanner pour vérifier le reçu :", { align: "left" });
     doc.image(qrBuf, doc.x, doc.y + 6, { width: 110 });
     doc.moveDown(6);
@@ -3977,23 +4199,35 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
  * =======================*/
 router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0)
+
+  if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
-  if (!isAdmin(req.user)) return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const conn = await getPool().getConnection();
+
   try {
     const [[o]] = await conn.query(
-      `SELECT id, receipt_token, receipt_number, contact, total, currency
-         FROM orders
+      `
+        SELECT id, receipt_token, receipt_number, contact, total, currency
+        FROM orders
         WHERE id = ?
-        LIMIT 1`,
-      [id],
+        LIMIT 1
+      `,
+      [id]
     );
-    if (!o) return res.status(404).json({ error: "Not found" });
+
+    if (!o) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     const contact = safeParseJSON(o.contact) || {};
     const phone = normPhone(contact.phone);
+
     if (!phone) {
       return res.status(409).json({
         code: "PHONE_MISSING",
@@ -4010,8 +4244,9 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
     }
 
     const apiBase = String(
-      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || "",
+      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || ""
     ).replace(/\/+$/, "");
+
     if (!apiBase) {
       return res.status(409).json({
         code: "PUBLIC_API_BASE_MISSING",
@@ -4051,44 +4286,48 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
 router.put("/:id/status", authRequired, async (req, res) => {
   const id = Number(req.params.id);
   const { status } = req.body || {};
+
   const allowed = ["OPEN", "PREPARATION", "DELIVERY", "DONE", "CANCELLED"];
-  if (!allowed.includes(status))
+
+  if (!allowed.includes(status)) {
     return res.status(400).json({ error: "invalid status" });
+  }
 
   const pool = getPool();
 
   try {
     if (!isAdmin(req.user)) {
-      if (!isVendor(req.user))
+      if (!isVendor(req.user)) {
         return res.status(403).json({ error: "Forbidden" });
+      }
 
       const conn = await pool.getConnection();
       try {
         const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
-        if (!ok)
+        if (!ok) {
           return res
             .status(403)
             .json({ error: "Forbidden (multi-vendor order)" });
+        }
       } finally {
         conn.release();
       }
     }
 
-    await pool.query(
-      `UPDATE orders SET status=?, updated_at=NOW() WHERE id=?`,
-      [status, id],
-    );
+    await pool.query(`UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?`, [
+      status,
+      id,
+    ]);
 
-    const [[order]] = await pool.query(
-      `SELECT user_id FROM orders WHERE id=?`,
-      [id],
-    );
+    const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id = ?`, [id]);
+
     if (order && order.user_id) {
       const displayCode = buildDisplayCode(id);
 
       try {
         await enqueueOrderStatusForClient(id, status);
       } catch {}
+
       try {
         const { notifyUser } = require("../services/notify");
         await notifyUser(order.user_id, "ORDER_STATUS", {
@@ -4101,9 +4340,9 @@ router.put("/:id/status", authRequired, async (req, res) => {
       } catch {}
     }
 
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -4119,6 +4358,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
     await conn.beginTransaction();
 
     const result = await getOrderWithPerm(conn, id, req.user);
+
     if (result.status !== 200) {
       await conn.rollback();
       return res.status(result.status).json({ error: result.error });
@@ -4126,6 +4366,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     if (!isAdmin(req.user) && isVendor(req.user)) {
       const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
+
       if (!ok) {
         await conn.rollback();
         return res
@@ -4136,14 +4377,15 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     const order = result.order;
     const blocked = ["DONE", "CANCELLED"].includes(order.status || "");
+
     if (blocked && !isAdmin(req.user)) {
       await conn.rollback();
       return res.status(409).json({ error: "Cannot cancel at this stage" });
     }
 
     const [items] = await conn.query(
-      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id=? ORDER BY id ASC`,
-      [id],
+      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id = ? ORDER BY id ASC`,
+      [id]
     );
 
     for (const it of items) {
@@ -4152,24 +4394,26 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
       if (it.variant_id) {
         await conn.query(
-          `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.variant_id],
+          `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
+          [qty, it.variant_id]
         );
       } else if (it.product_id) {
         await conn.query(
-          `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id=?`,
-          [qty, it.product_id],
+          `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
+          [qty, it.product_id]
         );
       }
     }
 
     await conn.query(
-      `UPDATE orders
-      SET status='CANCELLED',
-          commission_duumini = 0,
-          updated_at=NOW()
-    WHERE id=?`,
-      [id],
+      `
+        UPDATE orders
+        SET status = 'CANCELLED',
+            commission_duumini = 0,
+            updated_at = NOW()
+        WHERE id = ?
+      `,
+      [id]
     );
 
     await conn.commit();
@@ -4191,12 +4435,13 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       }
     } catch {}
 
-    res.json({ ok: true, status: "CANCELLED" });
+    return res.json({ ok: true, status: "CANCELLED" });
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
-    res.status(500).json({ error: e.message });
+
+    return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
   }
