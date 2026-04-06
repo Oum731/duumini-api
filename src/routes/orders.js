@@ -30,7 +30,11 @@ const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   .startsWith("whatsapp:")
   ? String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()
   : `whatsapp:${String(ADMIN_WHATSAPP_HARDCODED_RAW).trim()}`;
-
+const ADMIN_ORDER_DEFAULT_PASSWORD = String(
+  env.ADMIN_ORDER_DEFAULT_PASSWORD ||
+    process.env.ADMIN_ORDER_DEFAULT_PASSWORD ||
+    "duumini123",
+).trim();
 /* =========================
  * Helpers
  * =======================*/
@@ -207,7 +211,11 @@ function stripCommissionFromOrderRow(row, user) {
 }
 
 function isCancelledStatus(s) {
-  return String(s || "").trim().toUpperCase() === "CANCELLED";
+  return (
+    String(s || "")
+      .trim()
+      .toUpperCase() === "CANCELLED"
+  );
 }
 
 function computeDuuminiCommission(itemsAmount) {
@@ -220,7 +228,9 @@ function isBlank(v) {
   return v === null || v === undefined || String(v).trim() === "";
 }
 function normalizeCustomerRoleInput(value) {
-  const r = String(value || "CLIENT").trim().toUpperCase();
+  const r = String(value || "CLIENT")
+    .trim()
+    .toUpperCase();
   return r === "VENDEUR" ? "VENDEUR" : "CLIENT";
 }
 
@@ -282,7 +292,7 @@ async function detectUsersCols(conn) {
         AND TABLE_NAME = 'users'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
     `,
-    candidates
+    candidates,
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -322,7 +332,7 @@ async function updateUserProfileFromAdminOrder(
   conn,
   userId,
   contactObj = {},
-  addressObj = {}
+  addressObj = {},
 ) {
   if (!userId) return;
 
@@ -344,9 +354,7 @@ async function updateUserProfileFromAdminOrder(
   const commercialName = !isBlank(contactObj?.commercial_name)
     ? String(contactObj.commercial_name).trim()
     : null;
-  const ice = !isBlank(contactObj?.ice)
-    ? String(contactObj.ice).trim()
-    : null;
+  const ice = !isBlank(contactObj?.ice) ? String(contactObj.ice).trim() : null;
 
   if (usersCols.first_name && firstName) {
     sets.push("first_name = ?");
@@ -428,10 +436,8 @@ async function updateUserProfileFromAdminOrder(
 /* =========================
  * ✅ Auto-create client account
  * =======================*/
-function generateAutoPassword(phone) {
-  const digits = String(phone || "").replace(/\D+/g, "");
-  const tail = digits.slice(-4) || "0000";
-  return `Duumini@${tail}`;
+function generateAutoPassword(_phone) {
+  return ADMIN_ORDER_DEFAULT_PASSWORD;
 }
 async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   const phone = normPhone(contactObj?.phone);
@@ -458,23 +464,21 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     usersCols.city
       ? "city"
       : usersCols.ville
-      ? "ville AS city"
-      : "NULL AS city",
+        ? "ville AS city"
+        : "NULL AS city",
     usersCols.commune ? "commune" : "NULL AS commune",
     usersCols.district
       ? "district"
       : usersCols.quartier
-      ? "quartier AS district"
-      : "NULL AS district",
+        ? "quartier AS district"
+        : "NULL AS district",
     usersCols.address_line
       ? "address_line"
       : usersCols.address
-      ? "address AS address_line"
-      : "NULL AS address_line",
+        ? "address AS address_line"
+        : "NULL AS address_line",
     usersCols.landmark ? "landmark" : "NULL AS landmark",
-    usersCols.commercial_name
-      ? "commercial_name"
-      : "NULL AS commercial_name",
+    usersCols.commercial_name ? "commercial_name" : "NULL AS commercial_name",
     usersCols.ice ? "ice" : "NULL AS ice",
   ];
 
@@ -485,7 +489,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
       WHERE phone = ?
       LIMIT 1
     `,
-    [phone]
+    [phone],
   );
 
   if (existing) {
@@ -493,7 +497,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
       conn,
       existing.id,
       contactObj,
-      addressObj
+      addressObj,
     );
 
     const [[updated]] = await conn.query(
@@ -503,7 +507,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
         WHERE id = ?
         LIMIT 1
       `,
-      [existing.id]
+      [existing.id],
     );
 
     return {
@@ -534,14 +538,12 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
   const lastName =
     String(contactObj?.last_name || "Duumini").trim() || "Duumini";
   const requestedRole = normalizeCustomerRoleInput(
-    contactObj?.role || "CLIENT"
+    contactObj?.role || "CLIENT",
   );
   const commercialName = !isBlank(contactObj?.commercial_name)
     ? String(contactObj.commercial_name).trim()
     : null;
-  const ice = !isBlank(contactObj?.ice)
-    ? String(contactObj.ice).trim()
-    : null;
+  const ice = !isBlank(contactObj?.ice) ? String(contactObj.ice).trim() : null;
 
   const insertCols = [];
   const insertVals = [];
@@ -640,7 +642,7 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
       INSERT INTO users (${insertCols.join(", ")})
       VALUES (${insertQs.join(", ")})
     `,
-    insertVals
+    insertVals,
   );
 
   return {
@@ -668,7 +670,9 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
 function normalizeAdminDiscount(input) {
   const d = input && typeof input === "object" ? input : {};
 
-  const type = String(d.type || "NONE").trim().toUpperCase();
+  const type = String(d.type || "NONE")
+    .trim()
+    .toUpperCase();
   const label = d.label ? String(d.label).trim().slice(0, 120) : null;
   const rawValue = Number(d.value ?? 0);
 
@@ -743,7 +747,7 @@ async function detectOrdersReceiptCols(conn) {
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
     `,
-    candidates
+    candidates,
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -779,7 +783,7 @@ async function detectOrdersDiscountCols(conn) {
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
     `,
-    candidates
+    candidates,
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -861,7 +865,7 @@ async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
       JOIN shops s ON s.id = p.shop_id
       WHERE oi.order_id = ?
     `,
-    [vendorId, orderId]
+    [vendorId, orderId],
   );
 
   const mine = Number(r?.mine_count || 0);
@@ -876,33 +880,33 @@ async function getOrderWithPerm(conn, id, user) {
   const usersCols = await getUsersColsCached(getPool());
 
   const userSelectCols = [
-  "u.id AS customer_id",
-  usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
-  usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
-  usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
-  usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
-  usersCols.city
-    ? "u.city AS u_city"
-    : usersCols.ville
-    ? "u.ville AS u_city"
-    : "NULL AS u_city",
-  usersCols.commune ? "u.commune AS u_commune" : "NULL AS u_commune",
-  usersCols.district
-    ? "u.district AS u_district"
-    : usersCols.quartier
-    ? "u.quartier AS u_district"
-    : "NULL AS u_district",
-  usersCols.address_line
-    ? "u.address_line AS u_address_line"
-    : usersCols.address
-    ? "u.address AS u_address_line"
-    : "NULL AS u_address_line",
-  usersCols.landmark ? "u.landmark AS u_landmark" : "NULL AS u_landmark",
-  usersCols.commercial_name
-    ? "u.commercial_name AS u_commercial_name"
-    : "NULL AS u_commercial_name",
-  usersCols.ice ? "u.ice AS u_ice" : "NULL AS u_ice",
-];
+    "u.id AS customer_id",
+    usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
+    usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
+    usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
+    usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+    usersCols.city
+      ? "u.city AS u_city"
+      : usersCols.ville
+        ? "u.ville AS u_city"
+        : "NULL AS u_city",
+    usersCols.commune ? "u.commune AS u_commune" : "NULL AS u_commune",
+    usersCols.district
+      ? "u.district AS u_district"
+      : usersCols.quartier
+        ? "u.quartier AS u_district"
+        : "NULL AS u_district",
+    usersCols.address_line
+      ? "u.address_line AS u_address_line"
+      : usersCols.address
+        ? "u.address AS u_address_line"
+        : "NULL AS u_address_line",
+    usersCols.landmark ? "u.landmark AS u_landmark" : "NULL AS u_landmark",
+    usersCols.commercial_name
+      ? "u.commercial_name AS u_commercial_name"
+      : "NULL AS u_commercial_name",
+    usersCols.ice ? "u.ice AS u_ice" : "NULL AS u_ice",
+  ];
   const [[orderRaw]] = await conn.query(
     `
       SELECT
@@ -913,7 +917,7 @@ async function getOrderWithPerm(conn, id, user) {
       WHERE o.id = ?
       LIMIT 1
     `,
-    [id]
+    [id],
   );
 
   if (!orderRaw) return { status: 404, error: "Not found" };
@@ -929,7 +933,7 @@ async function getOrderWithPerm(conn, id, user) {
           WHERE oi.order_id = ? AND s.owner_id = ?
           LIMIT 1
         `,
-        [id, user.id]
+        [id, user.id],
       );
 
       if (!own) return { status: 403, error: "Forbidden" };
@@ -986,7 +990,7 @@ async function getAdminUserIds() {
       FROM users
       WHERE role = 'ADMIN'
         AND (is_active = 1 OR is_active IS NULL)
-    `
+    `,
   );
   return (rows || []).map((r) => r.id);
 }
@@ -1002,7 +1006,7 @@ async function getVendorsForOrder(orderId) {
       WHERE oi.order_id = ?
         AND (u.is_active = 1 OR u.is_active IS NULL)
     `,
-    [orderId]
+    [orderId],
   );
   return (rows || []).map((r) => r.user_id);
 }
@@ -1013,7 +1017,9 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     getVendorsForOrder(orderId),
   ]);
 
-  const allUserIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
+  const allUserIds = Array.from(
+    new Set([...(adminIds || []), ...(vendorIds || [])]),
+  );
   if (!allUserIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -1031,14 +1037,19 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   };
 
   const payload = JSON.stringify(payloadObj);
-  const values = allUserIds.map((uid) => [uid, "ORDER_CREATED", payload, "queued"]);
+  const values = allUserIds.map((uid) => [
+    uid,
+    "ORDER_CREATED",
+    payload,
+    "queued",
+  ]);
 
   await getPool().query(
     `
       INSERT INTO notification_queue (user_id, type, payload, status)
       VALUES ?
     `,
-    [values]
+    [values],
   );
 }
 
@@ -1055,7 +1066,9 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
     getVendorsForOrder(orderId),
   ]);
 
-  const userIds = Array.from(new Set([...(adminIds || []), ...(vendorIds || [])]));
+  const userIds = Array.from(
+    new Set([...(adminIds || []), ...(vendorIds || [])]),
+  );
   if (!userIds.length) return;
 
   const cur = (currency || "MAD").toUpperCase();
@@ -1074,8 +1087,8 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
 
   await Promise.all(
     userIds.map((uid) =>
-      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false })
-    )
+      notifyUser(uid, "ORDER_CREATED", payloadObj, { push: false }),
+    ),
   );
 }
 
@@ -1087,7 +1100,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
       WHERE id = ?
       LIMIT 1
     `,
-    [orderId]
+    [orderId],
   );
 
   if (!row || !row.user_id) return;
@@ -1111,7 +1124,7 @@ async function enqueueOrderStatusForClient(orderId, status) {
       INSERT INTO notification_queue (user_id, type, payload, status)
       VALUES (?, 'ORDER_STATUS', ?, 'queued')
     `,
-    [row.user_id, JSON.stringify(payloadObj)]
+    [row.user_id, JSON.stringify(payloadObj)],
   );
 }
 
@@ -1132,7 +1145,10 @@ async function sendAdminWhatsAppForOrder({
     env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_WHATSAPP_FROM
   );
   if (!hasFrom) return;
-  if (!ADMIN_WHATSAPP || !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")) {
+  if (
+    !ADMIN_WHATSAPP ||
+    !String(ADMIN_WHATSAPP).trim().startsWith("whatsapp:")
+  ) {
     return;
   }
 
@@ -1153,7 +1169,7 @@ async function sendAdminWhatsAppForOrder({
         WHERE oi.order_id = ?
         ORDER BY oi.id ASC
       `,
-      [orderId]
+      [orderId],
     );
 
     if (rows && rows.length) {
@@ -1175,7 +1191,9 @@ async function sendAdminWhatsAppForOrder({
           const label = it?.name || `Produit #${it?.product_id || ""}`.trim();
           const qty = it?.qty || 1;
           const price =
-            it?.price != null ? `${it.price} ${(currency || "MAD").toUpperCase()}` : "";
+            it?.price != null
+              ? `${it.price} ${(currency || "MAD").toUpperCase()}`
+              : "";
           return `• ${label} ×${qty}${price ? ` — ${price}` : ""}`;
         })
         .join("\n");
@@ -1194,7 +1212,7 @@ async function sendAdminWhatsAppForOrder({
         ORDER BY oi.id ASC, pi.sort_order ASC, pi.id ASC
         LIMIT 1
       `,
-      [orderId]
+      [orderId],
     );
     if (rowImg && rowImg.url) firstProductImage = rowImg.url;
   } catch {}
@@ -1239,7 +1257,9 @@ function parseVariantId(x) {
  * PROMO helpers
  * =======================*/
 function normalizePromoType(value) {
-  const t = String(value || "").trim().toUpperCase();
+  const t = String(value || "")
+    .trim()
+    .toUpperCase();
   if (t === "AMOUNT") return "AMOUNT";
   if (t === "PERCENT") return "PERCENT";
   return "PERCENT";
@@ -1336,7 +1356,7 @@ async function detectOrderItemsPromoCols(conn) {
         AND TABLE_NAME = 'order_items'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
     `,
-    candidates
+    candidates,
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -1384,7 +1404,7 @@ async function detectOrdersPayCols(conn) {
         AND TABLE_NAME = 'orders'
         AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
     `,
-    candidates
+    candidates,
   );
 
   const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
@@ -1417,7 +1437,9 @@ function normMoney(x) {
 }
 
 function normPayStatus(s) {
-  const v = String(s || "").trim().toUpperCase();
+  const v = String(s || "")
+    .trim()
+    .toUpperCase();
   if (v === "PAID" || v === "UNPAID" || v === "PARTIAL" || v === "PENDING") {
     return v;
   }
@@ -1425,7 +1447,9 @@ function normPayStatus(s) {
 }
 
 function isBankTransferMethod(m) {
-  const v = String(m || "").trim().toUpperCase();
+  const v = String(m || "")
+    .trim()
+    .toUpperCase();
   return (
     v === "BANK_TRANSFER" ||
     v === "BANK" ||
@@ -1445,7 +1469,7 @@ function buildPaymentFromPayload(payment, orderTotal, currency) {
 
   const paid = Math.min(
     normMoney(p.paid_amount ?? p.paidAmount ?? p.amount ?? 0),
-    total
+    total,
   );
   const remaining = Math.max(0, total - paid);
 
@@ -1541,7 +1565,7 @@ async function lockProductForItem(conn, productId) {
       FROM products p
       WHERE p.id = ? FOR UPDATE
     `,
-    [productId]
+    [productId],
   );
   return p || null;
 }
@@ -1561,7 +1585,7 @@ async function lockVariantForItem(conn, productId, variantId) {
       FROM product_variants pv
       WHERE pv.id = ? AND pv.product_id = ? FOR UPDATE
     `,
-    [variantId, productId]
+    [variantId, productId],
   );
   return v || null;
 }
@@ -1584,9 +1608,7 @@ function parseStatusesQuery(req) {
       .map((s) => String(s).trim().toUpperCase())
       .filter(Boolean);
   } else if (Array.isArray(rawArray)) {
-    list = rawArray
-      .map((s) => String(s).trim().toUpperCase())
-      .filter(Boolean);
+    list = rawArray.map((s) => String(s).trim().toUpperCase()).filter(Boolean);
   } else if (rawArray != null) {
     list = String(rawArray)
       .split(",")
@@ -1649,57 +1671,54 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     const userSelectCols = [
-  usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
-  usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
-  usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
-  usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
-  usersCols.commercial_name
-    ? "u.commercial_name AS u_commercial_name"
-    : "NULL AS u_commercial_name",
-  usersCols.ice ? "u.ice AS u_ice" : "NULL AS u_ice",
-];
+      usersCols.first_name ? "u.first_name AS u_first" : "NULL AS u_first",
+      usersCols.last_name ? "u.last_name AS u_last" : "NULL AS u_last",
+      usersCols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
+      usersCols.role ? "u.role AS customer_role" : "NULL AS customer_role",
+      usersCols.commercial_name
+        ? "u.commercial_name AS u_commercial_name"
+        : "NULL AS u_commercial_name",
+      usersCols.ice ? "u.ice AS u_ice" : "NULL AS u_ice",
+    ];
     const mapRowToItem = (r, user, payColsArg, discountColsArg) => {
       const address = safeParseJSON(r.address);
       const contactFromOrder = safeParseJSON(r.contact);
 
       const fallbackContact = buildContactFromUser({
-  first_name: r.u_first,
-  last_name: r.u_last,
-  phone: r.u_phone,
-  role: r.customer_role,
-  commercial_name: r.u_commercial_name,
-  ice: r.u_ice,
-});
+        first_name: r.u_first,
+        last_name: r.u_last,
+        phone: r.u_phone,
+        role: r.customer_role,
+        commercial_name: r.u_commercial_name,
+        ice: r.u_ice,
+      });
 
-const contact =
-  contactFromOrder &&
-  (
-    contactFromOrder.first_name ||
-    contactFromOrder.last_name ||
-    contactFromOrder.phone ||
-    contactFromOrder.city ||
-    contactFromOrder.commune ||
-    contactFromOrder.district ||
-    contactFromOrder.commercial_name ||
-    contactFromOrder.ice
-  )
-    ? {
-        ...fallbackContact,
-        ...contactFromOrder,
-        role:
-          normalizeCustomerRoleInput(
-            contactFromOrder.role ||
-              r.customer_role ||
-              fallbackContact.role ||
-              null
-          ),
-        commercial_name:
-          contactFromOrder.commercial_name ??
-          fallbackContact.commercial_name ??
-          null,
-        ice: contactFromOrder.ice ?? fallbackContact.ice ?? null,
-      }
-    : fallbackContact;
+      const contact =
+        contactFromOrder &&
+        (contactFromOrder.first_name ||
+          contactFromOrder.last_name ||
+          contactFromOrder.phone ||
+          contactFromOrder.city ||
+          contactFromOrder.commune ||
+          contactFromOrder.district ||
+          contactFromOrder.commercial_name ||
+          contactFromOrder.ice)
+          ? {
+              ...fallbackContact,
+              ...contactFromOrder,
+              role: normalizeCustomerRoleInput(
+                contactFromOrder.role ||
+                  r.customer_role ||
+                  fallbackContact.role ||
+                  null,
+              ),
+              commercial_name:
+                contactFromOrder.commercial_name ??
+                fallbackContact.commercial_name ??
+                null,
+              ice: contactFromOrder.ice ?? fallbackContact.ice ?? null,
+            }
+          : fallbackContact;
 
       const geo_link = r.geo_link || buildGeoLink(address?.gps);
       const isVendorView = isVendor(user) && !isAdmin(user);
@@ -1710,7 +1729,7 @@ const contact =
       const adminDiscount = buildAdminDiscountForRow(
         r,
         discountColsArg,
-        itemsAmount
+        itemsAmount,
       );
 
       const deliveryFee = isVendorView
@@ -1721,13 +1740,15 @@ const contact =
 
       const totalAmount = isVendorView
         ? itemsAmount
-        : Number(r.total || adminDiscount.discounted_items_amount + deliveryFee);
+        : Number(
+            r.total || adminDiscount.discounted_items_amount + deliveryFee,
+          );
 
       const paymentNorm = normalizePaymentForRow(
         r,
         totalAmount,
         currency,
-        payColsArg
+        payColsArg,
       );
 
       const duuminiCommissionRaw = isCancelledStatus(r.status)
@@ -1751,7 +1772,10 @@ const contact =
         display_code: buildDisplayCode(r.id),
         address,
         contact,
-customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "CLIENT"),        geo_link,
+        customer_role: normalizeCustomerRoleInput(
+          r.customer_role || contact?.role || "CLIENT",
+        ),
+        geo_link,
         admin_discount: isVendorView
           ? {
               type: "NONE",
@@ -1800,7 +1824,7 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params
+        params,
       );
 
       const [rowsRaw] = await pool.query(
@@ -1827,12 +1851,12 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
           ORDER BY o.created_at DESC
           LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset]
+        [...params, limit, offset],
       );
 
       const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
       const items = rows.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols)
+        mapRowToItem(r, req.user, payCols, discountCols),
       );
 
       return res.json({
@@ -1856,7 +1880,7 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
 
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-        params
+        params,
       );
 
       const [rowsRaw] = await pool.query(
@@ -1883,11 +1907,11 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
           ORDER BY o.created_at DESC
           LIMIT ? OFFSET ?
         `,
-        [...params, limit, offset]
+        [...params, limit, offset],
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols)
+        mapRowToItem(r, req.user, payCols, discountCols),
       );
 
       return res.json({
@@ -1918,7 +1942,7 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
           JOIN shops s ON s.id = p.shop_id
           WHERE ${where}
         `,
-        params
+        params,
       );
 
       const [rowsRaw] = await pool.query(
@@ -1955,11 +1979,11 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
           ORDER BY o.created_at DESC
           LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, ...params, limit, offset]
+        [req.user.id, req.user.id, ...params, limit, offset],
       );
 
       const items = rowsRaw.map((r) =>
-        mapRowToItem(r, req.user, payCols, discountCols)
+        mapRowToItem(r, req.user, payCols, discountCols),
       );
 
       return res.json({
@@ -1982,7 +2006,7 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
 
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
-      params
+      params,
     );
 
     const [rowsRaw] = await pool.query(
@@ -2009,12 +2033,12 @@ customer_role: normalizeCustomerRoleInput(r.customer_role || contact?.role || "C
         ORDER BY o.created_at DESC
         LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     const rows = rowsRaw.map((r) => stripCommissionFromOrderRow(r, req.user));
     const items = rows.map((r) =>
-      mapRowToItem(r, req.user, payCols, discountCols)
+      mapRowToItem(r, req.user, payCols, discountCols),
     );
 
     return res.json({
@@ -2156,7 +2180,9 @@ router.put("/:id/payment", authRequired, async (req, res) => {
       });
     }
 
-    const mode = String(req.body?.mode || "ADD").trim().toUpperCase();
+    const mode = String(req.body?.mode || "ADD")
+      .trim()
+      .toUpperCase();
 
     if (mode !== "SET" && mode !== "ADD") {
       return res.status(400).json({ error: "invalid mode (SET|ADD)" });
@@ -2196,7 +2222,7 @@ router.put("/:id/payment", authRequired, async (req, res) => {
           WHERE id = ?
           FOR UPDATE
         `,
-        [id]
+        [id],
       );
 
       if (!o) {
@@ -2331,7 +2357,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
           WHERE id = ?
           FOR UPDATE
         `,
-        [id]
+        [id],
       );
 
       if (!o) {
@@ -2355,19 +2381,19 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
       const discountInput = normalizeAdminDiscount(req.body?.admin_discount);
       const adminDiscountAmount = computeAdminDiscountAmount(
         itemsSubtotal,
-        discountInput
+        discountInput,
       );
 
       const discountedItemsAmount = Math.max(
         0,
-        itemsSubtotal - adminDiscountAmount
+        itemsSubtotal - adminDiscountAmount,
       );
       const newTotal = +(discountedItemsAmount + deliveryFee).toFixed(2);
       const newCommission = computeDuuminiCommission(discountedItemsAmount);
 
       const currentPayment = safeParseJSON(o.payment) || {};
       const currentPaid = normMoney(
-        o.paid_amount ?? currentPayment.paid_amount ?? 0
+        o.paid_amount ?? currentPayment.paid_amount ?? 0,
       );
       const safePaid = Math.min(currentPaid, newTotal);
 
@@ -2377,7 +2403,7 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
           paid_amount: safePaid,
         },
         newTotal,
-        currency
+        currency,
       );
 
       const sets = [
@@ -2502,7 +2528,7 @@ router.post("/admin", authRequired, async (req, res) => {
     contactObj = buildContactFromPayload(rawContact);
 
     contactObj.role = normalizeCustomerRoleInput(
-      customer_role || contactObj?.role || rawContact?.role || "CLIENT"
+      customer_role || contactObj?.role || rawContact?.role || "CLIENT",
     );
 
     validateVendorContactOrThrow(contactObj);
@@ -2530,19 +2556,19 @@ router.post("/admin", authRequired, async (req, res) => {
         usersCols.city
           ? "city"
           : usersCols.ville
-          ? "ville AS city"
-          : "NULL AS city",
+            ? "ville AS city"
+            : "NULL AS city",
         usersCols.commune ? "commune" : "NULL AS commune",
         usersCols.district
           ? "district"
           : usersCols.quartier
-          ? "quartier AS district"
-          : "NULL AS district",
+            ? "quartier AS district"
+            : "NULL AS district",
         usersCols.address_line
           ? "address_line"
           : usersCols.address
-          ? "address AS address_line"
-          : "NULL AS address_line",
+            ? "address AS address_line"
+            : "NULL AS address_line",
         usersCols.landmark ? "landmark" : "NULL AS landmark",
         usersCols.commercial_name
           ? "commercial_name"
@@ -2557,7 +2583,7 @@ router.post("/admin", authRequired, async (req, res) => {
           WHERE id = ?
           LIMIT 1
         `,
-        [customerId]
+        [customerId],
       );
 
       if (!row) {
@@ -2591,7 +2617,7 @@ router.post("/admin", authRequired, async (req, res) => {
           address_line: contactObj.address_line || row.address_line || null,
           landmark: contactObj.landmark || row.landmark || null,
           role: normalizeCustomerRoleInput(
-            contactObj.role || row.role || "CLIENT"
+            contactObj.role || row.role || "CLIENT",
           ),
           commercial_name:
             contactObj.commercial_name || row.commercial_name || null,
@@ -2606,7 +2632,7 @@ router.post("/admin", authRequired, async (req, res) => {
         conn,
         row.id,
         contactObj,
-        addressObj
+        addressObj,
       );
 
       const [[freshUser]] = await conn.query(
@@ -2616,7 +2642,7 @@ router.post("/admin", authRequired, async (req, res) => {
           WHERE id = ?
           LIMIT 1
         `,
-        [row.id]
+        [row.id],
       );
 
       u = freshUser || row;
@@ -2624,7 +2650,7 @@ router.post("/admin", authRequired, async (req, res) => {
       if (!contactObj) contactObj = buildContactFromPayload({});
 
       contactObj.role = normalizeCustomerRoleInput(
-        customer_role || contactObj.role || "CLIENT"
+        customer_role || contactObj.role || "CLIENT",
       );
 
       validateVendorContactOrThrow(contactObj);
@@ -2643,7 +2669,7 @@ router.post("/admin", authRequired, async (req, res) => {
       autoAccount = await findOrCreateCustomerAccount(
         conn,
         contactObj,
-        addressObj
+        addressObj,
       );
 
       u = autoAccount.user;
@@ -2697,7 +2723,10 @@ router.post("/admin", authRequired, async (req, res) => {
       ? computeAdminDiscountAmount(itemsAmount, discountInput)
       : 0;
 
-    const discountedItemsAmount = Math.max(0, itemsAmount - adminDiscountAmount);
+    const discountedItemsAmount = Math.max(
+      0,
+      itemsAmount - adminDiscountAmount,
+    );
     const orderTotal = discountedItemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(discountedItemsAmount);
 
@@ -2760,7 +2789,7 @@ router.post("/admin", authRequired, async (req, res) => {
         "admin_discount_value",
         "admin_discount_amount",
         "admin_discount_label",
-        "discounted_by_admin_id"
+        "discounted_by_admin_id",
       );
 
       placeholders.splice(7, 0, "?", "?", "?", "?", "?", "?", "?");
@@ -2774,7 +2803,7 @@ router.post("/admin", authRequired, async (req, res) => {
         discountInput.type === "NONE" ? 0 : discountInput.value,
         +adminDiscountAmount.toFixed(2),
         discountInput.label,
-        adminDiscountAmount > 0 ? req.user.id : null
+        adminDiscountAmount > 0 ? req.user.id : null,
       );
     }
 
@@ -2816,7 +2845,7 @@ router.post("/admin", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals
+      vals,
     );
 
     const orderId = r.insertId;
@@ -2833,12 +2862,10 @@ router.post("/admin", authRequired, async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (
-          promoCols.promo_applied ||
+        (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price
-        )
+          promoCols.base_unit_price)
       ) {
         const cols2 = [
           "order_id",
@@ -2873,16 +2900,14 @@ router.post("/admin", authRequired, async (req, res) => {
 
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(
-            it.promo_value != null ? Number(it.promo_value) : null
-          );
+          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2
+          vals2,
         );
       } else {
         await conn.query(
@@ -2891,7 +2916,7 @@ router.post("/admin", authRequired, async (req, res) => {
             (order_id, product_id, variant_id, qty, unit_price)
             VALUES (?,?,?,?,?)
           `,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
         );
       }
     }
@@ -2918,10 +2943,10 @@ router.post("/admin", authRequired, async (req, res) => {
       }
 
       if (it.stockSource === "VARIANT" && it.variant_id) {
-        await conn.query(
-          `UPDATE product_variants SET stock = ? WHERE id = ?`,
-          [newStock, it.variant_id]
-        );
+        await conn.query(`UPDATE product_variants SET stock = ? WHERE id = ?`, [
+          newStock,
+          it.variant_id,
+        ]);
       } else {
         await conn.query(`UPDATE products SET stock = ? WHERE id = ?`, [
           newStock,
@@ -2945,7 +2970,7 @@ router.post("/admin", authRequired, async (req, res) => {
       await notifyUser(effectiveCustomerId, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0
+          orderTotal || 0,
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -2965,14 +2990,15 @@ router.post("/admin", authRequired, async (req, res) => {
       payment: paymentObj || null,
       user_id: effectiveCustomerId,
       customer_role: normalizeCustomerRoleInput(
-        contactObj?.role || u?.role || "CLIENT"
+        contactObj?.role || u?.role || "CLIENT",
       ),
       contact: {
         ...contactObj,
         role: normalizeCustomerRoleInput(
-          contactObj?.role || u?.role || "CLIENT"
+          contactObj?.role || u?.role || "CLIENT",
         ),
-        commercial_name: contactObj?.commercial_name || u?.commercial_name || null,
+        commercial_name:
+          contactObj?.commercial_name || u?.commercial_name || null,
         ice: contactObj?.ice || u?.ice || null,
       },
       address: addressObj || null,
@@ -3060,7 +3086,7 @@ router.post("/", authRequired, async (req, res) => {
 
     contactObj = enrichContactWithAddress(contactObj, addressObj);
     contactObj.role = normalizeCustomerRoleInput(
-      contactObj?.role || req.user?.role || "CLIENT"
+      contactObj?.role || req.user?.role || "CLIENT",
     );
 
     const promoCols = await getOrderItemsPromoColsCached(pool);
@@ -3136,7 +3162,7 @@ router.post("/", authRequired, async (req, res) => {
       vals.splice(
         vals.indexOf(+orderTotal.toFixed(2)),
         0,
-        +deliveryFee.toFixed(2)
+        +deliveryFee.toFixed(2),
       );
     }
 
@@ -3208,7 +3234,7 @@ router.post("/", authRequired, async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals
+      vals,
     );
 
     const orderId = r.insertId;
@@ -3225,12 +3251,10 @@ router.post("/", authRequired, async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (
-          promoCols.promo_applied ||
+        (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price
-        )
+          promoCols.base_unit_price)
       ) {
         const cols2 = [
           "order_id",
@@ -3265,16 +3289,14 @@ router.post("/", authRequired, async (req, res) => {
 
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(
-            it.promo_value != null ? Number(it.promo_value) : null
-          );
+          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2
+          vals2,
         );
       } else {
         await conn.query(
@@ -3283,7 +3305,7 @@ router.post("/", authRequired, async (req, res) => {
             (order_id, product_id, variant_id, qty, unit_price)
             VALUES (?,?,?,?,?)
           `,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
         );
       }
     }
@@ -3333,7 +3355,7 @@ router.post("/", authRequired, async (req, res) => {
       await notifyUser(req.user.id, "ORDER_CREATED", {
         title: `Commande ${displayCode} créée`,
         body: `Votre commande ${displayCode} a été créée. Total: ${Number(
-          orderTotal || 0
+          orderTotal || 0,
         )} ${currency}.`,
         order_id: orderId,
         display_code: displayCode,
@@ -3367,16 +3389,16 @@ router.post("/", authRequired, async (req, res) => {
       geo_link: geoLink || null,
       payment: paymentObj || null,
       contact: {
-  ...contactObj,
-  role: normalizeCustomerRoleInput(
-    contactObj?.role || req.user?.role || "CLIENT"
-  ),
-  commercial_name: contactObj?.commercial_name || null,
-  ice: contactObj?.ice || null,
-},
+        ...contactObj,
+        role: normalizeCustomerRoleInput(
+          contactObj?.role || req.user?.role || "CLIENT",
+        ),
+        commercial_name: contactObj?.commercial_name || null,
+        ice: contactObj?.ice || null,
+      },
       address: addressObj || null,
       customer_role: normalizeCustomerRoleInput(
-        contactObj?.role || req.user?.role || "CLIENT"
+        contactObj?.role || req.user?.role || "CLIENT",
       ),
       admin_discount: {
         type: "NONE",
@@ -3456,7 +3478,11 @@ router.post("/guest", async (req, res) => {
     });
 
     const deliveryFee = Number(delivery?.fee || totals?.delivery_fee || 0);
-    const currency = (delivery?.currency || totals?.currency || "MAD").toUpperCase();
+    const currency = (
+      delivery?.currency ||
+      totals?.currency ||
+      "MAD"
+    ).toUpperCase();
 
     const orderTotal = itemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(itemsAmount);
@@ -3512,7 +3538,11 @@ router.post("/guest", async (req, res) => {
     if (discountCols?.delivery_fee) {
       cols.splice(cols.indexOf("total"), 0, "delivery_fee");
       placeholders.splice(placeholders.length - 4, 0, "?");
-      vals.splice(vals.indexOf(+orderTotal.toFixed(2)), 0, +deliveryFee.toFixed(2));
+      vals.splice(
+        vals.indexOf(+orderTotal.toFixed(2)),
+        0,
+        +deliveryFee.toFixed(2),
+      );
     }
 
     if (discountCols?.admin_discount_type) {
@@ -3583,7 +3613,7 @@ router.post("/guest", async (req, res) => {
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
-      vals
+      vals,
     );
 
     const orderId = r.insertId;
@@ -3600,12 +3630,10 @@ router.post("/guest", async (req, res) => {
     for (const it of cleanItems) {
       if (
         promoCols &&
-        (
-          promoCols.promo_applied ||
+        (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price
-        )
+          promoCols.base_unit_price)
       ) {
         const cols2 = [
           "order_id",
@@ -3640,16 +3668,14 @@ router.post("/guest", async (req, res) => {
 
         if (promoCols.promo_value) {
           cols2.push("promo_value");
-          vals2.push(
-            it.promo_value != null ? Number(it.promo_value) : null
-          );
+          vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
         }
 
         await conn.query(
           `INSERT INTO order_items (${cols2.join(",")}) VALUES (${cols2
             .map(() => "?")
             .join(",")})`,
-          vals2
+          vals2,
         );
       } else {
         await conn.query(
@@ -3658,7 +3684,7 @@ router.post("/guest", async (req, res) => {
             (order_id, product_id, variant_id, qty, unit_price)
             VALUES (?,?,?,?,?)
           `,
-          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price]
+          [orderId, it.product_id, it.variant_id, it.qty, it.unit_price],
         );
       }
     }
@@ -3788,20 +3814,18 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const contact =
       contactFromOrder &&
-      (
-        contactFromOrder.first_name ||
+      (contactFromOrder.first_name ||
         contactFromOrder.last_name ||
         contactFromOrder.phone ||
         contactFromOrder.city ||
         contactFromOrder.commune ||
         contactFromOrder.district ||
         contactFromOrder.commercial_name ||
-        contactFromOrder.ice
-      )
+        contactFromOrder.ice)
         ? {
             ...contactFromOrder,
             role: normalizeCustomerRoleInput(
-              contactFromOrder.role || o.customer_role || "CLIENT"
+              contactFromOrder.role || o.customer_role || "CLIENT",
             ),
             commercial_name:
               contactFromOrder.commercial_name ?? o.u_commercial_name ?? null,
@@ -3823,34 +3847,38 @@ router.get("/:id", authRequired, async (req, res) => {
 
     const itemsAmount = items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0
+      0,
     );
 
     const isVendorView = isVendor(req.user) && !isAdmin(req.user);
     const currency = String(o.currency || "MAD").toUpperCase();
 
     const discountCols = await getOrdersDiscountColsCached(getPool());
-    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const adminDiscount = buildAdminDiscountForRow(
+      o,
+      discountCols,
+      itemsAmount,
+    );
 
     const totalAmount = isVendorView
       ? itemsAmount
       : Number(
           o.total ||
-            adminDiscount.discounted_items_amount + Number(o.delivery_fee || 0)
+            adminDiscount.discounted_items_amount + Number(o.delivery_fee || 0),
         );
 
     const deliveryFee = isVendorView
       ? 0
       : discountCols?.delivery_fee
-      ? Number(o.delivery_fee || 0)
-      : Math.max(0, totalAmount - itemsAmount);
+        ? Number(o.delivery_fee || 0)
+        : Math.max(0, totalAmount - itemsAmount);
 
     const payCols = await getOrdersPayColsCached(getPool());
     const paymentNorm = normalizePaymentForRow(
       o,
       totalAmount,
       currency,
-      payCols
+      payCols,
     );
 
     const duuminiCommissionRaw = isCancelledStatus(o.status)
@@ -3867,15 +3895,16 @@ router.get("/:id", authRequired, async (req, res) => {
       ...paymentNorm,
       display_code: buildDisplayCode(o.id),
       customer_role: normalizeCustomerRoleInput(
-        o.customer_role || contact?.role || "CLIENT"
+        o.customer_role || contact?.role || "CLIENT",
       ),
       address: addr,
       contact: {
         ...contact,
         role: normalizeCustomerRoleInput(
-          contact?.role || o.customer_role || "CLIENT"
+          contact?.role || o.customer_role || "CLIENT",
         ),
-        commercial_name: contact?.commercial_name ?? o.u_commercial_name ?? null,
+        commercial_name:
+          contact?.commercial_name ?? o.u_commercial_name ?? null,
         ice: contact?.ice ?? o.u_ice ?? null,
       },
       admin_discount: {
@@ -3891,7 +3920,7 @@ router.get("/:id", authRequired, async (req, res) => {
         items_subtotal: +Number(adminDiscount.items_subtotal || 0).toFixed(2),
         admin_discount_amount: +Number(adminDiscount.amount || 0).toFixed(2),
         discounted_items_amount: +Number(
-          adminDiscount.discounted_items_amount || 0
+          adminDiscount.discounted_items_amount || 0,
         ).toFixed(2),
         delivery_fee: +deliveryFee.toFixed(2),
         amount: +totalAmount.toFixed(2),
@@ -3940,7 +3969,7 @@ router.get("/receipt/:token", async (req, res) => {
         WHERE o.receipt_token = ?
         LIMIT 1
       `,
-      [token]
+      [token],
     );
 
     if (!o) {
@@ -3968,7 +3997,7 @@ router.get("/receipt/:token", async (req, res) => {
         WHERE oi.order_id = ?
         ORDER BY oi.id ASC
       `,
-      [o.id]
+      [o.id],
     );
 
     const addr = safeParseJSON(o.address) || {};
@@ -3977,20 +4006,18 @@ router.get("/receipt/:token", async (req, res) => {
 
     const contact =
       contactFromOrder &&
-      (
-        contactFromOrder.first_name ||
+      (contactFromOrder.first_name ||
         contactFromOrder.last_name ||
         contactFromOrder.phone ||
         contactFromOrder.city ||
         contactFromOrder.commune ||
         contactFromOrder.district ||
         contactFromOrder.commercial_name ||
-        contactFromOrder.ice
-      )
+        contactFromOrder.ice)
         ? {
             ...contactFromOrder,
             role: normalizeCustomerRoleInput(
-              contactFromOrder.role || o.customer_role || "CLIENT"
+              contactFromOrder.role || o.customer_role || "CLIENT",
             ),
             commercial_name:
               contactFromOrder.commercial_name ?? o.u_commercial_name ?? null,
@@ -4007,33 +4034,38 @@ router.get("/receipt/:token", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0
+      0,
     );
 
     const currency = String(o.currency || "MAD").toUpperCase();
-    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const adminDiscount = buildAdminDiscountForRow(
+      o,
+      discountCols,
+      itemsAmount,
+    );
 
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
 
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
     );
 
     return res.json({
       ...o,
       display_code: buildDisplayCode(o.id),
       customer_role: normalizeCustomerRoleInput(
-        o.customer_role || contact?.role || "CLIENT"
+        o.customer_role || contact?.role || "CLIENT",
       ),
       address: addr,
       contact: {
         ...contact,
         role: normalizeCustomerRoleInput(
-          contact?.role || o.customer_role || "CLIENT"
+          contact?.role || o.customer_role || "CLIENT",
         ),
-        commercial_name: contact?.commercial_name ?? o.u_commercial_name ?? null,
+        commercial_name:
+          contact?.commercial_name ?? o.u_commercial_name ?? null,
         ice: contact?.ice ?? o.u_ice ?? null,
       },
       admin_discount: {
@@ -4049,7 +4081,7 @@ router.get("/receipt/:token", async (req, res) => {
         items_subtotal: +Number(adminDiscount.items_subtotal || 0).toFixed(2),
         admin_discount_amount: +Number(adminDiscount.amount || 0).toFixed(2),
         discounted_items_amount: +Number(
-          adminDiscount.discounted_items_amount || 0
+          adminDiscount.discounted_items_amount || 0,
         ).toFixed(2),
         delivery_fee: +deliveryFee.toFixed(2),
         amount: +totalAmount.toFixed(2),
@@ -4095,7 +4127,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         WHERE o.receipt_token = ?
         LIMIT 1
       `,
-      [token]
+      [token],
     );
 
     if (!o) {
@@ -4116,7 +4148,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         WHERE oi.order_id = ?
         ORDER BY oi.id ASC
       `,
-      [o.id]
+      [o.id],
     );
 
     const currency = (o.currency || "MAD").toUpperCase();
@@ -4126,20 +4158,18 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
     const contact =
       contactFromOrder &&
-      (
-        contactFromOrder.first_name ||
+      (contactFromOrder.first_name ||
         contactFromOrder.last_name ||
         contactFromOrder.phone ||
         contactFromOrder.city ||
         contactFromOrder.commune ||
         contactFromOrder.district ||
         contactFromOrder.commercial_name ||
-        contactFromOrder.ice
-      )
+        contactFromOrder.ice)
         ? {
             ...contactFromOrder,
             role: normalizeCustomerRoleInput(
-              contactFromOrder.role || o.customer_role || "CLIENT"
+              contactFromOrder.role || o.customer_role || "CLIENT",
             ),
             commercial_name:
               contactFromOrder.commercial_name ?? o.u_commercial_name ?? null,
@@ -4156,27 +4186,32 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
     const itemsAmount = (items || []).reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0
+      0,
     );
 
-    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const adminDiscount = buildAdminDiscountForRow(
+      o,
+      discountCols,
+      itemsAmount,
+    );
 
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
 
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
     );
 
-    const duuminiCommission =
-      isCancelledStatus(o.status)
-        ? 0
-        : normCommission(o.commission_duumini) ??
-          computeDuuminiCommission(adminDiscount.discounted_items_amount);
+    const duuminiCommission = isCancelledStatus(o.status)
+      ? 0
+      : (normCommission(o.commission_duumini) ??
+        computeDuuminiCommission(adminDiscount.discounted_items_amount));
 
     const base = String(
-      env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com"
+      env.PUBLIC_WEB_BASE ||
+        process.env.PUBLIC_WEB_BASE ||
+        "https://duumini.com",
     ).replace(/\/+$/, "");
 
     const verifyUrl = `${base}/r/${token}`;
@@ -4212,28 +4247,30 @@ router.get("/receipt/:token.pdf", async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`
+      }`,
     );
     doc.moveDown();
 
     const fullName =
-      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || "Client";
+      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() ||
+      "Client";
 
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
     if (contact.phone) doc.text(`Téléphone : ${contact.phone}`);
     doc.text(
       `Rôle client : ${normalizeCustomerRoleInput(
-        contact.role || o.customer_role || "CLIENT"
-      )}`
+        contact.role || o.customer_role || "CLIENT",
+      )}`,
     );
 
     if (
-      normalizeCustomerRoleInput(contact.role || o.customer_role || "CLIENT") ===
-      "VENDEUR"
+      normalizeCustomerRoleInput(
+        contact.role || o.customer_role || "CLIENT",
+      ) === "VENDEUR"
     ) {
       doc.text(
-        `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`
+        `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`,
       );
       doc.text(`ICE : ${contact.ice || o.u_ice || "—"}`);
     }
@@ -4262,8 +4299,8 @@ router.get("/receipt/:token.pdf", async (req, res) => {
 
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2
-        )} ${currency}`
+          2,
+        )} ${currency}`,
       );
     });
 
@@ -4272,17 +4309,19 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
     );
 
     if (adminDiscount.amount > 0) {
-      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+      doc.text(
+        `Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`,
+      );
     }
 
     doc.text(
       `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2
-      )} ${currency}`
+        2,
+      )} ${currency}`,
     );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
@@ -4292,7 +4331,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
       );
     doc.moveDown();
 
@@ -4340,20 +4379,18 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     const contact =
       contactFromOrder &&
-      (
-        contactFromOrder.first_name ||
+      (contactFromOrder.first_name ||
         contactFromOrder.last_name ||
         contactFromOrder.phone ||
         contactFromOrder.city ||
         contactFromOrder.commune ||
         contactFromOrder.district ||
         contactFromOrder.commercial_name ||
-        contactFromOrder.ice
-      )
+        contactFromOrder.ice)
         ? {
             ...contactFromOrder,
             role: normalizeCustomerRoleInput(
-              contactFromOrder.role || o.customer_role || "CLIENT"
+              contactFromOrder.role || o.customer_role || "CLIENT",
             ),
             commercial_name:
               contactFromOrder.commercial_name ?? o.u_commercial_name ?? null,
@@ -4375,29 +4412,34 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
     const itemsAmount = items.reduce(
       (sum, it) => sum + Number(it.unit_price || 0) * Number(it.qty || 1),
-      0
+      0,
     );
 
-    const adminDiscount = buildAdminDiscountForRow(o, discountCols, itemsAmount);
+    const adminDiscount = buildAdminDiscountForRow(
+      o,
+      discountCols,
+      itemsAmount,
+    );
 
     const deliveryFee = discountCols?.delivery_fee
       ? Number(o.delivery_fee || 0)
       : Math.max(0, Number(o.total || itemsAmount) - itemsAmount);
 
     const totalAmount = Number(
-      o.total || adminDiscount.discounted_items_amount + deliveryFee
+      o.total || adminDiscount.discounted_items_amount + deliveryFee,
     );
 
-    const duuminiCommission =
-      isCancelledStatus(o.status)
-        ? 0
-        : normCommission(o.commission_duumini) ??
-          computeDuuminiCommission(adminDiscount.discounted_items_amount);
+    const duuminiCommission = isCancelledStatus(o.status)
+      ? 0
+      : (normCommission(o.commission_duumini) ??
+        computeDuuminiCommission(adminDiscount.discounted_items_amount));
 
     const token = o.receipt_token ? String(o.receipt_token) : null;
 
     const base = String(
-      env.PUBLIC_WEB_BASE || process.env.PUBLIC_WEB_BASE || "https://duumini.com"
+      env.PUBLIC_WEB_BASE ||
+        process.env.PUBLIC_WEB_BASE ||
+        "https://duumini.com",
     ).replace(/\/+$/, "");
 
     const verifyUrl = token ? `${base}/r/${token}` : `${base}/orders/${id}`;
@@ -4433,28 +4475,30 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
         o.created_at
           ? new Date(o.created_at).toLocaleString("fr-FR")
           : new Date().toLocaleString("fr-FR")
-      }`
+      }`,
     );
     doc.moveDown();
 
     const fullName =
-      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() || "Client";
+      `${contact.first_name || ""} ${contact.last_name || ""}`.trim() ||
+      "Client";
 
     doc.fontSize(12).text("Client", { underline: true });
     doc.fontSize(10).text(`Nom : ${fullName}`);
     if (contact.phone) doc.text(`Téléphone : ${contact.phone}`);
     doc.text(
       `Rôle client : ${normalizeCustomerRoleInput(
-        contact.role || o.customer_role || "CLIENT"
-      )}`
+        contact.role || o.customer_role || "CLIENT",
+      )}`,
     );
 
     if (
-      normalizeCustomerRoleInput(contact.role || o.customer_role || "CLIENT") ===
-      "VENDEUR"
+      normalizeCustomerRoleInput(
+        contact.role || o.customer_role || "CLIENT",
+      ) === "VENDEUR"
     ) {
       doc.text(
-        `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`
+        `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`,
       );
       doc.text(`ICE : ${contact.ice || o.u_ice || "—"}`);
     }
@@ -4483,8 +4527,8 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
 
       doc.text(
         `• ${name}${suffix}  x${qty}  —  ${unit.toFixed(2)} ${currency}  =  ${line.toFixed(
-          2
-        )} ${currency}`
+          2,
+        )} ${currency}`,
       );
     });
 
@@ -4493,17 +4537,19 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc.fontSize(12).text("Totaux", { underline: true });
     doc.fontSize(10);
     doc.text(
-      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`
+      `Sous-total produits : ${adminDiscount.items_subtotal.toFixed(2)} ${currency}`,
     );
 
     if (adminDiscount.amount > 0) {
-      doc.text(`Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`);
+      doc.text(
+        `Réduction admin : -${adminDiscount.amount.toFixed(2)} ${currency}`,
+      );
     }
 
     doc.text(
       `Total produits net : ${adminDiscount.discounted_items_amount.toFixed(
-        2
-      )} ${currency}`
+        2,
+      )} ${currency}`,
     );
     doc.text(`Frais de livraison : ${deliveryFee.toFixed(2)} ${currency}`);
     doc.moveDown(0.3);
@@ -4513,7 +4559,7 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     doc
       .fontSize(10)
       .text(
-        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`
+        `CA Duumini (9% sur produits) : ${duuminiCommission.toFixed(2)} ${currency}`,
       );
     doc.moveDown();
 
@@ -4559,7 +4605,7 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
         WHERE id = ?
         LIMIT 1
       `,
-      [id]
+      [id],
     );
 
     if (!o) {
@@ -4585,7 +4631,7 @@ router.post("/:id/send-receipt-whatsapp", authRequired, async (req, res) => {
     }
 
     const apiBase = String(
-      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || ""
+      env.PUBLIC_API_BASE || process.env.PUBLIC_API_BASE || "",
     ).replace(/\/+$/, "");
 
     if (!apiBase) {
@@ -4655,12 +4701,15 @@ router.put("/:id/status", authRequired, async (req, res) => {
       }
     }
 
-    await pool.query(`UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?`, [
-      status,
-      id,
-    ]);
+    await pool.query(
+      `UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?`,
+      [status, id],
+    );
 
-    const [[order]] = await pool.query(`SELECT user_id FROM orders WHERE id = ?`, [id]);
+    const [[order]] = await pool.query(
+      `SELECT user_id FROM orders WHERE id = ?`,
+      [id],
+    );
 
     if (order && order.user_id) {
       const displayCode = buildDisplayCode(id);
@@ -4726,7 +4775,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
 
     const [items] = await conn.query(
       `SELECT product_id, variant_id, qty FROM order_items WHERE order_id = ? ORDER BY id ASC`,
-      [id]
+      [id],
     );
 
     for (const it of items) {
@@ -4736,12 +4785,12 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       if (it.variant_id) {
         await conn.query(
           `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
-          [qty, it.variant_id]
+          [qty, it.variant_id],
         );
       } else if (it.product_id) {
         await conn.query(
           `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
-          [qty, it.product_id]
+          [qty, it.product_id],
         );
       }
     }
@@ -4754,7 +4803,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
             updated_at = NOW()
         WHERE id = ?
       `,
-      [id]
+      [id],
     );
 
     await conn.commit();
