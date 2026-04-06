@@ -1,4 +1,3 @@
-// api/auth.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const bcrypt = require("bcryptjs");
@@ -18,13 +17,34 @@ function toPosInt(x) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+function normPhone(p) {
+  const raw = String(p || "").replace(/\s+/g, "");
+  if (!raw) return null;
+  if (raw.startsWith("+")) return raw;
+  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
+  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
+  return raw;
+}
+
 /**
  * POST /api/auth/register
  */
 router.post("/register", async (req, res) => {
-  const { phone, password, first_name, last_name, avatar, ville, commune, quartier, sexe } = req.body || {};
+  const {
+    phone,
+    password,
+    first_name,
+    last_name,
+    avatar,
+    ville,
+    commune,
+    quartier,
+    sexe,
+  } = req.body || {};
 
-  if (!phone || !password) {
+  const cleanPhone = normPhone(phone);
+
+  if (!cleanPhone || !password) {
     return res.status(400).json({ error: "phone & password required" });
   }
 
@@ -32,7 +52,22 @@ router.post("/register", async (req, res) => {
   const _ville = normalizeVille(ville);
 
   const pool = getPool();
+
   try {
+    const [exists] = await pool.query(
+      "SELECT id FROM users WHERE phone=? LIMIT 1",
+      [cleanPhone]
+    );
+
+    if (exists && exists.length) {
+      return res.status(409).json({
+        error: "Phone already exists",
+        code: "ACCOUNT_ALREADY_EXISTS",
+        message:
+          "Un compte existe déjà avec ce numéro. Connectez-vous puis modifiez votre mot de passe si besoin.",
+      });
+    }
+
     const hash = await bcrypt.hash(String(password), 10);
 
     await pool.query(
@@ -43,7 +78,7 @@ router.post("/register", async (req, res) => {
         (?,?,?,?,?,?,?,?,?,?)
       `,
       [
-        String(phone).trim(),
+        cleanPhone,
         hash,
         "MEMBER",
         first_name || null,
@@ -58,10 +93,21 @@ router.post("/register", async (req, res) => {
 
     return res.status(201).json({ ok: true });
   } catch (e) {
-    const msg = String((e && e.message) || "");
-    if (msg.includes("Duplicate")) {
-      return res.status(409).json({ error: "Phone already exists" });
+    const msg = String((e && e.message) || "").toLowerCase();
+
+    if (
+      msg.includes("duplicate") ||
+      msg.includes("duplicate entry") ||
+      msg.includes("uq_users_phone")
+    ) {
+      return res.status(409).json({
+        error: "Phone already exists",
+        code: "ACCOUNT_ALREADY_EXISTS",
+        message:
+          "Un compte existe déjà avec ce numéro. Connectez-vous puis modifiez votre mot de passe si besoin.",
+      });
     }
+
     return res.status(500).json({ error: e.message });
   }
 });
@@ -71,7 +117,9 @@ router.post("/register", async (req, res) => {
  */
 router.post("/login", async (req, res) => {
   const { phone, password } = req.body || {};
-  if (!phone || !password) {
+  const cleanPhone = normPhone(phone);
+
+  if (!cleanPhone || !password) {
     return res.status(400).json({ error: "phone & password required" });
   }
 
@@ -80,7 +128,7 @@ router.post("/login", async (req, res) => {
     const [rows] = await pool.query(
       `SELECT id, phone, password, role, first_name, last_name, avatar, ville, commune, quartier, sexe
        FROM users WHERE phone=? LIMIT 1`,
-      [String(phone).trim()]
+      [cleanPhone]
     );
 
     const user = rows && rows[0];
@@ -133,19 +181,21 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
     let vendor_shop_id = toPosInt(req.body?.vendor_shop_id);
     let vendor_user_id = toPosInt(req.body?.vendor_user_id);
 
-    // si user_id fourni -> trouver son shop
     if (vendor_user_id != null) {
       const [shops] = await pool.query(
         `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
         [vendor_user_id]
       );
-      if (!shops.length) return res.status(404).json({ error: "Vendor shop not found for this user" });
+      if (!shops.length) {
+        return res.status(404).json({ error: "Vendor shop not found for this user" });
+      }
       vendor_shop_id = Number(shops[0].id);
     }
 
-    if (!vendor_shop_id) return res.status(400).json({ error: "vendor_shop_id required" });
+    if (!vendor_shop_id) {
+      return res.status(400).json({ error: "vendor_shop_id required" });
+    }
 
-    // shop existe ? + owner_id ?
     const [sr] = await pool.query(
       `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
       [vendor_shop_id]
@@ -153,9 +203,10 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
     const shop = sr && sr[0];
     if (!shop) return res.status(404).json({ error: "Shop not found" });
 
-    if (!vendor_user_id && shop.owner_id) vendor_user_id = toPosInt(shop.owner_id);
+    if (!vendor_user_id && shop.owner_id) {
+      vendor_user_id = toPosInt(shop.owner_id);
+    }
 
-    // on vérifie que target user existe
     if (vendor_user_id) {
       const [ur] = await pool.query(
         `SELECT id, role FROM users WHERE id=? LIMIT 1`,
@@ -205,7 +256,12 @@ router.post("/refresh", async (req, res) => {
     const dbUser = rows && rows[0];
     if (!dbUser) return res.status(401).json({ error: "invalid refresh_token" });
 
-    const access_token = signAccess({ id: dbUser.id, role: dbUser.role, phone: dbUser.phone });
+    const access_token = signAccess({
+      id: dbUser.id,
+      role: dbUser.role,
+      phone: dbUser.phone,
+    });
+
     return res.json({ access_token });
   } catch {
     return res.status(401).json({ error: "invalid refresh_token" });

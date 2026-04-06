@@ -1,4 +1,3 @@
-// api/routes/users.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, requireRole } = require("../middlewares/auth");
@@ -17,6 +16,15 @@ function toPosInt(x) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+function normPhone(p) {
+  const raw = String(p || "").replace(/\s+/g, "");
+  if (!raw) return null;
+  if (raw.startsWith("+")) return raw;
+  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
+  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
+  return raw;
+}
+
 function adminRequired(req, res, next) {
   if (!req.user || String(req.user.role || "").toUpperCase() !== "ADMIN") {
     return res.status(403).json({ error: "Forbidden" });
@@ -26,7 +34,15 @@ function adminRequired(req, res, next) {
 
 function normalizeRole(role) {
   const r = String(role || "").trim().toUpperCase();
-  const ROLES = ["MEMBER", "CLIENT", "VENDEUR", "FOURNISSEUR", "RESTAURANT", "LIVREUR", "ADMIN"];
+  const ROLES = [
+    "MEMBER",
+    "CLIENT",
+    "VENDEUR",
+    "FOURNISSEUR",
+    "RESTAURANT",
+    "LIVREUR",
+    "ADMIN",
+  ];
   return ROLES.includes(r) ? r : "MEMBER";
 }
 
@@ -54,14 +70,13 @@ async function getMyShops(pool, userId) {
 
 /**
  * GET /api/user/me
- * ✅ IMPORTANT:
- * - si admin impersonate un vendeur, req.user.effective_user_id != req.user.id
- * - on retourne le "me" effectif (le vendeur), MAIS on garde aussi actor_admin_id + impersonate_shop_id
  */
 router.get("/me", authRequired, async (req, res) => {
   const pool = getPool();
   try {
-    const effectiveUserId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const effectiveUserId =
+      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+
     if (!effectiveUserId) return res.json(null);
 
     const [rows] = await pool.query(
@@ -79,10 +94,14 @@ router.get("/me", authRequired, async (req, res) => {
       req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
 
     const impersonate_shop_id =
-      req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+      req.user.impersonate_shop_id != null
+        ? Number(req.user.impersonate_shop_id)
+        : null;
 
     const impersonate_user_id =
-      req.user.impersonate_user_id != null ? Number(req.user.impersonate_user_id) : null;
+      req.user.impersonate_user_id != null
+        ? Number(req.user.impersonate_user_id)
+        : null;
 
     res.json({
       ...me,
@@ -98,14 +117,27 @@ router.get("/me", authRequired, async (req, res) => {
 
 /**
  * PUT /api/user/me
- * ✅ Si admin impersonate -> update le profil du vendeur (effective_user_id)
  */
 router.put("/me", authRequired, async (req, res) => {
-  const { first_name, last_name, avatar, ville, commune, quartier, sexe, phone } = req.body || {};
+  const {
+    first_name,
+    last_name,
+    avatar,
+    ville,
+    commune,
+    quartier,
+    sexe,
+    phone,
+  } = req.body || {};
+
   const pool = getPool();
 
-  const effectiveUserId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
-  if (!effectiveUserId) return res.status(401).json({ error: "Unauthorized" });
+  const effectiveUserId =
+    toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+
+  if (!effectiveUserId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
 
   const fields = [];
   const values = [];
@@ -140,8 +172,12 @@ router.put("/me", authRequired, async (req, res) => {
     values.push(_sexe);
   }
   if (typeof phone !== "undefined") {
+    const cleanPhone = normPhone(phone);
+    if (!cleanPhone) {
+      return res.status(400).json({ error: "Invalid phone" });
+    }
     fields.push("phone=?");
-    values.push(String(phone).trim());
+    values.push(cleanPhone);
   }
 
   if (fields.length === 0) {
@@ -150,10 +186,12 @@ router.put("/me", authRequired, async (req, res) => {
 
   try {
     if (typeof phone !== "undefined") {
+      const cleanPhone = normPhone(phone);
       const [dups] = await pool.query(
         "SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1",
-        [String(phone).trim(), effectiveUserId]
+        [cleanPhone, effectiveUserId]
       );
+
       if (dups && dups.length) {
         return res.status(409).json({ error: "Phone already exists" });
       }
@@ -175,10 +213,14 @@ router.put("/me", authRequired, async (req, res) => {
       req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
 
     const impersonate_shop_id =
-      req.user.impersonate_shop_id != null ? Number(req.user.impersonate_shop_id) : null;
+      req.user.impersonate_shop_id != null
+        ? Number(req.user.impersonate_shop_id)
+        : null;
 
     const impersonate_user_id =
-      req.user.impersonate_user_id != null ? Number(req.user.impersonate_user_id) : null;
+      req.user.impersonate_user_id != null
+        ? Number(req.user.impersonate_user_id)
+        : null;
 
     res.json({
       ...me,
@@ -193,12 +235,15 @@ router.put("/me", authRequired, async (req, res) => {
 });
 
 /* ============================
- *            🔒 ADMIN
+ *            ADMIN
  * ============================ */
 
 router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page || "1", 10));
-  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize || "20", 10)));
+  const pageSize = Math.min(
+    100,
+    Math.max(1, parseInt(req.query.pageSize || "20", 10))
+  );
   const q = (req.query.q || "").toString().trim();
   const role = (req.query.role || "").toString().trim();
 
@@ -211,6 +256,7 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     where.push(`(phone LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR role LIKE ?)`);
     params.push(like, like, like, like);
   }
+
   if (role) {
     where.push(`UPPER(role)=UPPER(?)`);
     params.push(role);
@@ -220,7 +266,10 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
   const offset = (page - 1) * pageSize;
 
   try {
-    const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM users ${whereSql}`, params);
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM users ${whereSql}`,
+      params
+    );
 
     const [rows] = await pool.query(
       `
@@ -244,11 +293,13 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
  */
 router.post("/", authRequired, adminRequired, async (req, res) => {
   const { phone, password, first_name, last_name, role } = req.body || {};
-  if (!phone || !password) {
+
+  const cleanPhone = normPhone(phone);
+
+  if (!cleanPhone || !password) {
     return res.status(400).json({ error: "phone & password required" });
   }
 
-  const cleanPhone = String(phone).trim();
   const _role = normalizeRole(role);
   const pool = getPool();
 
@@ -291,40 +342,52 @@ router.post("/", authRequired, adminRequired, async (req, res) => {
  */
 router.put("/:id", authRequired, adminRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { phone, first_name, last_name, ville, commune, quartier, sexe, role } = req.body || {};
+  const { phone, first_name, last_name, ville, commune, quartier, sexe, role } =
+    req.body || {};
 
   const fields = [];
   const values = [];
 
   if (typeof phone !== "undefined") {
+    const cleanPhone = normPhone(phone);
+    if (!cleanPhone) {
+      return res.status(400).json({ error: "Invalid phone" });
+    }
     fields.push("phone=?");
-    values.push(String(phone).trim());
+    values.push(cleanPhone);
   }
+
   if (typeof first_name !== "undefined") {
     fields.push("first_name=?");
     values.push(first_name || null);
   }
+
   if (typeof last_name !== "undefined") {
     fields.push("last_name=?");
     values.push(last_name || null);
   }
+
   if (typeof ville !== "undefined") {
     fields.push("ville=?");
     values.push(normalizeVille(ville));
   }
+
   if (typeof commune !== "undefined") {
     fields.push("commune=?");
     values.push(commune || null);
   }
+
   if (typeof quartier !== "undefined") {
     fields.push("quartier=?");
     values.push(quartier || null);
   }
+
   if (typeof sexe !== "undefined") {
     const _sexe = ["M", "F"].includes(sexe) ? sexe : null;
     fields.push("sexe=?");
     values.push(_sexe);
   }
+
   if (typeof role !== "undefined") {
     const _role = normalizeRole(role);
     fields.push("role=?");
@@ -337,20 +400,28 @@ router.put("/:id", authRequired, adminRequired, async (req, res) => {
     const pool = getPool();
 
     if (typeof phone !== "undefined") {
-      const [dups] = await pool.query("SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1", [
-        String(phone).trim(),
-        id,
-      ]);
-      if (dups && dups.length) return res.status(409).json({ error: "Phone already exists" });
+      const cleanPhone = normPhone(phone);
+      const [dups] = await pool.query(
+        "SELECT id FROM users WHERE phone=? AND id<>? LIMIT 1",
+        [cleanPhone, id]
+      );
+
+      if (dups && dups.length) {
+        return res.status(409).json({ error: "Phone already exists" });
+      }
     }
 
-    await pool.query(`UPDATE users SET ${fields.join(", ")} WHERE id=?`, [...values, id]);
+    await pool.query(`UPDATE users SET ${fields.join(", ")} WHERE id=?`, [
+      ...values,
+      id,
+    ]);
 
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe, created_at
        FROM users WHERE id=?`,
       [id]
     );
+
     res.json(rows[0] || null);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -365,11 +436,13 @@ router.patch("/:id/role", authRequired, adminRequired, async (req, res) => {
 
   try {
     await pool.query(`UPDATE users SET role=? WHERE id=?`, [_role, id]);
+
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe, created_at
        FROM users WHERE id=?`,
       [id]
     );
+
     res.json(rows[0] || null);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -379,6 +452,7 @@ router.patch("/:id/role", authRequired, adminRequired, async (req, res) => {
 router.delete("/:id", authRequired, adminRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const pool = getPool();
+
   try {
     await pool.query(`DELETE FROM users WHERE id=?`, [id]);
     res.json({ ok: true });
