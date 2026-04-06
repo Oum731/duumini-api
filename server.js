@@ -414,7 +414,7 @@ app.use("/api/page-copy", require("./src/routes/pageCopy"));
 app.use("/api/ai", aiRoutes);
 app.use("/api/snapshots", require("./src/routes/snapshots"));
 app.use("/api/geo", require("./src/routes/geo"));
-
+app.use("/api/admin", require("./src/routes/adminSite"));
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }

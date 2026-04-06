@@ -2621,5 +2621,60 @@ router.get("/african-market", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listM
 router.get("/promotions", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), promotionsHandler);
 router.get("/top-ordered", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topOrderedHandler);
 router.get("/top-rated", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topRatedHandler);
+router.patch(
+  "/:id/stock-status",
+  authRequired,
+  requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
+  express.json(),
+  async (req, res, next) => {
+    const id = parseIdParam(req.params.id);
+    if (!id) return next();
 
+    const pool = getPool();
+    const conn = await pool.getConnection();
+
+    try {
+      const auth = await assertCanMutateProduct(conn, req.user, id);
+      if (!auth.ok) {
+        return res.status(auth.status).json({ error: auth.error });
+      }
+
+      const isOut =
+        String(req.body?.is_out_of_stock ?? "").trim() === "true" ||
+        String(req.body?.is_out_of_stock ?? "").trim() === "1" ||
+        req.body?.is_out_of_stock === true;
+
+      const messageRaw = String(req.body?.availability_message || "").trim();
+
+      const stockStatus = isOut ? "OUT_OF_STOCK" : "IN_STOCK";
+      const availabilityMessage = isOut
+        ? messageRaw || "Ce produit est actuellement en rupture de stock."
+        : (messageRaw || null);
+
+      await conn.query(
+        `
+        UPDATE products
+        SET stock_status = ?,
+            availability_message = ?
+        WHERE id = ?
+        `,
+        [stockStatus, availabilityMessage, id]
+      );
+
+      clearProductsCache();
+
+      res.json({
+        ok: true,
+        id,
+        stock_status: stockStatus,
+        is_out_of_stock: isOut,
+        availability_message: availabilityMessage,
+      });
+    } catch (e) {
+      next(e);
+    } finally {
+      conn.release();
+    }
+  }
+);
 module.exports = router;
