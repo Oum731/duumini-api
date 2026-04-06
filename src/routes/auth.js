@@ -29,22 +29,18 @@ function normPhone(p) {
 
   if (!raw) return null;
 
-  // 00 → +
   if (raw.startsWith("00")) {
     raw = "+" + raw.slice(2);
   }
 
-  // commence par 0 → maroc
   if (/^0\d{9}$/.test(raw)) {
     raw = "+212" + raw.slice(1);
   }
 
-  // commence par 212 sans +
   if (/^212\d{9}$/.test(raw)) {
     raw = "+" + raw;
   }
 
-  // si pas de + → forcer
   if (!raw.startsWith("+")) {
     raw = "+" + raw;
   }
@@ -81,39 +77,37 @@ router.post("/register", async (req, res) => {
   if (!isStrongPassword(password)) {
     return res.status(400).json({
       error: "Weak password",
-      message:
-        "Le mot de passe doit contenir au moins 8 caractères, avec au moins une lettre et un chiffre.",
     });
   }
 
-  const _sexe = ["M", "F"].includes(sexe) ? sexe : null;
-  const _ville = normalizeVille(ville);
-
   const pool = getPool();
+
   try {
+    // 🔥 COMPARAISON NORMALISÉE SQL
     const [exists] = await pool.query(
-      "SELECT id FROM users WHERE phone=? LIMIT 1",
+      `
+      SELECT id FROM users
+      WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'.','')
+      =
+      REPLACE(REPLACE(REPLACE(REPLACE(?,'+',''),' ',''),'-',''),'.','')
+      LIMIT 1
+      `,
       [cleanPhone]
     );
 
-    if (exists && exists.length) {
+    if (exists.length) {
       return res.status(409).json({
         error: "Phone already exists",
         code: "ACCOUNT_ALREADY_EXISTS",
-        message:
-          "Un compte existe déjà avec ce numéro. Connectez-vous puis modifiez votre mot de passe si besoin.",
       });
     }
 
-    const hash = await bcrypt.hash(String(password), 10);
+    const hash = await bcrypt.hash(password, 10);
 
     await pool.query(
-      `
-      INSERT INTO users
-        (phone, password, role, first_name, last_name, avatar, ville, commune, quartier, sexe)
-      VALUES
-        (?,?,?,?,?,?,?,?,?,?)
-      `,
+      `INSERT INTO users
+       (phone, password, role, first_name, last_name, avatar, ville, commune, quartier, sexe)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
       [
         cleanPhone,
         hash,
@@ -121,34 +115,18 @@ router.post("/register", async (req, res) => {
         first_name || null,
         last_name || null,
         avatar || null,
-        _ville,
+        normalizeVille(ville),
         commune || null,
         quartier || null,
-        _sexe,
+        ["M", "F"].includes(sexe) ? sexe : null,
       ]
     );
 
     return res.status(201).json({ ok: true });
   } catch (e) {
-    const msg = String((e && e.message) || "").toLowerCase();
-
-    if (
-      msg.includes("duplicate") ||
-      msg.includes("duplicate entry") ||
-      msg.includes("uq_users_phone")
-    ) {
-      return res.status(409).json({
-        error: "Phone already exists",
-        code: "ACCOUNT_ALREADY_EXISTS",
-        message:
-          "Un compte existe déjà avec ce numéro. Connectez-vous puis modifiez votre mot de passe si besoin.",
-      });
-    }
-
     return res.status(500).json({ error: e.message });
   }
 });
-
 /**
  * POST /api/auth/login
  */
@@ -161,41 +139,46 @@ router.post("/login", async (req, res) => {
   }
 
   const pool = getPool();
+
   try {
+    // 🔥 LOGIN INTELLIGENT (NORMALISÉ)
     const [rows] = await pool.query(
-      `SELECT id, phone, password, role, first_name, last_name, avatar, ville, commune, quartier, sexe
-       FROM users WHERE phone=? LIMIT 1`,
+      `
+      SELECT id, phone, password, role, first_name, last_name, avatar, ville, commune, quartier, sexe
+      FROM users
+      WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'.','')
+      =
+      REPLACE(REPLACE(REPLACE(REPLACE(?,'+',''),' ',''),'-',''),'.','')
+      LIMIT 1
+      `,
       [cleanPhone]
     );
 
-    const user = rows && rows[0];
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+    const user = rows[0];
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
-    const ok = await bcrypt.compare(String(password), user.password);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const access_token = signAccess({
       id: user.id,
       phone: user.phone,
       role: user.role,
     });
-    const refresh_token = signRefresh({ id: user.id, role: user.role });
+
+    const refresh_token = signRefresh({
+      id: user.id,
+      role: user.role,
+    });
 
     return res.json({
       access_token,
       refresh_token,
-      user: {
-        id: user.id,
-        phone: user.phone,
-        role: user.role,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        avatar: user.avatar,
-        ville: user.ville,
-        commune: user.commune,
-        quartier: user.quartier,
-        sexe: user.sexe,
-      },
+      user,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
