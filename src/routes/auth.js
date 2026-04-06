@@ -22,11 +22,33 @@ function toPosInt(x) {
 }
 
 function normPhone(p) {
-  const raw = String(p || "").replace(/\s+/g, "");
+  let raw = String(p || "")
+    .replace(/\s+/g, "")
+    .replace(/-/g, "")
+    .replace(/\./g, "");
+
   if (!raw) return null;
-  if (raw.startsWith("+")) return raw;
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
+
+  // 00 → +
+  if (raw.startsWith("00")) {
+    raw = "+" + raw.slice(2);
+  }
+
+  // commence par 0 → maroc
+  if (/^0\d{9}$/.test(raw)) {
+    raw = "+212" + raw.slice(1);
+  }
+
+  // commence par 212 sans +
+  if (/^212\d{9}$/.test(raw)) {
+    raw = "+" + raw;
+  }
+
+  // si pas de + → forcer
+  if (!raw.startsWith("+")) {
+    raw = "+" + raw;
+  }
+
   return raw;
 }
 
