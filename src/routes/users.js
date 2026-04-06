@@ -244,22 +244,45 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
  */
 router.post("/", authRequired, adminRequired, async (req, res) => {
   const { phone, password, first_name, last_name, role } = req.body || {};
-  if (!phone || !password) return res.status(400).json({ error: "phone & password required" });
+  if (!phone || !password) {
+    return res.status(400).json({ error: "phone & password required" });
+  }
 
+  const cleanPhone = String(phone).trim();
   const _role = normalizeRole(role);
-
   const pool = getPool();
+
   try {
-    const hash = await bcrypt.hash(String(password), 10);
-    await pool.query(
-      `INSERT INTO users (phone, password, role, first_name, last_name) VALUES (?,?,?,?,?)`,
-      [String(phone).trim(), hash, _role, first_name || null, last_name || null]
+    const [exists] = await pool.query(
+      "SELECT id FROM users WHERE phone=? LIMIT 1",
+      [cleanPhone]
     );
-    res.status(201).json({ ok: true });
+
+    if (exists && exists.length) {
+      return res.status(409).json({ error: "Phone already exists" });
+    }
+
+    const hash = await bcrypt.hash(String(password), 10);
+
+    await pool.query(
+      `INSERT INTO users (phone, password, role, first_name, last_name)
+       VALUES (?,?,?,?,?)`,
+      [cleanPhone, hash, _role, first_name || null, last_name || null]
+    );
+
+    return res.status(201).json({ ok: true });
   } catch (e) {
-    const msg = String(e?.message || "");
-    if (msg.includes("Duplicate")) return res.status(409).json({ error: "Phone already exists" });
-    res.status(500).json({ error: e.message });
+    const msg = String(e?.message || "").toLowerCase();
+
+    if (
+      msg.includes("duplicate") ||
+      msg.includes("uq_users_phone") ||
+      msg.includes("duplicate entry")
+    ) {
+      return res.status(409).json({ error: "Phone already exists" });
+    }
+
+    return res.status(500).json({ error: e.message });
   }
 });
 
