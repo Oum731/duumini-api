@@ -6,6 +6,10 @@ const { authRequired, requireRole } = require("../middlewares/auth");
 
 const router = Router();
 
+const ADMIN_ORDER_DEFAULT_PASSWORD = String(
+  process.env.ADMIN_ORDER_DEFAULT_PASSWORD || "duumini123"
+).trim();
+
 function normalizeVille(ville) {
   if (ville == null) return null;
   const v = String(ville).trim();
@@ -24,6 +28,10 @@ function normPhone(p) {
   if (raw.startsWith("00")) return `+${raw.slice(2)}`;
   if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
   return raw;
+}
+
+function isStrongPassword(pwd) {
+  return /^(?=.*[A-Za-z])(?=.*\d).{8,}$/.test(String(pwd || ""));
 }
 
 /**
@@ -48,11 +56,18 @@ router.post("/register", async (req, res) => {
     return res.status(400).json({ error: "phone & password required" });
   }
 
+  if (!isStrongPassword(password)) {
+    return res.status(400).json({
+      error: "Weak password",
+      message:
+        "Le mot de passe doit contenir au moins 8 caractères, avec au moins une lettre et un chiffre.",
+    });
+  }
+
   const _sexe = ["M", "F"].includes(sexe) ? sexe : null;
   const _ville = normalizeVille(ville);
 
   const pool = getPool();
-
   try {
     const [exists] = await pool.query(
       "SELECT id FROM users WHERE phone=? LIMIT 1",
@@ -166,13 +181,122 @@ router.post("/login", async (req, res) => {
 });
 
 /**
+ * POST /api/auth/change-password
+ * Permet à un user connecté de changer son mot de passe
+ * marche aussi pour les comptes créés automatiquement via commande admin
+ */
+router.post("/change-password", authRequired, async (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  const userId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({
+      error: "current_password & new_password required",
+    });
+  }
+
+  if (!isStrongPassword(new_password)) {
+    return res.status(400).json({
+      error: "Weak password",
+      message:
+        "Le nouveau mot de passe doit contenir au moins 8 caractères, avec au moins une lettre et un chiffre.",
+    });
+  }
+
+  const pool = getPool();
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, password FROM users WHERE id=? LIMIT 1`,
+      [userId]
+    );
+
+    const user = rows && rows[0];
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const ok = await bcrypt.compare(String(current_password), user.password);
+    if (!ok) {
+      return res.status(401).json({
+        error: "CURRENT_PASSWORD_INVALID",
+        message: "Le mot de passe actuel est incorrect.",
+      });
+    }
+
+    const samePassword = await bcrypt.compare(String(new_password), user.password);
+    if (samePassword) {
+      return res.status(400).json({
+        error: "SAME_PASSWORD",
+        message: "Le nouveau mot de passe doit être différent de l'ancien.",
+      });
+    }
+
+    const newHash = await bcrypt.hash(String(new_password), 10);
+
+    await pool.query(`UPDATE users SET password=? WHERE id=?`, [newHash, userId]);
+
+    return res.json({
+      ok: true,
+      message: "Mot de passe mis à jour avec succès.",
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /api/auth/admin-reset-default-password/:userId
+ * Permet à l'admin de remettre le mot de passe par défaut
+ * utile pour les comptes auto-créés via commande admin
+ */
+router.post(
+  "/admin-reset-default-password/:userId",
+  authRequired,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const userId = toPosInt(req.params.userId);
+
+    if (!userId) {
+      return res.status(400).json({ error: "invalid user id" });
+    }
+
+    try {
+      const pool = getPool();
+
+      const [rows] = await pool.query(
+        `SELECT id, phone FROM users WHERE id=? LIMIT 1`,
+        [userId]
+      );
+
+      const user = rows && rows[0];
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const hash = await bcrypt.hash(ADMIN_ORDER_DEFAULT_PASSWORD, 10);
+
+      await pool.query(`UPDATE users SET password=? WHERE id=?`, [hash, userId]);
+
+      return res.json({
+        ok: true,
+        user_id: userId,
+        login_phone: user.phone,
+        default_password: ADMIN_ORDER_DEFAULT_PASSWORD,
+        message: "Mot de passe par défaut réinitialisé avec succès.",
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/**
  * POST /api/auth/impersonate (ADMIN)
- * Body:
- *  - { vendor_shop_id } OR { vendor_user_id }
- *
- * ✅ Support vendeur OU restaurant:
- * - on résout owner_id via shop_id si besoin
- * - on renvoie access_token ADMIN + impersonate_shop_id + impersonate_user_id
  */
 router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res) => {
   const pool = getPool();
