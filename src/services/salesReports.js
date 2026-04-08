@@ -157,6 +157,9 @@ function computeDuuminiCommission(itemsAmount) {
 let _ordersReportCols = null;
 let _ordersReportColsLoaded = false;
 
+let _orderItemsReportCols = null;
+let _orderItemsReportColsLoaded = false;
+
 async function detectOrdersReportCols(conn) {
   const candidates = [
     "id",
@@ -222,6 +225,57 @@ async function detectOrdersReportCols(conn) {
   };
 }
 
+async function detectOrderItemsReportCols(conn) {
+  const candidates = [
+    "order_id",
+    "qty",
+    "quantity",
+    "unit_price",
+    "price",
+    "final_unit_price",
+    "sale_unit_price",
+    "purchase_price",
+    "purchase_unit_price",
+    "buy_price",
+    "buying_price",
+    "cost_price",
+    "unit_cost_price",
+    "unit_purchase_price",
+    "snapshot_purchase_price",
+    "product_purchase_price",
+  ];
+
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'order_items'
+       AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
+  return {
+    order_id: found.has("order_id"),
+    qty: found.has("qty"),
+    quantity: found.has("quantity"),
+    unit_price: found.has("unit_price"),
+    price: found.has("price"),
+    final_unit_price: found.has("final_unit_price"),
+    sale_unit_price: found.has("sale_unit_price"),
+    purchase_price: found.has("purchase_price"),
+    purchase_unit_price: found.has("purchase_unit_price"),
+    buy_price: found.has("buy_price"),
+    buying_price: found.has("buying_price"),
+    cost_price: found.has("cost_price"),
+    unit_cost_price: found.has("unit_cost_price"),
+    unit_purchase_price: found.has("unit_purchase_price"),
+    snapshot_purchase_price: found.has("snapshot_purchase_price"),
+    product_purchase_price: found.has("product_purchase_price"),
+  };
+}
+
 async function getOrdersReportColsCached(pool) {
   if (_ordersReportColsLoaded) return _ordersReportCols;
 
@@ -235,6 +289,19 @@ async function getOrdersReportColsCached(pool) {
   }
 }
 
+async function getOrderItemsReportColsCached(pool) {
+  if (_orderItemsReportColsLoaded) return _orderItemsReportCols;
+
+  const conn = await pool.getConnection();
+  try {
+    _orderItemsReportCols = await detectOrderItemsReportCols(conn);
+    _orderItemsReportColsLoaded = true;
+    return _orderItemsReportCols;
+  } finally {
+    conn.release();
+  }
+}
+
 function pickStatusColumn(cols) {
   if (cols.status) return "status";
   if (cols.order_status) return "order_status";
@@ -242,11 +309,11 @@ function pickStatusColumn(cols) {
 }
 
 function pickDateColumn(cols) {
-  if (cols.done_at) return "done_at";
-  if (cols.completed_at) return "completed_at";
   if (cols.created_at) return "created_at";
   if (cols.ordered_at) return "ordered_at";
   if (cols.order_date) return "order_date";
+  if (cols.done_at) return "done_at";
+  if (cols.completed_at) return "completed_at";
   if (cols.updated_at) return "updated_at";
   return null;
 }
@@ -261,6 +328,33 @@ function pickDeliveryColumn(cols) {
   if (cols.delivery_fee) return "delivery_fee";
   if (cols.shipping_fee) return "shipping_fee";
   if (cols.delivery_amount) return "delivery_amount";
+  return null;
+}
+
+function pickOrderItemsQtyColumn(cols) {
+  if (cols.qty) return "qty";
+  if (cols.quantity) return "quantity";
+  return null;
+}
+
+function pickOrderItemsPurchasePriceColumn(cols) {
+  if (cols.purchase_unit_price) return "purchase_unit_price";
+  if (cols.unit_purchase_price) return "unit_purchase_price";
+  if (cols.snapshot_purchase_price) return "snapshot_purchase_price";
+  if (cols.purchase_price) return "purchase_price";
+  if (cols.product_purchase_price) return "product_purchase_price";
+  if (cols.unit_cost_price) return "unit_cost_price";
+  if (cols.cost_price) return "cost_price";
+  if (cols.buying_price) return "buying_price";
+  if (cols.buy_price) return "buy_price";
+  return null;
+}
+
+function pickOrderItemsFallbackSalePriceColumn(cols) {
+  if (cols.final_unit_price) return "final_unit_price";
+  if (cols.sale_unit_price) return "sale_unit_price";
+  if (cols.unit_price) return "unit_price";
+  if (cols.price) return "price";
   return null;
 }
 
@@ -347,9 +441,16 @@ function buildPaymentFromRow(row, cols, totalAmount, currency) {
 }
 
 function computeRowAmounts(row, cols, itemsMap) {
-  const rowGrossItems = cols.items_subtotal
-    ? normMoney(row.items_subtotal)
-    : normMoney(itemsMap.get(Number(row.id)) || 0);
+  const rowId = Number(row.id);
+
+  const mapValue = itemsMap.has(rowId) ? itemsMap.get(rowId) : null;
+
+  const rowGrossItems =
+    mapValue !== null && mapValue !== undefined
+      ? normMoney(mapValue)
+      : cols.items_subtotal
+      ? normMoney(row.items_subtotal)
+      : 0;
 
   const rowDiscount = cols.admin_discount_amount
     ? normMoney(row.admin_discount_amount)
@@ -361,7 +462,7 @@ function computeRowAmounts(row, cols, itemsMap) {
     ? normMoney(row.delivery_amount_exact)
     : 0;
 
-  const rowTotal = normMoney(rowNetItems + rowDelivery);
+  const rowTotal = normMoney(rowNetItems);
 
   return {
     gross_items_amount: rowGrossItems,
@@ -375,11 +476,17 @@ function computeRowAmounts(row, cols, itemsMap) {
 async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const pool = getPool();
   const cols = await getOrdersReportColsCached(pool);
+  const itemCols = await getOrderItemsReportColsCached(pool);
 
   const statusCol = pickStatusColumn(cols);
   const dateCol = pickDateColumn(cols);
   const commissionCol = pickCommissionColumn(cols);
   const deliveryCol = pickDeliveryColumn(cols);
+
+  const itemQtyCol = pickOrderItemsQtyColumn(itemCols);
+  const itemPurchasePriceCol = pickOrderItemsPurchasePriceColumn(itemCols);
+  const itemFallbackSalePriceCol = pickOrderItemsFallbackSalePriceColumn(itemCols);
+  const itemPriceCol = itemPurchasePriceCol || itemFallbackSalePriceCol;
 
   if (!statusCol) {
     throw new Error(
@@ -450,6 +557,13 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
         included_statuses: statuses,
         date_column_used: dateCol,
         delivery_column_used: deliveryCol || null,
+        item_qty_column_used: itemQtyCol || null,
+        item_price_column_used: itemPriceCol || null,
+        item_price_mode: itemPurchasePriceCol
+          ? "PURCHASE_PRICE_SNAPSHOT"
+          : itemFallbackSalePriceCol
+          ? "ORDER_ITEM_SALE_PRICE_FALLBACK"
+          : "ORDER_SUMMARY_FALLBACK",
       },
     };
   }
@@ -457,12 +571,12 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
   const orderIds = orderRows.map((r) => Number(r.id)).filter(Boolean);
   const itemsMap = new Map();
 
-  if (orderIds.length) {
+  if (orderIds.length && itemQtyCol && itemPriceCol) {
     const [itemRows] = await conn.query(
       `
       SELECT
         oi.order_id,
-        COALESCE(SUM(oi.qty * oi.unit_price), 0) AS items_total
+        COALESCE(SUM(COALESCE(oi.${itemQtyCol}, 0) * COALESCE(oi.${itemPriceCol}, 0)), 0) AS items_total
       FROM order_items oi
       WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
       GROUP BY oi.order_id
@@ -505,7 +619,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     adminDiscountAmount += amounts.admin_discount_amount;
     netItemsAmount += amounts.net_items_amount;
     deliveryAmount += amounts.delivery_amount;
-    totalAmount += amounts.total_amount;
+    totalAmount += amounts.net_items_amount;
     duuminiCommission += rowCommission;
     paidAmount += normMoney(payment.paid_amount);
     remainingAmount += normMoney(payment.remaining_amount);
@@ -520,7 +634,7 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
     };
 
     prev.cnt += 1;
-    prev.amount += amounts.total_amount;
+    prev.amount += amounts.net_items_amount;
     prev.paid_amount += normMoney(payment.paid_amount);
     prev.remaining_amount += normMoney(payment.remaining_amount);
 
@@ -551,6 +665,13 @@ async function computeSalesMetrics(conn, { start, end, currency = "MAD" }) {
       included_statuses: statuses,
       date_column_used: dateCol,
       delivery_column_used: deliveryCol || null,
+      item_qty_column_used: itemQtyCol || null,
+      item_price_column_used: itemPriceCol || null,
+      item_price_mode: itemPurchasePriceCol
+        ? "PURCHASE_PRICE_SNAPSHOT"
+        : itemFallbackSalePriceCol
+        ? "ORDER_ITEM_SALE_PRICE_FALLBACK"
+        : "ORDER_SUMMARY_FALLBACK",
     },
   };
 }

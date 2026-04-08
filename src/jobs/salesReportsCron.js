@@ -3,6 +3,7 @@ const { upsertReport } = require("../services/salesReports");
 
 const CURRENCIES = ["MAD"];
 const CRON_TZ = process.env.CRON_TZ || "Africa/Casablanca";
+const DAILY_RECALC_DAYS = Number(process.env.SALES_REPORT_DAILY_RECALC_DAYS || 14);
 
 function addDays(date, days) {
   const x = new Date(date);
@@ -59,13 +60,22 @@ async function generateAll(period_type, anchorDate = new Date()) {
   return results;
 }
 
+async function generateDailyWindow(days = DAILY_RECALC_DAYS, fromDate = new Date()) {
+  const base = new Date(fromDate);
+
+  for (let i = 0; i < days; i += 1) {
+    const anchor = addDays(base, -i);
+    await generateAll("DAILY", anchor);
+  }
+}
+
 async function warmupReports() {
   try {
-    console.log("[salesReportsCron] warmup DAILY...");
-    await generateAll("DAILY", addDays(new Date(), -1));
-    console.log("[salesReportsCron] warmup DAILY OK");
+    console.log("[salesReportsCron] warmup DAILY window...");
+    await generateDailyWindow(DAILY_RECALC_DAYS, new Date());
+    console.log("[salesReportsCron] warmup DAILY window OK");
   } catch (e) {
-    console.error("[salesReportsCron] warmup DAILY ERROR:", e?.message || e);
+    console.error("[salesReportsCron] warmup DAILY window ERROR:", e?.message || e);
   }
 
   try {
@@ -96,6 +106,7 @@ async function warmupReports() {
 function startSalesReportsCron() {
   console.log("[salesReportsCron] starting...");
   console.log("[salesReportsCron] timezone =", CRON_TZ);
+  console.log("[salesReportsCron] daily window =", DAILY_RECALC_DAYS);
 
   setTimeout(() => {
     warmupReports().catch((e) => {
@@ -104,12 +115,12 @@ function startSalesReportsCron() {
   }, 5000);
 
   cron.schedule(
-    "5 0 * * *",
+    "7 * * * *",
     async () => {
       try {
-        await generateAll("DAILY", addDays(new Date(), -1));
+        await generateDailyWindow(DAILY_RECALC_DAYS, new Date());
       } catch (e) {
-        console.error("[salesReportsCron][DAILY]", e?.message || e);
+        console.error("[salesReportsCron][DAILY_WINDOW]", e?.message || e);
       }
     },
     { timezone: CRON_TZ }
