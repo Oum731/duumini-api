@@ -15,6 +15,12 @@ function computeAffiliateCommission(baseAmount, rate) {
   return +((base * pct) / 100).toFixed(2);
 }
 
+function normalizeProductId(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.trunc(n);
+}
+
 async function detectAffiliateOrderCols(conn) {
   const candidates = [
     "affiliate_id",
@@ -54,6 +60,7 @@ async function detectAffiliateCommissionCols(conn) {
     "base_amount",
     "status",
     "note",
+    "product_id",
   ];
 
   const [rows] = await conn.query(
@@ -78,6 +85,7 @@ async function detectAffiliateCommissionCols(conn) {
     base_amount: found.has("base_amount"),
     status: found.has("status"),
     note: found.has("note"),
+    product_id: found.has("product_id"),
   };
 }
 
@@ -184,11 +192,12 @@ function pushAffiliateOrderColumns(
 
 async function finalizeAffiliateOrder(
   conn,
-  { affiliate, orderId, displayCode, baseAmount, orderMeta },
+  { affiliate, orderId, displayCode, baseAmount, orderMeta, productId = null },
 ) {
   if (!affiliate || !orderMeta?.affiliate_commission_amount) return;
 
   const commissionCols = await detectAffiliateCommissionCols(conn);
+  const cleanProductId = normalizeProductId(productId);
 
   const cols = [];
   const vals = [];
@@ -230,6 +239,12 @@ async function finalizeAffiliateOrder(
     qs.push("?");
   }
 
+  if (commissionCols.product_id) {
+    cols.push("product_id");
+    vals.push(cleanProductId);
+    qs.push("?");
+  }
+
   if (commissionCols.status) {
     cols.push("status");
     vals.push("PENDING");
@@ -238,7 +253,11 @@ async function finalizeAffiliateOrder(
 
   if (commissionCols.note) {
     cols.push("note");
-    vals.push(`Commission influenceur sur commande ${displayCode}`);
+    vals.push(
+      cleanProductId
+        ? `Commission influenceur sur commande ${displayCode} - produit ${cleanProductId}`
+        : `Commission influenceur sur commande ${displayCode}`,
+    );
     qs.push("?");
   }
 
@@ -264,6 +283,7 @@ async function finalizeAffiliateOrder(
 
 module.exports = {
   normalizeAffiliateCode,
+  normalizeProductId,
   computeAffiliateCommission,
   findActiveAffiliateByCode,
   buildAffiliateOrderMeta,

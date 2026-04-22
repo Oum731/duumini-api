@@ -1,4 +1,3 @@
-// src/routes/affiliates.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin } = require("../middlewares/auth");
@@ -29,10 +28,10 @@ function normalizeSlug(value) {
   return v || null;
 }
 
-function normMoney(value) {
+function normalizeProductId(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return +n.toFixed(2);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.trunc(n);
 }
 
 function normRate(value, fallback = 10) {
@@ -71,6 +70,108 @@ function publicWebBase() {
       process.env.PUBLIC_WEB_BASE ||
       "https://duumini.com",
   ).replace(/\/+$/, "");
+}
+
+function detectDevice(userAgent) {
+  const ua = String(userAgent || "").toLowerCase();
+  if (!ua) return null;
+  if (/mobile|android|iphone|ipod|windows phone/i.test(ua)) return "mobile";
+  if (/ipad|tablet/i.test(ua)) return "tablet";
+  return "desktop";
+}
+
+function normalizeSource(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v || null;
+}
+
+function extractSource(req, landingUrl = "") {
+  const q = normalizeSource(req.query?.source);
+  if (q) return q;
+
+  const ref = normalizeSource(req.headers.referer || req.headers.referrer || "");
+  if (!ref) return null;
+
+  if (ref.includes("facebook")) return "facebook";
+  if (ref.includes("instagram")) return "instagram";
+  if (ref.includes("tiktok")) return "tiktok";
+  if (ref.includes("whatsapp")) return "whatsapp";
+
+  const landing = normalizeSource(landingUrl);
+  if (landing?.includes("utm_source=")) {
+    const m = landing.match(/[?&]utm_source=([^&]+)/i);
+    if (m?.[1]) return decodeURIComponent(m[1]).toLowerCase();
+  }
+
+  return "direct";
+}
+
+function extractProductIdFromLanding(landing) {
+  const text = String(landing || "").trim();
+  if (!text) return null;
+
+  const urlPart = text.split("?")[0] || text;
+
+  let match =
+    urlPart.match(/\/product\/(\d+)(?:\/|$)/i) ||
+    urlPart.match(/\/products\/(\d+)(?:\/|$)/i) ||
+    urlPart.match(/\/p\/(\d+)(?:\/|$)/i);
+
+  if (match?.[1]) {
+    return normalizeProductId(match[1]);
+  }
+
+  const queryMatch =
+    text.match(/[?&]product_id=(\d+)/i) ||
+    text.match(/[?&]productId=(\d+)/i) ||
+    text.match(/[?&]pid=(\d+)/i);
+
+  if (queryMatch?.[1]) {
+    return normalizeProductId(queryMatch[1]);
+  }
+
+  return null;
+}
+
+async function detectAffiliateClickCols(conn) {
+  const candidates = [
+    "affiliate_id",
+    "affiliate_code",
+    "ip_address",
+    "user_agent",
+    "referer_url",
+    "landing_url",
+    "created_at",
+    "product_id",
+    "source",
+    "device",
+  ];
+
+  const [rows] = await conn.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'affiliate_clicks'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates,
+  );
+
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
+  return {
+    affiliate_id: found.has("affiliate_id"),
+    affiliate_code: found.has("affiliate_code"),
+    ip_address: found.has("ip_address"),
+    user_agent: found.has("user_agent"),
+    referer_url: found.has("referer_url"),
+    landing_url: found.has("landing_url"),
+    created_at: found.has("created_at"),
+    product_id: found.has("product_id"),
+    source: found.has("source"),
+    device: found.has("device"),
+  };
 }
 
 function parseAffiliate(row) {
@@ -249,6 +350,78 @@ async function findAffiliateById(conn, id) {
     : null;
 
   return affiliate;
+}
+
+async function insertAffiliateClick(conn, payload) {
+  const colsDef = await detectAffiliateClickCols(conn);
+
+  const cols = [];
+  const vals = [];
+  const qs = [];
+
+  if (colsDef.affiliate_id) {
+    cols.push("affiliate_id");
+    vals.push(payload.affiliate_id);
+    qs.push("?");
+  }
+
+  if (colsDef.affiliate_code) {
+    cols.push("affiliate_code");
+    vals.push(payload.affiliate_code || null);
+    qs.push("?");
+  }
+
+  if (colsDef.product_id) {
+    cols.push("product_id");
+    vals.push(payload.product_id || null);
+    qs.push("?");
+  }
+
+  if (colsDef.ip_address) {
+    cols.push("ip_address");
+    vals.push(payload.ip_address || null);
+    qs.push("?");
+  }
+
+  if (colsDef.user_agent) {
+    cols.push("user_agent");
+    vals.push(payload.user_agent || null);
+    qs.push("?");
+  }
+
+  if (colsDef.referer_url) {
+    cols.push("referer_url");
+    vals.push(payload.referer_url || null);
+    qs.push("?");
+  }
+
+  if (colsDef.landing_url) {
+    cols.push("landing_url");
+    vals.push(payload.landing_url || null);
+    qs.push("?");
+  }
+
+  if (colsDef.source) {
+    cols.push("source");
+    vals.push(payload.source || null);
+    qs.push("?");
+  }
+
+  if (colsDef.device) {
+    cols.push("device");
+    vals.push(payload.device || null);
+    qs.push("?");
+  }
+
+  if (colsDef.created_at) {
+    cols.push("created_at");
+    qs.push("NOW()");
+  }
+
+  await conn.query(
+    `INSERT INTO affiliate_clicks (${cols.join(", ")}) VALUES (${qs.join(", ")})`,
+    vals,
+  );
 }
 
 /* =========================
@@ -840,6 +1013,15 @@ router.get("/track/:code", async (req, res) => {
     ? String(req.query.to).trim()
     : "/";
 
+  const productId =
+    normalizeProductId(req.query.product_id) ||
+    normalizeProductId(req.query.productId) ||
+    normalizeProductId(req.query.pid) ||
+    extractProductIdFromLanding(landing);
+
+  const source = extractSource(req, landing);
+  const device = detectDevice(req.headers["user-agent"] || null);
+
   const conn = await getPool().getConnection();
 
   try {
@@ -860,28 +1042,17 @@ router.get("/track/:code", async (req, res) => {
 
     await conn.beginTransaction();
 
-    await conn.query(
-      `
-        INSERT INTO affiliate_clicks (
-          affiliate_id,
-          affiliate_code,
-          ip_address,
-          user_agent,
-          referer_url,
-          landing_url,
-          created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, NOW())
-      `,
-      [
-        affiliate.id,
-        affiliate.affiliate_code,
-        getClientIp(req),
-        req.headers["user-agent"] || null,
-        req.headers.referer || null,
-        landing,
-      ],
-    );
+    await insertAffiliateClick(conn, {
+      affiliate_id: affiliate.id,
+      affiliate_code: affiliate.affiliate_code,
+      product_id: productId,
+      ip_address: getClientIp(req),
+      user_agent: req.headers["user-agent"] || null,
+      referer_url: req.headers.referer || null,
+      landing_url: landing,
+      source,
+      device,
+    });
 
     await conn.query(
       `
@@ -921,6 +1092,15 @@ router.get("/ref/:slug", async (req, res) => {
     ? String(req.query.to).trim()
     : "/";
 
+  const productId =
+    normalizeProductId(req.query.product_id) ||
+    normalizeProductId(req.query.productId) ||
+    normalizeProductId(req.query.pid) ||
+    extractProductIdFromLanding(landing);
+
+  const source = extractSource(req, landing);
+  const device = detectDevice(req.headers["user-agent"] || null);
+
   const conn = await getPool().getConnection();
 
   try {
@@ -941,28 +1121,17 @@ router.get("/ref/:slug", async (req, res) => {
 
     await conn.beginTransaction();
 
-    await conn.query(
-      `
-        INSERT INTO affiliate_clicks (
-          affiliate_id,
-          affiliate_code,
-          ip_address,
-          user_agent,
-          referer_url,
-          landing_url,
-          created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, NOW())
-      `,
-      [
-        affiliate.id,
-        affiliate.affiliate_code,
-        getClientIp(req),
-        req.headers["user-agent"] || null,
-        req.headers.referer || null,
-        landing,
-      ],
-    );
+    await insertAffiliateClick(conn, {
+      affiliate_id: affiliate.id,
+      affiliate_code: affiliate.affiliate_code,
+      product_id: productId,
+      ip_address: getClientIp(req),
+      user_agent: req.headers["user-agent"] || null,
+      referer_url: req.headers.referer || null,
+      landing_url: landing,
+      source,
+      device,
+    });
 
     await conn.query(
       `
