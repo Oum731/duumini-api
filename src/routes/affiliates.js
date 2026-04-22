@@ -6,6 +6,9 @@ const { env } = require("../lib/env");
 
 const router = Router();
 
+const COMMISSION_STATUSES = ["PENDING", "APPROVED", "PAID", "CANCELLED"];
+const PERIOD_TYPES = ["DAY", "WEEK", "MONTH", "YEAR"];
+
 /* =========================
  * Helpers
  * =======================*/
@@ -41,10 +44,18 @@ function normRate(value, fallback = 10) {
 }
 
 function normStatus(value, fallback = "ACTIVE") {
-  const v = String(value || fallback)
-    .trim()
-    .toUpperCase();
+  const v = String(value || fallback).trim().toUpperCase();
   return v === "INACTIVE" ? "INACTIVE" : "ACTIVE";
+}
+
+function normCommissionStatus(value, fallback = "PENDING") {
+  const v = String(value || fallback).trim().toUpperCase();
+  return COMMISSION_STATUSES.includes(v) ? v : fallback;
+}
+
+function normPeriodType(value, fallback = "MONTH") {
+  const v = String(value || fallback).trim().toUpperCase();
+  return PERIOD_TYPES.includes(v) ? v : fallback;
 }
 
 function isBlank(v) {
@@ -112,65 +123,123 @@ function extractProductIdFromLanding(landing) {
 
   const urlPart = text.split("?")[0] || text;
 
-  let match =
+  const match =
     urlPart.match(/\/product\/(\d+)(?:\/|$)/i) ||
     urlPart.match(/\/products\/(\d+)(?:\/|$)/i) ||
     urlPart.match(/\/p\/(\d+)(?:\/|$)/i);
 
-  if (match?.[1]) {
-    return normalizeProductId(match[1]);
-  }
+  if (match?.[1]) return normalizeProductId(match[1]);
 
   const queryMatch =
     text.match(/[?&]product_id=(\d+)/i) ||
     text.match(/[?&]productId=(\d+)/i) ||
     text.match(/[?&]pid=(\d+)/i);
 
-  if (queryMatch?.[1]) {
-    return normalizeProductId(queryMatch[1]);
-  }
-
+  if (queryMatch?.[1]) return normalizeProductId(queryMatch[1]);
   return null;
 }
 
-async function detectAffiliateClickCols(conn) {
-  const candidates = [
-    "affiliate_id",
-    "affiliate_code",
-    "ip_address",
-    "user_agent",
-    "referer_url",
-    "landing_url",
-    "created_at",
-    "product_id",
-    "source",
-    "device",
-  ];
+function toDateOnly(value) {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
 
-  const [rows] = await conn.query(
-    `
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'affiliate_clicks'
-        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
-    `,
-    candidates,
-  );
+function startOfDay(value) {
+  const d = value ? new Date(value) : new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 
-  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+function endOfDay(value) {
+  const d = value ? new Date(value) : new Date();
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function startOfWeek(value) {
+  const d = startOfDay(value);
+  const day = d.getDay();
+  const diff = day === 0 ? 6 : day - 1;
+  d.setDate(d.getDate() - diff);
+  return d;
+}
+
+function endOfWeek(value) {
+  const d = startOfWeek(value);
+  d.setDate(d.getDate() + 6);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function startOfMonth(value) {
+  const d = value ? new Date(value) : new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfMonth(value) {
+  const d = startOfMonth(value);
+  d.setMonth(d.getMonth() + 1);
+  d.setDate(0);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function startOfYear(value) {
+  const d = value ? new Date(value) : new Date();
+  d.setMonth(0, 1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfYear(value) {
+  const d = startOfYear(value);
+  d.setFullYear(d.getFullYear() + 1);
+  d.setDate(0);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function periodMeta(periodType, baseDate = new Date()) {
+  const type = normPeriodType(periodType, "MONTH");
+  let start;
+  let end;
+  let key;
+
+  if (type === "DAY") {
+    start = startOfDay(baseDate);
+    end = endOfDay(baseDate);
+    key = start.toISOString().slice(0, 10);
+  } else if (type === "WEEK") {
+    start = startOfWeek(baseDate);
+    end = endOfWeek(baseDate);
+    key = start.toISOString().slice(0, 10);
+  } else if (type === "YEAR") {
+    start = startOfYear(baseDate);
+    end = endOfYear(baseDate);
+    key = String(start.getFullYear());
+  } else {
+    start = startOfMonth(baseDate);
+    end = endOfMonth(baseDate);
+    key = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}`;
+  }
 
   return {
-    affiliate_id: found.has("affiliate_id"),
-    affiliate_code: found.has("affiliate_code"),
-    ip_address: found.has("ip_address"),
-    user_agent: found.has("user_agent"),
-    referer_url: found.has("referer_url"),
-    landing_url: found.has("landing_url"),
-    created_at: found.has("created_at"),
-    product_id: found.has("product_id"),
-    source: found.has("source"),
-    device: found.has("device"),
+    period_type: type,
+    period_key: key,
+    period_start: start.toISOString().slice(0, 10),
+    period_end: end.toISOString().slice(0, 10),
+  };
+}
+
+function getCommissionPeriodMeta(baseDate = new Date()) {
+  return {
+    period_day: periodMeta("DAY", baseDate).period_key,
+    period_week_start: periodMeta("WEEK", baseDate).period_key,
+    period_month: periodMeta("MONTH", baseDate).period_key,
+    period_year: periodMeta("YEAR", baseDate).period_key,
   };
 }
 
@@ -235,6 +304,47 @@ async function buildAffiliateUserSelect(conn) {
     cols.phone ? "u.phone AS u_phone" : "NULL AS u_phone",
     cols.role ? "u.role AS u_role" : "NULL AS u_role",
   ];
+}
+
+async function detectAffiliateClickCols(conn) {
+  const candidates = [
+    "affiliate_id",
+    "affiliate_code",
+    "ip_address",
+    "user_agent",
+    "referer_url",
+    "landing_url",
+    "created_at",
+    "product_id",
+    "source",
+    "device",
+  ];
+
+  const [rows] = await conn.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'affiliate_clicks'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})
+    `,
+    candidates,
+  );
+
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+
+  return {
+    affiliate_id: found.has("affiliate_id"),
+    affiliate_code: found.has("affiliate_code"),
+    ip_address: found.has("ip_address"),
+    user_agent: found.has("user_agent"),
+    referer_url: found.has("referer_url"),
+    landing_url: found.has("landing_url"),
+    created_at: found.has("created_at"),
+    product_id: found.has("product_id"),
+    source: found.has("source"),
+    device: found.has("device"),
+  };
 }
 
 async function affiliateExistsByCode(conn, affiliate_code, excludeId = null) {
@@ -308,7 +418,6 @@ async function generateUniqueAffiliateCode(conn, base = "DUU") {
 
 async function generateUniqueSlug(conn, rawBase, excludeId = null) {
   const base = normalizeSlug(rawBase || "affilie") || "affilie";
-
   let slug = base;
   let i = 1;
 
@@ -354,7 +463,6 @@ async function findAffiliateById(conn, id) {
 
 async function insertAffiliateClick(conn, payload) {
   const colsDef = await detectAffiliateClickCols(conn);
-
   const cols = [];
   const vals = [];
   const qs = [];
@@ -364,55 +472,46 @@ async function insertAffiliateClick(conn, payload) {
     vals.push(payload.affiliate_id);
     qs.push("?");
   }
-
   if (colsDef.affiliate_code) {
     cols.push("affiliate_code");
     vals.push(payload.affiliate_code || null);
     qs.push("?");
   }
-
   if (colsDef.product_id) {
     cols.push("product_id");
     vals.push(payload.product_id || null);
     qs.push("?");
   }
-
   if (colsDef.ip_address) {
     cols.push("ip_address");
     vals.push(payload.ip_address || null);
     qs.push("?");
   }
-
   if (colsDef.user_agent) {
     cols.push("user_agent");
     vals.push(payload.user_agent || null);
     qs.push("?");
   }
-
   if (colsDef.referer_url) {
     cols.push("referer_url");
     vals.push(payload.referer_url || null);
     qs.push("?");
   }
-
   if (colsDef.landing_url) {
     cols.push("landing_url");
     vals.push(payload.landing_url || null);
     qs.push("?");
   }
-
   if (colsDef.source) {
     cols.push("source");
     vals.push(payload.source || null);
     qs.push("?");
   }
-
   if (colsDef.device) {
     cols.push("device");
     vals.push(payload.device || null);
     qs.push("?");
   }
-
   if (colsDef.created_at) {
     cols.push("created_at");
     qs.push("NOW()");
@@ -423,6 +522,644 @@ async function insertAffiliateClick(conn, payload) {
     vals,
   );
 }
+
+async function syncAffiliateCounters(conn, affiliateId) {
+  const [[clicksRow]] = await conn.query(
+    `
+      SELECT COUNT(*) AS clicks_count
+      FROM affiliate_clicks
+      WHERE affiliate_id = ?
+    `,
+    [affiliateId],
+  );
+
+  const [[commRow]] = await conn.query(
+    `
+      SELECT
+        COUNT(DISTINCT order_id) AS orders_count,
+        COALESCE(SUM(CASE WHEN status <> 'CANCELLED' THEN amount ELSE 0 END), 0) AS earnings_total
+      FROM affiliate_commissions
+      WHERE affiliate_id = ?
+    `,
+    [affiliateId],
+  );
+
+  await conn.query(
+    `
+      UPDATE affiliates
+      SET
+        total_clicks = ?,
+        total_orders = ?,
+        total_earnings = ?,
+        updated_at = NOW()
+      WHERE id = ?
+    `,
+    [
+      Number(clicksRow?.clicks_count || 0),
+      Number(commRow?.orders_count || 0),
+      Number(commRow?.earnings_total || 0),
+      affiliateId,
+    ],
+  );
+}
+
+async function upsertAffiliateRevenueReport(conn, {
+  affiliateId = null,
+  periodType,
+  periodKey,
+  periodStart,
+  periodEnd,
+}) {
+  const [[clickRow]] = await conn.query(
+    `
+      SELECT COUNT(*) AS clicks_count
+      FROM affiliate_clicks
+      WHERE (? IS NULL OR affiliate_id = ?)
+        AND DATE(created_at) BETWEEN ? AND ?
+    `,
+    [affiliateId, affiliateId, periodStart, periodEnd],
+  );
+
+  const [[commRow]] = await conn.query(
+    `
+      SELECT
+        COUNT(DISTINCT order_id) AS orders_count,
+        COALESCE(SUM(base_amount), 0) AS sales_amount,
+        COALESCE(SUM(CASE WHEN status = 'PENDING' THEN amount ELSE 0 END), 0) AS commission_pending,
+        COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN amount ELSE 0 END), 0) AS commission_approved,
+        COALESCE(SUM(CASE WHEN status = 'PAID' THEN amount ELSE 0 END), 0) AS commission_paid,
+        COALESCE(SUM(CASE WHEN status = 'CANCELLED' THEN amount ELSE 0 END), 0) AS commission_cancelled,
+        COALESCE(SUM(CASE WHEN status <> 'CANCELLED' THEN amount ELSE 0 END), 0) AS commission_total
+      FROM affiliate_commissions
+      WHERE (? IS NULL OR affiliate_id = ?)
+        AND period_day BETWEEN ? AND ?
+    `,
+    [affiliateId, affiliateId, periodStart, periodEnd],
+  );
+
+  await conn.query(
+    `
+      INSERT INTO affiliate_revenue_reports (
+        affiliate_id,
+        period_type,
+        period_key,
+        period_start,
+        period_end,
+        clicks_count,
+        orders_count,
+        sales_amount,
+        commission_pending,
+        commission_approved,
+        commission_paid,
+        commission_cancelled,
+        commission_total,
+        currency,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MAD', NOW(), NOW())
+      ON DUPLICATE KEY UPDATE
+        clicks_count = VALUES(clicks_count),
+        orders_count = VALUES(orders_count),
+        sales_amount = VALUES(sales_amount),
+        commission_pending = VALUES(commission_pending),
+        commission_approved = VALUES(commission_approved),
+        commission_paid = VALUES(commission_paid),
+        commission_cancelled = VALUES(commission_cancelled),
+        commission_total = VALUES(commission_total),
+        updated_at = NOW()
+    `,
+    [
+      affiliateId,
+      periodType,
+      periodKey,
+      periodStart,
+      periodEnd,
+      Number(clickRow?.clicks_count || 0),
+      Number(commRow?.orders_count || 0),
+      Number(commRow?.sales_amount || 0),
+      Number(commRow?.commission_pending || 0),
+      Number(commRow?.commission_approved || 0),
+      Number(commRow?.commission_paid || 0),
+      Number(commRow?.commission_cancelled || 0),
+      Number(commRow?.commission_total || 0),
+    ],
+  );
+}
+
+async function ensureCurrentReports(conn, affiliateId = null) {
+  for (const type of PERIOD_TYPES) {
+    const meta = periodMeta(type, new Date());
+    await upsertAffiliateRevenueReport(conn, {
+      affiliateId,
+      periodType: meta.period_type,
+      periodKey: meta.period_key,
+      periodStart: meta.period_start,
+      periodEnd: meta.period_end,
+    });
+  }
+}
+
+async function rebuildAffiliateReports(conn, affiliateId = null, from = null, to = null) {
+  const startDate = toDateOnly(from) || "2024-01-01";
+  const endDate = toDateOnly(to) || toDateOnly(new Date());
+
+  const [dayRows] = await conn.query(
+    `
+      SELECT DISTINCT period_day AS period_key
+      FROM affiliate_commissions
+      WHERE period_day IS NOT NULL
+        AND (? IS NULL OR affiliate_id = ?)
+        AND period_day BETWEEN ? AND ?
+      UNION
+      SELECT DISTINCT DATE(created_at) AS period_key
+      FROM affiliate_clicks
+      WHERE (? IS NULL OR affiliate_id = ?)
+        AND DATE(created_at) BETWEEN ? AND ?
+      ORDER BY period_key ASC
+    `,
+    [affiliateId, affiliateId, startDate, endDate, affiliateId, affiliateId, startDate, endDate],
+  );
+
+  const [weekRows] = await conn.query(
+    `
+      SELECT DISTINCT period_week_start AS period_key
+      FROM affiliate_commissions
+      WHERE period_week_start IS NOT NULL
+        AND (? IS NULL OR affiliate_id = ?)
+        AND period_day BETWEEN ? AND ?
+      ORDER BY period_key ASC
+    `,
+    [affiliateId, affiliateId, startDate, endDate],
+  );
+
+  const [monthRows] = await conn.query(
+    `
+      SELECT DISTINCT period_month AS period_key
+      FROM affiliate_commissions
+      WHERE period_month IS NOT NULL
+        AND (? IS NULL OR affiliate_id = ?)
+        AND period_day BETWEEN ? AND ?
+      ORDER BY period_key ASC
+    `,
+    [affiliateId, affiliateId, startDate, endDate],
+  );
+
+  const [yearRows] = await conn.query(
+    `
+      SELECT DISTINCT period_year AS period_key
+      FROM affiliate_commissions
+      WHERE period_year IS NOT NULL
+        AND (? IS NULL OR affiliate_id = ?)
+        AND period_day BETWEEN ? AND ?
+      ORDER BY period_key ASC
+    `,
+    [affiliateId, affiliateId, startDate, endDate],
+  );
+
+  for (const row of dayRows || []) {
+    const meta = periodMeta("DAY", row.period_key);
+    await upsertAffiliateRevenueReport(conn, {
+      affiliateId,
+      periodType: "DAY",
+      periodKey: meta.period_key,
+      periodStart: meta.period_start,
+      periodEnd: meta.period_end,
+    });
+  }
+
+  for (const row of weekRows || []) {
+    const meta = periodMeta("WEEK", row.period_key);
+    await upsertAffiliateRevenueReport(conn, {
+      affiliateId,
+      periodType: "WEEK",
+      periodKey: meta.period_key,
+      periodStart: meta.period_start,
+      periodEnd: meta.period_end,
+    });
+  }
+
+  for (const row of monthRows || []) {
+    const meta = periodMeta("MONTH", `${row.period_key}-01`);
+    await upsertAffiliateRevenueReport(conn, {
+      affiliateId,
+      periodType: "MONTH",
+      periodKey: meta.period_key,
+      periodStart: meta.period_start,
+      periodEnd: meta.period_end,
+    });
+  }
+
+  for (const row of yearRows || []) {
+    const meta = periodMeta("YEAR", `${row.period_key}-01-01`);
+    await upsertAffiliateRevenueReport(conn, {
+      affiliateId,
+      periodType: "YEAR",
+      periodKey: meta.period_key,
+      periodStart: meta.period_start,
+      periodEnd: meta.period_end,
+    });
+  }
+
+  await ensureCurrentReports(conn, affiliateId);
+
+  if (affiliateId) {
+    await syncAffiliateCounters(conn, affiliateId);
+  }
+}
+
+/* =========================
+ * Reporting global summary
+ * GET /api/affiliates/reports/summary
+ * =======================*/
+router.get("/reports/summary", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const period = normPeriodType(req.query.period, "MONTH");
+  const conn = await getPool().getConnection();
+
+  try {
+    await ensureCurrentReports(conn, null);
+    const meta = periodMeta(period, new Date());
+
+    const [[row]] = await conn.query(
+      `
+        SELECT *
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id IS NULL
+          AND period_type = ?
+          AND period_key = ?
+        LIMIT 1
+      `,
+      [period, meta.period_key],
+    );
+
+    return res.json({
+      period,
+      global: row || {
+        affiliate_id: null,
+        period_type: period,
+        period_key: meta.period_key,
+        period_start: meta.period_start,
+        period_end: meta.period_end,
+        clicks_count: 0,
+        orders_count: 0,
+        sales_amount: 0,
+        commission_pending: 0,
+        commission_approved: 0,
+        commission_paid: 0,
+        commission_cancelled: 0,
+        commission_total: 0,
+        currency: "MAD",
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Reporting global history
+ * GET /api/affiliates/reports/history
+ * =======================*/
+router.get("/reports/history", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const period = normPeriodType(req.query.period, "MONTH");
+  const { page, pageSize, offset, limit } = getPagination(req);
+
+  try {
+    const [[{ total }]] = await getPool().query(
+      `
+        SELECT COUNT(*) AS total
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id IS NULL
+          AND period_type = ?
+      `,
+      [period],
+    );
+
+    const [rows] = await getPool().query(
+      `
+        SELECT *
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id IS NULL
+          AND period_type = ?
+        ORDER BY period_start DESC, id DESC
+        LIMIT ? OFFSET ?
+      `,
+      [period, limit, offset],
+    );
+
+    return res.json({
+      items: rows || [],
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
+ * Rebuild reports
+ * POST /api/affiliates/reports/rebuild
+ * body: { affiliate_id?, from?, to? }
+ * =======================*/
+router.post("/reports/rebuild", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const affiliateId =
+    req.body?.affiliate_id == null || req.body?.affiliate_id === ""
+      ? null
+      : Number(req.body.affiliate_id);
+
+  if (affiliateId !== null && (!Number.isFinite(affiliateId) || affiliateId <= 0)) {
+    return res.status(400).json({ error: "affiliate_id invalide" });
+  }
+
+  const from = req.body?.from || null;
+  const to = req.body?.to || null;
+
+  const conn = await getPool().getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    if (affiliateId) {
+      await rebuildAffiliateReports(conn, affiliateId, from, to);
+    } else {
+      const [rows] = await conn.query(`SELECT id FROM affiliates`);
+      for (const row of rows || []) {
+        await rebuildAffiliateReports(conn, Number(row.id), from, to);
+      }
+      await rebuildAffiliateReports(conn, null, from, to);
+    }
+
+    await conn.commit();
+    return res.json({
+      success: true,
+      affiliate_id: affiliateId,
+      from: toDateOnly(from) || null,
+      to: toDateOnly(to) || null,
+    });
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Admin update commission status
+ * PUT /api/affiliates/commissions/:id/status
+ * =======================*/
+router.put("/commissions/:id/status", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+
+  const status = normCommissionStatus(req.body?.status, "");
+  if (!COMMISSION_STATUSES.includes(status)) {
+    return res.status(400).json({ error: "invalid status" });
+  }
+
+  const conn = await getPool().getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const sets = ["status = ?"];
+    const vals = [status];
+
+    if (status === "PAID") {
+      sets.push("paid_at = NOW()");
+    } else {
+      sets.push("paid_at = NULL");
+    }
+
+    sets.push("updated_at = NOW()");
+
+    const [r] = await conn.query(
+      `
+        UPDATE affiliate_commissions
+        SET ${sets.join(", ")}
+        WHERE id = ?
+      `,
+      [...vals, id],
+    );
+
+    if (!r.affectedRows) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    const [[row]] = await conn.query(
+      `
+        SELECT *
+        FROM affiliate_commissions
+        WHERE id = ?
+        LIMIT 1
+      `,
+      [id],
+    );
+
+    await syncAffiliateCounters(conn, Number(row.affiliate_id));
+    await rebuildAffiliateReports(conn, Number(row.affiliate_id));
+    await rebuildAffiliateReports(conn, null);
+
+    await conn.commit();
+    return res.json(row);
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Public tracking by code
+ * GET /api/affiliates/track/:code
+ * =======================*/
+router.get("/track/:code", async (req, res) => {
+  const code = normalizeAffiliateCode(req.params.code);
+  if (!code) {
+    return res.status(400).json({ error: "invalid code" });
+  }
+
+  const landing = !isBlank(req.query.to)
+    ? String(req.query.to).trim()
+    : "/";
+
+  const productId =
+    normalizeProductId(req.query.product_id) ||
+    normalizeProductId(req.query.productId) ||
+    normalizeProductId(req.query.pid) ||
+    extractProductIdFromLanding(landing);
+
+  const source = extractSource(req, landing);
+  const device = detectDevice(req.headers["user-agent"] || null);
+
+  const conn = await getPool().getConnection();
+
+  try {
+    const [[affiliate]] = await conn.query(
+      `
+        SELECT *
+        FROM affiliates
+        WHERE affiliate_code = ?
+          AND status = 'ACTIVE'
+        LIMIT 1
+      `,
+      [code],
+    );
+
+    if (!affiliate) {
+      return res.redirect(landing);
+    }
+
+    await conn.beginTransaction();
+
+    await insertAffiliateClick(conn, {
+      affiliate_id: affiliate.id,
+      affiliate_code: affiliate.affiliate_code,
+      product_id: productId,
+      ip_address: getClientIp(req),
+      user_agent: req.headers["user-agent"] || null,
+      referer_url: req.headers.referer || null,
+      landing_url: landing,
+      source,
+      device,
+    });
+
+    await conn.query(
+      `
+        UPDATE affiliates
+        SET total_clicks = COALESCE(total_clicks, 0) + 1,
+            updated_at = NOW()
+        WHERE id = ?
+      `,
+      [affiliate.id],
+    );
+
+    await rebuildAffiliateReports(conn, Number(affiliate.id));
+    await rebuildAffiliateReports(conn, null);
+
+    await conn.commit();
+
+    const sep = landing.includes("?") ? "&" : "?";
+    return res.redirect(`${landing}${sep}ref=${encodeURIComponent(code)}`);
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    return res.redirect("/");
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Public tracking by slug
+ * GET /api/affiliates/ref/:slug
+ * =======================*/
+router.get("/ref/:slug", async (req, res) => {
+  const slug = normalizeSlug(req.params.slug);
+  if (!slug) {
+    return res.redirect("/");
+  }
+
+  const landing = !isBlank(req.query.to)
+    ? String(req.query.to).trim()
+    : "/";
+
+  const productId =
+    normalizeProductId(req.query.product_id) ||
+    normalizeProductId(req.query.productId) ||
+    normalizeProductId(req.query.pid) ||
+    extractProductIdFromLanding(landing);
+
+  const source = extractSource(req, landing);
+  const device = detectDevice(req.headers["user-agent"] || null);
+
+  const conn = await getPool().getConnection();
+
+  try {
+    const [[affiliate]] = await conn.query(
+      `
+        SELECT *
+        FROM affiliates
+        WHERE referral_slug = ?
+          AND status = 'ACTIVE'
+        LIMIT 1
+      `,
+      [slug],
+    );
+
+    if (!affiliate) {
+      return res.redirect(landing);
+    }
+
+    await conn.beginTransaction();
+
+    await insertAffiliateClick(conn, {
+      affiliate_id: affiliate.id,
+      affiliate_code: affiliate.affiliate_code,
+      product_id: productId,
+      ip_address: getClientIp(req),
+      user_agent: req.headers["user-agent"] || null,
+      referer_url: req.headers.referer || null,
+      landing_url: landing,
+      source,
+      device,
+    });
+
+    await conn.query(
+      `
+        UPDATE affiliates
+        SET total_clicks = COALESCE(total_clicks, 0) + 1,
+            updated_at = NOW()
+        WHERE id = ?
+      `,
+      [affiliate.id],
+    );
+
+    await rebuildAffiliateReports(conn, Number(affiliate.id));
+    await rebuildAffiliateReports(conn, null);
+
+    await conn.commit();
+
+    const sep = landing.includes("?") ? "&" : "?";
+    return res.redirect(
+      `${landing}${sep}ref=${encodeURIComponent(affiliate.affiliate_code)}`,
+    );
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    return res.redirect("/");
+  } finally {
+    conn.release();
+  }
+});
 
 /* =========================
  * Admin list affiliates
@@ -435,13 +1172,11 @@ router.get("/", authRequired, async (req, res) => {
 
   const pool = getPool();
   const { page, pageSize, offset, limit } = getPagination(req);
-
   const q = String(req.query.q || "").trim();
   const status = req.query.status ? normStatus(req.query.status, "") : null;
 
   try {
     const userSelectCols = await buildAffiliateUserSelect(pool);
-
     let where = "1=1";
     const params = [];
 
@@ -511,36 +1246,6 @@ router.get("/", authRequired, async (req, res) => {
 });
 
 /* =========================
- * Admin get one affiliate
- * GET /api/affiliates/:id
- * =======================*/
-router.get("/:id", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0) {
-    return res.status(400).json({ error: "invalid id" });
-  }
-
-  const conn = await getPool().getConnection();
-
-  try {
-    const affiliate = await findAffiliateById(conn, id);
-    if (!affiliate) {
-      return res.status(404).json({ error: "Not found" });
-    }
-
-    return res.json(affiliate);
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  } finally {
-    conn.release();
-  }
-});
-
-/* =========================
  * Admin create affiliate
  * POST /api/affiliates
  * =======================*/
@@ -569,8 +1274,7 @@ router.post("/", authRequired, async (req, res) => {
     return res.status(400).json({ error: "user_id invalide" });
   }
 
-  const pool = getPool();
-  const conn = await pool.getConnection();
+  const conn = await getPool().getConnection();
 
   try {
     await conn.beginTransaction();
@@ -639,12 +1343,172 @@ router.post("/", authRequired, async (req, res) => {
 
     const affiliate = await findAffiliateById(conn, result.insertId);
 
+    await ensureCurrentReports(conn, Number(result.insertId));
+    await syncAffiliateCounters(conn, Number(result.insertId));
+
     await conn.commit();
     return res.status(201).json(affiliate);
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Admin get affiliate dashboard
+ * GET /api/affiliates/:id/dashboard
+ * =======================*/
+router.get("/:id/dashboard", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+
+  const conn = await getPool().getConnection();
+
+  try {
+    const affiliate = await findAffiliateById(conn, id);
+    if (!affiliate) {
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    await ensureCurrentReports(conn, id);
+
+    const metas = {
+      today: periodMeta("DAY"),
+      week: periodMeta("WEEK"),
+      month: periodMeta("MONTH"),
+      year: periodMeta("YEAR"),
+    };
+
+    const fetchRow = async (periodType, periodKey) => {
+      const [[row]] = await conn.query(
+        `
+          SELECT *
+          FROM affiliate_revenue_reports
+          WHERE affiliate_id = ?
+            AND period_type = ?
+            AND period_key = ?
+          LIMIT 1
+        `,
+        [id, periodType, periodKey],
+      );
+      return row || null;
+    };
+
+    const today = await fetchRow("DAY", metas.today.period_key);
+    const week = await fetchRow("WEEK", metas.week.period_key);
+    const month = await fetchRow("MONTH", metas.month.period_key);
+    const year = await fetchRow("YEAR", metas.year.period_key);
+
+    const [recentMonths] = await conn.query(
+      `
+        SELECT *
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id = ?
+          AND period_type = 'MONTH'
+        ORDER BY period_start DESC, id DESC
+        LIMIT 12
+      `,
+      [id],
+    );
+
+    return res.json({
+      affiliate,
+      today: today || {},
+      week: week || {},
+      month: month || {},
+      year: year || {},
+      recent_months: recentMonths || [],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * Admin get affiliate history
+ * GET /api/affiliates/:id/reports/history
+ * =======================*/
+router.get("/:id/reports/history", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+
+  const period = normPeriodType(req.query.period, "MONTH");
+  const { page, pageSize, offset, limit } = getPagination(req);
+
+  try {
+    const [[{ total }]] = await getPool().query(
+      `
+        SELECT COUNT(*) AS total
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id = ?
+          AND period_type = ?
+      `,
+      [id, period],
+    );
+
+    const [rows] = await getPool().query(
+      `
+        SELECT *
+        FROM affiliate_revenue_reports
+        WHERE affiliate_id = ?
+          AND period_type = ?
+        ORDER BY period_start DESC, id DESC
+        LIMIT ? OFFSET ?
+      `,
+      [id, period, limit, offset],
+    );
+
+    return res.json({
+      items: rows || [],
+      pageInfo: buildPageInfo(total, page, pageSize),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
+ * Admin get one affiliate
+ * GET /api/affiliates/:id
+ * =======================*/
+router.get("/:id", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+
+  const conn = await getPool().getConnection();
+
+  try {
+    const affiliate = await findAffiliateById(conn, id);
+    if (!affiliate) {
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    return res.json(affiliate);
+  } catch (e) {
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -691,8 +1555,7 @@ router.put("/:id", authRequired, async (req, res) => {
     const vals = [];
 
     if (user_id !== undefined) {
-      const userId =
-        user_id === null || user_id === "" ? null : Number(user_id);
+      const userId = user_id === null || user_id === "" ? null : Number(user_id);
       if (userId !== null && (!Number.isFinite(userId) || userId <= 0)) {
         await conn.rollback();
         return res.status(400).json({ error: "user_id invalide" });
@@ -850,14 +1713,14 @@ router.get("/:id/commissions", authRequired, async (req, res) => {
 
   const { page, pageSize, offset, limit } = getPagination(req);
   const status = req.query.status
-    ? String(req.query.status).trim().toUpperCase()
+    ? normCommissionStatus(req.query.status, "")
     : null;
 
   try {
     let where = "affiliate_id = ?";
     const params = [id];
 
-    if (status && ["PENDING", "APPROVED", "PAID", "CANCELLED"].includes(status)) {
+    if (status && COMMISSION_STATUSES.includes(status)) {
       where += " AND status = ?";
       params.push(status);
     }
@@ -934,228 +1797,6 @@ router.get("/:id/clicks", authRequired, async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
-  }
-});
-
-/* =========================
- * Admin update commission status
- * PUT /api/affiliates/commissions/:id/status
- * =======================*/
-router.put("/commissions/:id/status", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0) {
-    return res.status(400).json({ error: "invalid id" });
-  }
-
-  const status = String(req.body?.status || "")
-    .trim()
-    .toUpperCase();
-
-  if (!["PENDING", "APPROVED", "PAID", "CANCELLED"].includes(status)) {
-    return res.status(400).json({ error: "invalid status" });
-  }
-
-  try {
-    const sets = ["status = ?"];
-    const vals = [status];
-
-    const hasPaidAt = status === "PAID";
-    if (hasPaidAt) {
-      sets.push("paid_at = NOW()");
-    }
-
-    sets.push("updated_at = NOW()");
-
-    const [r] = await getPool().query(
-      `
-        UPDATE affiliate_commissions
-        SET ${sets.join(", ")}
-        WHERE id = ?
-      `,
-      [...vals, id],
-    );
-
-    if (!r.affectedRows) {
-      return res.status(404).json({ error: "Not found" });
-    }
-
-    const [[row]] = await getPool().query(
-      `
-        SELECT *
-        FROM affiliate_commissions
-        WHERE id = ?
-        LIMIT 1
-      `,
-      [id],
-    );
-
-    return res.json(row);
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-/* =========================
- * Public tracking by code
- * GET /api/affiliates/track/:code
- * =======================*/
-router.get("/track/:code", async (req, res) => {
-  const code = normalizeAffiliateCode(req.params.code);
-  if (!code) {
-    return res.status(400).json({ error: "invalid code" });
-  }
-
-  const landing = !isBlank(req.query.to)
-    ? String(req.query.to).trim()
-    : "/";
-
-  const productId =
-    normalizeProductId(req.query.product_id) ||
-    normalizeProductId(req.query.productId) ||
-    normalizeProductId(req.query.pid) ||
-    extractProductIdFromLanding(landing);
-
-  const source = extractSource(req, landing);
-  const device = detectDevice(req.headers["user-agent"] || null);
-
-  const conn = await getPool().getConnection();
-
-  try {
-    const [[affiliate]] = await conn.query(
-      `
-        SELECT *
-        FROM affiliates
-        WHERE affiliate_code = ?
-          AND status = 'ACTIVE'
-        LIMIT 1
-      `,
-      [code],
-    );
-
-    if (!affiliate) {
-      return res.redirect(landing);
-    }
-
-    await conn.beginTransaction();
-
-    await insertAffiliateClick(conn, {
-      affiliate_id: affiliate.id,
-      affiliate_code: affiliate.affiliate_code,
-      product_id: productId,
-      ip_address: getClientIp(req),
-      user_agent: req.headers["user-agent"] || null,
-      referer_url: req.headers.referer || null,
-      landing_url: landing,
-      source,
-      device,
-    });
-
-    await conn.query(
-      `
-        UPDATE affiliates
-        SET total_clicks = COALESCE(total_clicks, 0) + 1,
-            updated_at = NOW()
-        WHERE id = ?
-      `,
-      [affiliate.id],
-    );
-
-    await conn.commit();
-
-    const sep = landing.includes("?") ? "&" : "?";
-    return res.redirect(`${landing}${sep}ref=${encodeURIComponent(code)}`);
-  } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
-    return res.redirect("/");
-  } finally {
-    conn.release();
-  }
-});
-
-/* =========================
- * Public tracking by slug
- * GET /api/affiliates/ref/:slug
- * =======================*/
-router.get("/ref/:slug", async (req, res) => {
-  const slug = normalizeSlug(req.params.slug);
-  if (!slug) {
-    return res.redirect("/");
-  }
-
-  const landing = !isBlank(req.query.to)
-    ? String(req.query.to).trim()
-    : "/";
-
-  const productId =
-    normalizeProductId(req.query.product_id) ||
-    normalizeProductId(req.query.productId) ||
-    normalizeProductId(req.query.pid) ||
-    extractProductIdFromLanding(landing);
-
-  const source = extractSource(req, landing);
-  const device = detectDevice(req.headers["user-agent"] || null);
-
-  const conn = await getPool().getConnection();
-
-  try {
-    const [[affiliate]] = await conn.query(
-      `
-        SELECT *
-        FROM affiliates
-        WHERE referral_slug = ?
-          AND status = 'ACTIVE'
-        LIMIT 1
-      `,
-      [slug],
-    );
-
-    if (!affiliate) {
-      return res.redirect(landing);
-    }
-
-    await conn.beginTransaction();
-
-    await insertAffiliateClick(conn, {
-      affiliate_id: affiliate.id,
-      affiliate_code: affiliate.affiliate_code,
-      product_id: productId,
-      ip_address: getClientIp(req),
-      user_agent: req.headers["user-agent"] || null,
-      referer_url: req.headers.referer || null,
-      landing_url: landing,
-      source,
-      device,
-    });
-
-    await conn.query(
-      `
-        UPDATE affiliates
-        SET total_clicks = COALESCE(total_clicks, 0) + 1,
-            updated_at = NOW()
-        WHERE id = ?
-      `,
-      [affiliate.id],
-    );
-
-    await conn.commit();
-
-    const sep = landing.includes("?") ? "&" : "?";
-    return res.redirect(
-      `${landing}${sep}ref=${encodeURIComponent(affiliate.affiliate_code)}`,
-    );
-  } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
-    return res.redirect("/");
-  } finally {
-    conn.release();
   }
 });
 
