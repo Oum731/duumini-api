@@ -13,7 +13,11 @@ const {
   sendWhatsAppOrderConfirmation,
   sendWhatsAppReceiptToClient,
 } = require("../services/twilio");
-
+const {
+  buildAffiliateOrderMeta,
+  pushAffiliateOrderColumns,
+  finalizeAffiliateOrder,
+} = require("../services/affiliates");
 const router = Router();
 
 /* =========================
@@ -2504,6 +2508,7 @@ router.post("/admin", authRequired, async (req, res) => {
     payment = null,
     admin_discount = null,
     customer_role = null,
+    affiliate_code = null,
   } = req.body || {};
 
   const customerId = Number(customer_id || 0);
@@ -2730,6 +2735,12 @@ router.post("/admin", authRequired, async (req, res) => {
     const orderTotal = discountedItemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(discountedItemsAmount);
 
+    const affiliatePack = await buildAffiliateOrderMeta(
+      conn,
+      affiliate_code,
+      discountedItemsAmount,
+    );
+
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
 
@@ -2843,6 +2854,14 @@ router.post("/admin", authRequired, async (req, res) => {
       vals.push(paymentObj.remaining_amount);
     }
 
+    pushAffiliateOrderColumns(
+      cols,
+      placeholders,
+      vals,
+      affiliatePack.orderCols,
+      affiliatePack.orderMeta,
+    );
+
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
       vals,
@@ -2850,6 +2869,14 @@ router.post("/admin", authRequired, async (req, res) => {
 
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
+
+    await finalizeAffiliateOrder(conn, {
+      affiliate: affiliatePack.affiliate,
+      orderId,
+      displayCode,
+      baseAmount: discountedItemsAmount,
+      orderMeta: affiliatePack.orderMeta,
+    });
 
     if (receiptCols.receipt_number) {
       const receiptNumber = formatReceiptNumber(orderId, new Date());
@@ -3011,6 +3038,17 @@ router.post("/admin", authRequired, async (req, res) => {
             default_password: autoAccount.plainPassword || null,
           }
         : null,
+      affiliate: affiliatePack.affiliate
+        ? {
+            id: affiliatePack.affiliate.id,
+            affiliate_code: affiliatePack.affiliate.affiliate_code,
+            commission_rate:
+              affiliatePack.orderMeta.affiliate_commission_rate,
+            commission_amount:
+              affiliatePack.orderMeta.affiliate_commission_amount,
+            base_amount: +discountedItemsAmount.toFixed(2),
+          }
+        : null,
       admin_discount: {
         type: discountInput.type,
         value: discountInput.type === "NONE" ? 0 : discountInput.value,
@@ -3053,6 +3091,7 @@ router.post("/", authRequired, async (req, res) => {
     items = [],
     totals = {},
     payment = null,
+    affiliate_code = null,
   } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -3106,6 +3145,12 @@ router.post("/", authRequired, async (req, res) => {
 
     const orderTotal = itemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(itemsAmount);
+
+    const affiliatePack = await buildAffiliateOrderMeta(
+      conn,
+      affiliate_code,
+      itemsAmount,
+    );
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
@@ -3232,6 +3277,14 @@ router.post("/", authRequired, async (req, res) => {
       vals.push(paymentObj.remaining_amount);
     }
 
+    pushAffiliateOrderColumns(
+      cols,
+      placeholders,
+      vals,
+      affiliatePack.orderCols,
+      affiliatePack.orderMeta,
+    );
+
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
       vals,
@@ -3239,6 +3292,14 @@ router.post("/", authRequired, async (req, res) => {
 
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
+
+    await finalizeAffiliateOrder(conn, {
+      affiliate: affiliatePack.affiliate,
+      orderId,
+      displayCode,
+      baseAmount: itemsAmount,
+      orderMeta: affiliatePack.orderMeta,
+    });
 
     if (receiptCols.receipt_number) {
       const receiptNumber = formatReceiptNumber(orderId, new Date());
@@ -3400,6 +3461,17 @@ router.post("/", authRequired, async (req, res) => {
       customer_role: normalizeCustomerRoleInput(
         contactObj?.role || req.user?.role || "CLIENT",
       ),
+      affiliate: affiliatePack.affiliate
+        ? {
+            id: affiliatePack.affiliate.id,
+            affiliate_code: affiliatePack.affiliate.affiliate_code,
+            commission_rate:
+              affiliatePack.orderMeta.affiliate_commission_rate,
+            commission_amount:
+              affiliatePack.orderMeta.affiliate_commission_amount,
+            base_amount: +itemsAmount.toFixed(2),
+          }
+        : null,
       admin_discount: {
         type: "NONE",
         value: 0,
@@ -3431,7 +3503,6 @@ router.post("/", authRequired, async (req, res) => {
     conn.release();
   }
 });
-
 /* =========================
  * Create order guest
  * =======================*/
@@ -3443,6 +3514,7 @@ router.post("/guest", async (req, res) => {
     items = [],
     totals = {},
     payment = null,
+    affiliate_code = null,
   } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -3486,6 +3558,12 @@ router.post("/guest", async (req, res) => {
 
     const orderTotal = itemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(itemsAmount);
+
+    const affiliatePack = await buildAffiliateOrderMeta(
+      conn,
+      affiliate_code,
+      itemsAmount,
+    );
 
     const payCols = await getOrdersPayColsCached(pool);
     const paymentObj = buildPaymentFromPayload(payment, orderTotal, currency);
@@ -3611,6 +3689,14 @@ router.post("/guest", async (req, res) => {
       vals.push(paymentObj.remaining_amount);
     }
 
+    pushAffiliateOrderColumns(
+      cols,
+      placeholders,
+      vals,
+      affiliatePack.orderCols,
+      affiliatePack.orderMeta,
+    );
+
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
       vals,
@@ -3618,6 +3704,14 @@ router.post("/guest", async (req, res) => {
 
     const orderId = r.insertId;
     const displayCode = buildDisplayCode(orderId);
+
+    await finalizeAffiliateOrder(conn, {
+      affiliate: affiliatePack.affiliate,
+      orderId,
+      displayCode,
+      baseAmount: itemsAmount,
+      orderMeta: affiliatePack.orderMeta,
+    });
 
     if (receiptCols.receipt_number) {
       const receiptNumber = formatReceiptNumber(orderId, new Date());
@@ -3755,6 +3849,17 @@ router.post("/guest", async (req, res) => {
       contact: contactObj || null,
       address: addressObj || null,
       customer_role: contactObj?.role || null,
+      affiliate: affiliatePack.affiliate
+        ? {
+            id: affiliatePack.affiliate.id,
+            affiliate_code: affiliatePack.affiliate.affiliate_code,
+            commission_rate:
+              affiliatePack.orderMeta.affiliate_commission_rate,
+            commission_amount:
+              affiliatePack.orderMeta.affiliate_commission_amount,
+            base_amount: +itemsAmount.toFixed(2),
+          }
+        : null,
       admin_discount: {
         type: "NONE",
         value: 0,

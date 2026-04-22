@@ -418,7 +418,8 @@ app.use("/api/admin", require("./src/routes/adminSite"));
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
-
+const affiliatesRoutes = require("./routes/affiliates");
+app.use("/api/affiliates", affiliatesRoutes);
 /* =========================
  * ✅ Crons contrôlés par env
  * ========================= */
