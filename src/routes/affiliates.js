@@ -570,14 +570,16 @@ async function upsertAffiliateRevenueReport(conn, {
   periodStart,
   periodEnd,
 }) {
+  const reportAffiliateId = affiliateId == null ? 0 : Number(affiliateId);
+
   const [[clickRow]] = await conn.query(
     `
       SELECT COUNT(*) AS clicks_count
       FROM affiliate_clicks
-      WHERE (? IS NULL OR affiliate_id = ?)
+      WHERE (? = 0 OR affiliate_id = ?)
         AND DATE(created_at) BETWEEN ? AND ?
     `,
-    [affiliateId, affiliateId, periodStart, periodEnd],
+    [reportAffiliateId, reportAffiliateId, periodStart, periodEnd],
   );
 
   const [[commRow]] = await conn.query(
@@ -591,10 +593,10 @@ async function upsertAffiliateRevenueReport(conn, {
         COALESCE(SUM(CASE WHEN status = 'CANCELLED' THEN amount ELSE 0 END), 0) AS commission_cancelled,
         COALESCE(SUM(CASE WHEN status <> 'CANCELLED' THEN amount ELSE 0 END), 0) AS commission_total
       FROM affiliate_commissions
-      WHERE (? IS NULL OR affiliate_id = ?)
+      WHERE (? = 0 OR affiliate_id = ?)
         AND period_day BETWEEN ? AND ?
     `,
-    [affiliateId, affiliateId, periodStart, periodEnd],
+    [reportAffiliateId, reportAffiliateId, periodStart, periodEnd],
   );
 
   await conn.query(
@@ -630,7 +632,7 @@ async function upsertAffiliateRevenueReport(conn, {
         updated_at = NOW()
     `,
     [
-      affiliateId,
+      reportAffiliateId,
       periodType,
       periodKey,
       periodStart,
@@ -788,7 +790,7 @@ router.get("/reports/summary", authRequired, async (req, res) => {
       `
         SELECT *
         FROM affiliate_revenue_reports
-        WHERE affiliate_id IS NULL
+        WHERE affiliate_id = 0
           AND period_type = ?
           AND period_key = ?
         LIMIT 1
@@ -839,7 +841,7 @@ router.get("/reports/history", authRequired, async (req, res) => {
       `
         SELECT COUNT(*) AS total
         FROM affiliate_revenue_reports
-        WHERE affiliate_id IS NULL
+        WHERE affiliate_id = 0
           AND period_type = ?
       `,
       [period],
@@ -849,7 +851,7 @@ router.get("/reports/history", authRequired, async (req, res) => {
       `
         SELECT *
         FROM affiliate_revenue_reports
-        WHERE affiliate_id IS NULL
+        WHERE affiliate_id = 0
           AND period_type = ?
         ORDER BY period_start DESC, id DESC
         LIMIT ? OFFSET ?
