@@ -73,6 +73,7 @@ async function getMyShops(pool, userId) {
  */
 router.get("/me", authRequired, async (req, res) => {
   const pool = getPool();
+
   try {
     const effectiveUserId =
       toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
@@ -81,7 +82,8 @@ router.get("/me", authRequired, async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe
-       FROM users WHERE id=?`,
+       FROM users
+       WHERE id=?`,
       [effectiveUserId]
     );
 
@@ -89,6 +91,18 @@ router.get("/me", authRequired, async (req, res) => {
     if (!me) return res.json(null);
 
     const shops = await getMyShops(pool, effectiveUserId);
+
+    const [affRows] = await pool.query(
+      `
+      SELECT id, affiliate_code, status
+      FROM affiliates
+      WHERE user_id=?
+      LIMIT 1
+      `,
+      [effectiveUserId]
+    );
+
+    const affiliate = affRows && affRows[0] ? affRows[0] : null;
 
     const actor_admin_id =
       req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
@@ -106,6 +120,10 @@ router.get("/me", authRequired, async (req, res) => {
     res.json({
       ...me,
       shops,
+      is_affiliate: !!affiliate,
+      affiliate_id: affiliate?.id || null,
+      affiliate_code: affiliate?.affiliate_code || null,
+      affiliate_status: affiliate?.status || null,
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,
@@ -209,6 +227,18 @@ router.put("/me", authRequired, async (req, res) => {
     const me = rows[0] || null;
     const shops = await getMyShops(pool, effectiveUserId);
 
+    const [affRows] = await pool.query(
+      `
+      SELECT id, affiliate_code, status
+      FROM affiliates
+      WHERE user_id=?
+      LIMIT 1
+      `,
+      [effectiveUserId]
+    );
+
+    const affiliate = affRows && affRows[0] ? affRows[0] : null;
+
     const actor_admin_id =
       req.user.actor_admin_id != null ? Number(req.user.actor_admin_id) : null;
 
@@ -225,6 +255,10 @@ router.put("/me", authRequired, async (req, res) => {
     res.json({
       ...me,
       shops,
+      is_affiliate: !!affiliate,
+      affiliate_id: affiliate?.id || null,
+      affiliate_code: affiliate?.affiliate_code || null,
+      affiliate_status: affiliate?.status || null,
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,

@@ -418,7 +418,9 @@ app.use("/api/admin", require("./src/routes/adminSite"));
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
 }
+const affiliateMeRoutes = require("./src/routes/affiliate_me");
 
+app.use("/api/affiliate", affiliateMeRoutes);
 const affiliatesRoutes = require("./src/routes/affiliates");
 app.use("/api/affiliates", affiliatesRoutes);
 /* =========================
