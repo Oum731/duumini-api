@@ -4,6 +4,10 @@ const { authRequired } = require("../middlewares/auth");
 
 const router = Router();
 
+const REPORT_TABLE = "affiliate_revenue_reports";
+const COMMISSION_STATUSES = ["PENDING", "APPROVED", "PAID", "CANCELLED"];
+const PERIOD_TYPES = ["DAY", "WEEK", "MONTH", "YEAR"];
+
 function toPosInt(x) {
   const n = Number(x);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
@@ -20,18 +24,65 @@ function toPageSize(value, fallback = 10, max = 100) {
   return Math.min(max, Math.floor(n));
 }
 
+function normPeriod(value, fallback = "MONTH") {
+  const v = String(value || fallback).trim().toUpperCase();
+  return PERIOD_TYPES.includes(v) ? v : fallback;
+}
+
+function normCommissionStatus(value) {
+  const v = String(value || "").trim().toUpperCase();
+  return COMMISSION_STATUSES.includes(v) ? v : null;
+}
+
+function emptyStats() {
+  return {
+    clicks_count: 0,
+    orders_count: 0,
+    sales_amount: 0,
+    commission_pending: 0,
+    commission_approved: 0,
+    commission_paid: 0,
+    commission_cancelled: 0,
+    commission_total: 0,
+  };
+}
+
 async function getAffiliateByUserId(pool, userId) {
   const [rows] = await pool.query(
     `
-    SELECT *
-    FROM affiliates
-    WHERE user_id=?
-    LIMIT 1
+      SELECT *
+      FROM affiliates
+      WHERE user_id = ?
+      LIMIT 1
     `,
-    [userId]
+    [userId],
   );
 
   return rows && rows[0] ? rows[0] : null;
+}
+
+async function getCurrentAffiliate(req, res) {
+  const pool = getPool();
+  const userId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return null;
+  }
+
+  const affiliate = await getAffiliateByUserId(pool, userId);
+
+  if (!affiliate) {
+    res.status(404).json({ error: "Not affiliate" });
+    return null;
+  }
+
+  return {
+    pool,
+    userId,
+    affiliate,
+    affiliateId: Number(affiliate.id),
+  };
 }
 
 /**
@@ -40,8 +91,7 @@ async function getAffiliateByUserId(pool, userId) {
 router.get("/me", authRequired, async (req, res) => {
   try {
     const pool = getPool();
-    const userId =
-      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const userId = toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
 
     if (!userId) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -65,125 +115,111 @@ router.get("/me", authRequired, async (req, res) => {
  */
 router.get("/me/dashboard", authRequired, async (req, res) => {
   try {
-    const pool = getPool();
-    const userId =
-      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const ctx = await getCurrentAffiliate(req, res);
+    if (!ctx) return;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const affiliate = await getAffiliateByUserId(pool, userId);
-
-    if (!affiliate) {
-      return res.status(404).json({ error: "Not affiliate" });
-    }
-
-    const affiliateId = Number(affiliate.id);
+    const { pool, affiliate, affiliateId } = ctx;
 
     const [dashboardRows] = await pool.query(
       `
-      SELECT
-        COALESCE(SUM(clicks_count), 0) AS clicks_count,
-        COALESCE(SUM(orders_count), 0) AS orders_count,
-        COALESCE(SUM(sales_amount), 0) AS sales_amount,
-        COALESCE(SUM(commission_pending), 0) AS commission_pending,
-        COALESCE(SUM(commission_approved), 0) AS commission_approved,
-        COALESCE(SUM(commission_paid), 0) AS commission_paid,
-        COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
-        COALESCE(SUM(commission_total), 0) AS commission_total
-      FROM affiliate_reports
-      WHERE affiliate_id=?
+        SELECT
+          COALESCE(SUM(clicks_count), 0) AS clicks_count,
+          COALESCE(SUM(orders_count), 0) AS orders_count,
+          COALESCE(SUM(sales_amount), 0) AS sales_amount,
+          COALESCE(SUM(commission_pending), 0) AS commission_pending,
+          COALESCE(SUM(commission_approved), 0) AS commission_approved,
+          COALESCE(SUM(commission_paid), 0) AS commission_paid,
+          COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
+          COALESCE(SUM(commission_total), 0) AS commission_total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
       `,
-      [affiliateId]
+      [affiliateId],
     );
-
-    const global = dashboardRows && dashboardRows[0] ? dashboardRows[0] : {
-      clicks_count: 0,
-      orders_count: 0,
-      sales_amount: 0,
-      commission_pending: 0,
-      commission_approved: 0,
-      commission_paid: 0,
-      commission_cancelled: 0,
-      commission_total: 0,
-    };
 
     const [todayRows] = await pool.query(
       `
-      SELECT
-        COALESCE(SUM(clicks_count), 0) AS clicks_count,
-        COALESCE(SUM(orders_count), 0) AS orders_count,
-        COALESCE(SUM(sales_amount), 0) AS sales_amount,
-        COALESCE(SUM(commission_pending), 0) AS commission_pending,
-        COALESCE(SUM(commission_approved), 0) AS commission_approved,
-        COALESCE(SUM(commission_paid), 0) AS commission_paid,
-        COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
-        COALESCE(SUM(commission_total), 0) AS commission_total
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND DATE(period_start)=CURDATE()
+        SELECT
+          COALESCE(SUM(clicks_count), 0) AS clicks_count,
+          COALESCE(SUM(orders_count), 0) AS orders_count,
+          COALESCE(SUM(sales_amount), 0) AS sales_amount,
+          COALESCE(SUM(commission_pending), 0) AS commission_pending,
+          COALESCE(SUM(commission_approved), 0) AS commission_approved,
+          COALESCE(SUM(commission_paid), 0) AS commission_paid,
+          COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
+          COALESCE(SUM(commission_total), 0) AS commission_total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND period_type = 'DAY'
+          AND DATE(period_start) = CURDATE()
       `,
-      [affiliateId]
+      [affiliateId],
     );
 
     const [weekRows] = await pool.query(
       `
-      SELECT
-        COALESCE(SUM(clicks_count), 0) AS clicks_count,
-        COALESCE(SUM(orders_count), 0) AS orders_count,
-        COALESCE(SUM(sales_amount), 0) AS sales_amount,
-        COALESCE(SUM(commission_pending), 0) AS commission_pending,
-        COALESCE(SUM(commission_approved), 0) AS commission_approved,
-        COALESCE(SUM(commission_paid), 0) AS commission_paid,
-        COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
-        COALESCE(SUM(commission_total), 0) AS commission_total
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND YEARWEEK(period_start, 1)=YEARWEEK(CURDATE(), 1)
+        SELECT
+          COALESCE(SUM(clicks_count), 0) AS clicks_count,
+          COALESCE(SUM(orders_count), 0) AS orders_count,
+          COALESCE(SUM(sales_amount), 0) AS sales_amount,
+          COALESCE(SUM(commission_pending), 0) AS commission_pending,
+          COALESCE(SUM(commission_approved), 0) AS commission_approved,
+          COALESCE(SUM(commission_paid), 0) AS commission_paid,
+          COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
+          COALESCE(SUM(commission_total), 0) AS commission_total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND period_type = 'WEEK'
+          AND YEARWEEK(period_start, 1) = YEARWEEK(CURDATE(), 1)
       `,
-      [affiliateId]
+      [affiliateId],
     );
 
     const [monthRows] = await pool.query(
       `
-      SELECT
-        COALESCE(SUM(clicks_count), 0) AS clicks_count,
-        COALESCE(SUM(orders_count), 0) AS orders_count,
-        COALESCE(SUM(sales_amount), 0) AS sales_amount,
-        COALESCE(SUM(commission_pending), 0) AS commission_pending,
-        COALESCE(SUM(commission_approved), 0) AS commission_approved,
-        COALESCE(SUM(commission_paid), 0) AS commission_paid,
-        COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
-        COALESCE(SUM(commission_total), 0) AS commission_total
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND DATE_FORMAT(period_start, '%Y-%m')=DATE_FORMAT(CURDATE(), '%Y-%m')
+        SELECT
+          COALESCE(SUM(clicks_count), 0) AS clicks_count,
+          COALESCE(SUM(orders_count), 0) AS orders_count,
+          COALESCE(SUM(sales_amount), 0) AS sales_amount,
+          COALESCE(SUM(commission_pending), 0) AS commission_pending,
+          COALESCE(SUM(commission_approved), 0) AS commission_approved,
+          COALESCE(SUM(commission_paid), 0) AS commission_paid,
+          COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
+          COALESCE(SUM(commission_total), 0) AS commission_total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND period_type = 'MONTH'
+          AND DATE_FORMAT(period_start, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')
       `,
-      [affiliateId]
+      [affiliateId],
     );
 
     const [yearRows] = await pool.query(
       `
-      SELECT
-        COALESCE(SUM(clicks_count), 0) AS clicks_count,
-        COALESCE(SUM(orders_count), 0) AS orders_count,
-        COALESCE(SUM(sales_amount), 0) AS sales_amount,
-        COALESCE(SUM(commission_pending), 0) AS commission_pending,
-        COALESCE(SUM(commission_approved), 0) AS commission_approved,
-        COALESCE(SUM(commission_paid), 0) AS commission_paid,
-        COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
-        COALESCE(SUM(commission_total), 0) AS commission_total
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND YEAR(period_start)=YEAR(CURDATE())
+        SELECT
+          COALESCE(SUM(clicks_count), 0) AS clicks_count,
+          COALESCE(SUM(orders_count), 0) AS orders_count,
+          COALESCE(SUM(sales_amount), 0) AS sales_amount,
+          COALESCE(SUM(commission_pending), 0) AS commission_pending,
+          COALESCE(SUM(commission_approved), 0) AS commission_approved,
+          COALESCE(SUM(commission_paid), 0) AS commission_paid,
+          COALESCE(SUM(commission_cancelled), 0) AS commission_cancelled,
+          COALESCE(SUM(commission_total), 0) AS commission_total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND period_type = 'YEAR'
+          AND YEAR(period_start) = YEAR(CURDATE())
       `,
-      [affiliateId]
+      [affiliateId],
     );
 
     return res.json({
       affiliate,
-      global: global || {},
-      today: (todayRows && todayRows[0]) || {},
-      week: (weekRows && weekRows[0]) || {},
-      month: (monthRows && monthRows[0]) || {},
-      year: (yearRows && yearRows[0]) || {},
+      global: dashboardRows?.[0] || emptyStats(),
+      today: todayRows?.[0] || emptyStats(),
+      week: weekRows?.[0] || emptyStats(),
+      month: monthRows?.[0] || emptyStats(),
+      year: yearRows?.[0] || emptyStats(),
     });
   } catch (e) {
     return res.status(500).json({
@@ -197,30 +233,19 @@ router.get("/me/dashboard", authRequired, async (req, res) => {
  */
 router.get("/me/commissions", authRequired, async (req, res) => {
   try {
-    const pool = getPool();
-    const userId =
-      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const ctx = await getCurrentAffiliate(req, res);
+    if (!ctx) return;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const affiliate = await getAffiliateByUserId(pool, userId);
-
-    if (!affiliate) {
-      return res.status(404).json({ error: "Not affiliate" });
-    }
-
-    const affiliateId = Number(affiliate.id);
+    const { pool, affiliateId } = ctx;
     const page = toPage(req.query.page, 1);
     const pageSize = toPageSize(req.query.pageSize, 10, 100);
-    const status = String(req.query.status || "").trim().toUpperCase();
+    const status = normCommissionStatus(req.query.status);
 
-    const where = ["affiliate_id=?"];
+    const where = ["affiliate_id = ?"];
     const params = [affiliateId];
 
     if (status) {
-      where.push("status=?");
+      where.push("status = ?");
       params.push(status);
     }
 
@@ -229,18 +254,18 @@ router.get("/me/commissions", authRequired, async (req, res) => {
 
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) AS total FROM affiliate_commissions ${whereSql}`,
-      params
+      params,
     );
 
     const [items] = await pool.query(
       `
-      SELECT *
-      FROM affiliate_commissions
-      ${whereSql}
-      ORDER BY id DESC
-      LIMIT ? OFFSET ?
+        SELECT *
+        FROM affiliate_commissions
+        ${whereSql}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
       `,
-      [...params, pageSize, offset]
+      [...params, pageSize, offset],
     );
 
     return res.json({
@@ -266,39 +291,28 @@ router.get("/me/commissions", authRequired, async (req, res) => {
  */
 router.get("/me/clicks", authRequired, async (req, res) => {
   try {
-    const pool = getPool();
-    const userId =
-      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const ctx = await getCurrentAffiliate(req, res);
+    if (!ctx) return;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const affiliate = await getAffiliateByUserId(pool, userId);
-
-    if (!affiliate) {
-      return res.status(404).json({ error: "Not affiliate" });
-    }
-
-    const affiliateId = Number(affiliate.id);
+    const { pool, affiliateId } = ctx;
     const page = toPage(req.query.page, 1);
     const pageSize = toPageSize(req.query.pageSize, 10, 100);
     const offset = (page - 1) * pageSize;
 
     const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) AS total FROM affiliate_clicks WHERE affiliate_id=?`,
-      [affiliateId]
+      `SELECT COUNT(*) AS total FROM affiliate_clicks WHERE affiliate_id = ?`,
+      [affiliateId],
     );
 
     const [items] = await pool.query(
       `
-      SELECT *
-      FROM affiliate_clicks
-      WHERE affiliate_id=?
-      ORDER BY id DESC
-      LIMIT ? OFFSET ?
+        SELECT *
+        FROM affiliate_clicks
+        WHERE affiliate_id = ?
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
       `,
-      [affiliateId, pageSize, offset]
+      [affiliateId, pageSize, offset],
     );
 
     return res.json({
@@ -324,48 +338,35 @@ router.get("/me/clicks", authRequired, async (req, res) => {
  */
 router.get("/me/history", authRequired, async (req, res) => {
   try {
-    const pool = getPool();
-    const userId =
-      toPosInt(req.user?.effective_user_id) || toPosInt(req.user?.id);
+    const ctx = await getCurrentAffiliate(req, res);
+    if (!ctx) return;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const affiliate = await getAffiliateByUserId(pool, userId);
-
-    if (!affiliate) {
-      return res.status(404).json({ error: "Not affiliate" });
-    }
-
-    const affiliateId = Number(affiliate.id);
+    const { pool, affiliateId } = ctx;
     const page = toPage(req.query.page, 1);
     const pageSize = toPageSize(req.query.pageSize, 12, 100);
-    const period = String(req.query.period || "MONTH").trim().toUpperCase();
-
-    const allowedPeriods = ["DAY", "WEEK", "MONTH", "YEAR"];
-    const finalPeriod = allowedPeriods.includes(period) ? period : "MONTH";
-
+    const finalPeriod = normPeriod(req.query.period, "MONTH");
     const offset = (page - 1) * pageSize;
 
     const [[{ total }]] = await pool.query(
       `
-      SELECT COUNT(*) AS total
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND UPPER(period_type)=?
+        SELECT COUNT(*) AS total
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND UPPER(period_type) = ?
       `,
-      [affiliateId, finalPeriod]
+      [affiliateId, finalPeriod],
     );
 
     const [items] = await pool.query(
       `
-      SELECT *
-      FROM affiliate_reports
-      WHERE affiliate_id=? AND UPPER(period_type)=?
-      ORDER BY period_start DESC, id DESC
-      LIMIT ? OFFSET ?
+        SELECT *
+        FROM ${REPORT_TABLE}
+        WHERE affiliate_id = ?
+          AND UPPER(period_type) = ?
+        ORDER BY period_start DESC, id DESC
+        LIMIT ? OFFSET ?
       `,
-      [affiliateId, finalPeriod, pageSize, offset]
+      [affiliateId, finalPeriod, pageSize, offset],
     );
 
     return res.json({

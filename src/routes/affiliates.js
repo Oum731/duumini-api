@@ -9,9 +9,6 @@ const router = Router();
 const COMMISSION_STATUSES = ["PENDING", "APPROVED", "PAID", "CANCELLED"];
 const PERIOD_TYPES = ["DAY", "WEEK", "MONTH", "YEAR"];
 
-/* =========================
- * Helpers
- * =======================*/
 function normalizeAffiliateCode(value) {
   const v = String(value || "")
     .trim()
@@ -67,6 +64,7 @@ function getClientIp(req) {
   if (typeof forwarded === "string" && forwarded.trim()) {
     return forwarded.split(",")[0].trim();
   }
+
   return (
     req.ip ||
     req.connection?.remoteAddress ||
@@ -81,6 +79,54 @@ function publicWebBase() {
       process.env.PUBLIC_WEB_BASE ||
       "https://duumini.com",
   ).replace(/\/+$/, "");
+}
+
+function publicApiBase() {
+  return String(
+    env.PUBLIC_API_BASE ||
+      process.env.PUBLIC_API_BASE ||
+      "https://duumini-api.onrender.com",
+  ).replace(/\/+$/, "");
+}
+
+function buildSafeLandingUrl(landing) {
+  const webBase = publicWebBase();
+  const cleanLanding = String(landing || "/").trim() || "/";
+
+  if (/^https?:\/\//i.test(cleanLanding)) {
+    try {
+      const url = new URL(cleanLanding);
+      const allowed = new URL(webBase);
+
+      if (url.hostname === allowed.hostname) {
+        return cleanLanding;
+      }
+
+      return webBase;
+    } catch {
+      return webBase;
+    }
+  }
+
+  return `${webBase}${cleanLanding.startsWith("/") ? cleanLanding : `/${cleanLanding}`}`;
+}
+
+function buildTrackUrlByCode(code, to = "/") {
+  const cleanCode = normalizeAffiliateCode(code);
+  if (!cleanCode) return null;
+
+  return `${publicApiBase()}/api/affiliates/track/${encodeURIComponent(
+    cleanCode,
+  )}?to=${encodeURIComponent(to || "/")}`;
+}
+
+function buildTrackUrlBySlug(slug, to = "/") {
+  const cleanSlug = normalizeSlug(slug);
+  if (!cleanSlug) return null;
+
+  return `${publicApiBase()}/api/affiliates/ref/${encodeURIComponent(
+    cleanSlug,
+  )}?to=${encodeURIComponent(to || "/")}`;
 }
 
 function detectDevice(userAgent) {
@@ -234,15 +280,6 @@ function periodMeta(periodType, baseDate = new Date()) {
   };
 }
 
-function getCommissionPeriodMeta(baseDate = new Date()) {
-  return {
-    period_day: periodMeta("DAY", baseDate).period_key,
-    period_week_start: periodMeta("WEEK", baseDate).period_key,
-    period_month: periodMeta("MONTH", baseDate).period_key,
-    period_year: periodMeta("YEAR", baseDate).period_key,
-  };
-}
-
 function parseAffiliate(row) {
   if (!row) return null;
 
@@ -266,6 +303,12 @@ function parseAffiliate(row) {
       : null,
     share_url_by_slug: row.referral_slug
       ? `${publicWebBase()}/ref/${encodeURIComponent(row.referral_slug)}`
+      : null,
+    track_url_by_code: row.affiliate_code
+      ? buildTrackUrlByCode(row.affiliate_code, "/")
+      : null,
+    track_url_by_slug: row.referral_slug
+      ? buildTrackUrlBySlug(row.referral_slug, "/")
       : null,
   };
 }
@@ -413,6 +456,7 @@ async function generateUniqueAffiliateCode(conn, base = "DUU") {
     const exists = await affiliateExistsByCode(conn, code);
     if (!exists) return code;
   }
+
   return `DUU${Date.now()}`;
 }
 
@@ -472,50 +516,61 @@ async function insertAffiliateClick(conn, payload) {
     vals.push(payload.affiliate_id);
     qs.push("?");
   }
+
   if (colsDef.affiliate_code) {
     cols.push("affiliate_code");
     vals.push(payload.affiliate_code || null);
     qs.push("?");
   }
+
   if (colsDef.product_id) {
     cols.push("product_id");
     vals.push(payload.product_id || null);
     qs.push("?");
   }
+
   if (colsDef.ip_address) {
     cols.push("ip_address");
     vals.push(payload.ip_address || null);
     qs.push("?");
   }
+
   if (colsDef.user_agent) {
     cols.push("user_agent");
     vals.push(payload.user_agent || null);
     qs.push("?");
   }
+
   if (colsDef.referer_url) {
     cols.push("referer_url");
     vals.push(payload.referer_url || null);
     qs.push("?");
   }
+
   if (colsDef.landing_url) {
     cols.push("landing_url");
     vals.push(payload.landing_url || null);
     qs.push("?");
   }
+
   if (colsDef.source) {
     cols.push("source");
     vals.push(payload.source || null);
     qs.push("?");
   }
+
   if (colsDef.device) {
     cols.push("device");
     vals.push(payload.device || null);
     qs.push("?");
   }
+
   if (colsDef.created_at) {
     cols.push("created_at");
     qs.push("NOW()");
   }
+
+  if (!cols.length) return;
 
   await conn.query(
     `INSERT INTO affiliate_clicks (${cols.join(", ")}) VALUES (${qs.join(", ")})`,
@@ -563,13 +618,10 @@ async function syncAffiliateCounters(conn, affiliateId) {
   );
 }
 
-async function upsertAffiliateRevenueReport(conn, {
-  affiliateId = null,
-  periodType,
-  periodKey,
-  periodStart,
-  periodEnd,
-}) {
+async function upsertAffiliateRevenueReport(
+  conn,
+  { affiliateId = null, periodType, periodKey, periodStart, periodEnd },
+) {
   const reportAffiliateId = affiliateId == null ? 0 : Number(affiliateId);
 
   const [[clickRow]] = await conn.query(
@@ -652,6 +704,7 @@ async function upsertAffiliateRevenueReport(conn, {
 async function ensureCurrentReports(conn, affiliateId = null) {
   for (const type of PERIOD_TYPES) {
     const meta = periodMeta(type, new Date());
+
     await upsertAffiliateRevenueReport(conn, {
       affiliateId,
       periodType: meta.period_type,
@@ -680,7 +733,16 @@ async function rebuildAffiliateReports(conn, affiliateId = null, from = null, to
         AND DATE(created_at) BETWEEN ? AND ?
       ORDER BY period_key ASC
     `,
-    [affiliateId, affiliateId, startDate, endDate, affiliateId, affiliateId, startDate, endDate],
+    [
+      affiliateId,
+      affiliateId,
+      startDate,
+      endDate,
+      affiliateId,
+      affiliateId,
+      startDate,
+      endDate,
+    ],
   );
 
   const [weekRows] = await conn.query(
@@ -871,7 +933,6 @@ router.get("/reports/history", authRequired, async (req, res) => {
 /* =========================
  * Rebuild reports
  * POST /api/affiliates/reports/rebuild
- * body: { affiliate_id?, from?, to? }
  * =======================*/
 router.post("/reports/rebuild", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) {
@@ -883,7 +944,10 @@ router.post("/reports/rebuild", authRequired, async (req, res) => {
       ? null
       : Number(req.body.affiliate_id);
 
-  if (affiliateId !== null && (!Number.isFinite(affiliateId) || affiliateId <= 0)) {
+  if (
+    affiliateId !== null &&
+    (!Number.isFinite(affiliateId) || affiliateId <= 0)
+  ) {
     return res.status(400).json({ error: "affiliate_id invalide" });
   }
 
@@ -906,6 +970,7 @@ router.post("/reports/rebuild", authRequired, async (req, res) => {
     }
 
     await conn.commit();
+
     return res.json({
       success: true,
       affiliate_id: affiliateId,
@@ -916,6 +981,7 @@ router.post("/reports/rebuild", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
+
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -986,11 +1052,13 @@ router.put("/commissions/:id/status", authRequired, async (req, res) => {
     await rebuildAffiliateReports(conn, null);
 
     await conn.commit();
+
     return res.json(row);
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
+
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -1003,13 +1071,13 @@ router.put("/commissions/:id/status", authRequired, async (req, res) => {
  * =======================*/
 router.get("/track/:code", async (req, res) => {
   const code = normalizeAffiliateCode(req.params.code);
+
   if (!code) {
     return res.status(400).json({ error: "invalid code" });
   }
 
-  const landing = !isBlank(req.query.to)
-    ? String(req.query.to).trim()
-    : "/";
+  const landing = !isBlank(req.query.to) ? String(req.query.to).trim() : "/";
+  const safeLanding = buildSafeLandingUrl(landing);
 
   const productId =
     normalizeProductId(req.query.product_id) ||
@@ -1035,7 +1103,7 @@ router.get("/track/:code", async (req, res) => {
     );
 
     if (!affiliate) {
-      return res.redirect(landing);
+      return res.redirect(safeLanding);
     }
 
     await conn.beginTransaction();
@@ -1052,28 +1120,20 @@ router.get("/track/:code", async (req, res) => {
       device,
     });
 
-    await conn.query(
-      `
-        UPDATE affiliates
-        SET total_clicks = COALESCE(total_clicks, 0) + 1,
-            updated_at = NOW()
-        WHERE id = ?
-      `,
-      [affiliate.id],
-    );
-
+    await syncAffiliateCounters(conn, Number(affiliate.id));
     await rebuildAffiliateReports(conn, Number(affiliate.id));
     await rebuildAffiliateReports(conn, null);
 
     await conn.commit();
 
-    const sep = landing.includes("?") ? "&" : "?";
-    return res.redirect(`${landing}${sep}ref=${encodeURIComponent(code)}`);
+    const sep = safeLanding.includes("?") ? "&" : "?";
+    return res.redirect(`${safeLanding}${sep}ref=${encodeURIComponent(code)}`);
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
-    return res.redirect("/");
+
+    return res.redirect(publicWebBase());
   } finally {
     conn.release();
   }
@@ -1085,13 +1145,13 @@ router.get("/track/:code", async (req, res) => {
  * =======================*/
 router.get("/ref/:slug", async (req, res) => {
   const slug = normalizeSlug(req.params.slug);
+
   if (!slug) {
-    return res.redirect("/");
+    return res.redirect(publicWebBase());
   }
 
-  const landing = !isBlank(req.query.to)
-    ? String(req.query.to).trim()
-    : "/";
+  const landing = !isBlank(req.query.to) ? String(req.query.to).trim() : "/";
+  const safeLanding = buildSafeLandingUrl(landing);
 
   const productId =
     normalizeProductId(req.query.product_id) ||
@@ -1117,7 +1177,7 @@ router.get("/ref/:slug", async (req, res) => {
     );
 
     if (!affiliate) {
-      return res.redirect(landing);
+      return res.redirect(safeLanding);
     }
 
     await conn.beginTransaction();
@@ -1134,30 +1194,23 @@ router.get("/ref/:slug", async (req, res) => {
       device,
     });
 
-    await conn.query(
-      `
-        UPDATE affiliates
-        SET total_clicks = COALESCE(total_clicks, 0) + 1,
-            updated_at = NOW()
-        WHERE id = ?
-      `,
-      [affiliate.id],
-    );
-
+    await syncAffiliateCounters(conn, Number(affiliate.id));
     await rebuildAffiliateReports(conn, Number(affiliate.id));
     await rebuildAffiliateReports(conn, null);
 
     await conn.commit();
 
-    const sep = landing.includes("?") ? "&" : "?";
+    const sep = safeLanding.includes("?") ? "&" : "?";
+
     return res.redirect(
-      `${landing}${sep}ref=${encodeURIComponent(affiliate.affiliate_code)}`,
+      `${safeLanding}${sep}ref=${encodeURIComponent(affiliate.affiliate_code)}`,
     );
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
-    return res.redirect("/");
+
+    return res.redirect(publicWebBase());
   } finally {
     conn.release();
   }
@@ -1349,11 +1402,13 @@ router.post("/", authRequired, async (req, res) => {
     await syncAffiliateCounters(conn, Number(result.insertId));
 
     await conn.commit();
+
     return res.status(201).json(affiliate);
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
+
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -1370,6 +1425,7 @@ router.get("/:id/dashboard", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1403,6 +1459,7 @@ router.get("/:id/dashboard", authRequired, async (req, res) => {
         `,
         [id, periodType, periodKey],
       );
+
       return row || null;
     };
 
@@ -1448,6 +1505,7 @@ router.get("/:id/reports/history", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1497,6 +1555,7 @@ router.get("/:id", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1527,6 +1586,7 @@ router.put("/:id", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1558,22 +1618,26 @@ router.put("/:id", authRequired, async (req, res) => {
 
     if (user_id !== undefined) {
       const userId = user_id === null || user_id === "" ? null : Number(user_id);
+
       if (userId !== null && (!Number.isFinite(userId) || userId <= 0)) {
         await conn.rollback();
         return res.status(400).json({ error: "user_id invalide" });
       }
+
       sets.push("user_id = ?");
       vals.push(userId);
     }
 
     if (affiliate_code !== undefined) {
       const code = normalizeAffiliateCode(affiliate_code);
+
       if (!code) {
         await conn.rollback();
         return res.status(400).json({ error: "affiliate_code requis" });
       }
 
       const exists = await affiliateExistsByCode(conn, code, id);
+
       if (exists) {
         await conn.rollback();
         return res.status(409).json({
@@ -1588,12 +1652,14 @@ router.put("/:id", authRequired, async (req, res) => {
 
     if (referral_slug !== undefined) {
       const slug = normalizeSlug(referral_slug);
+
       if (!slug) {
         await conn.rollback();
         return res.status(400).json({ error: "referral_slug invalide" });
       }
 
       const exists = await affiliateExistsBySlug(conn, slug, id);
+
       if (exists) {
         await conn.rollback();
         return res.status(409).json({
@@ -1646,11 +1712,13 @@ router.put("/:id", authRequired, async (req, res) => {
     const affiliate = await findAffiliateById(conn, id);
 
     await conn.commit();
+
     return res.json(affiliate);
   } catch (e) {
     try {
       await conn.rollback();
     } catch {}
+
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
@@ -1667,6 +1735,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1688,6 +1757,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
     }
 
     const conn = await getPool().getConnection();
+
     try {
       const affiliate = await findAffiliateById(conn, id);
       return res.json(affiliate);
@@ -1709,6 +1779,7 @@ router.get("/:id/commissions", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
@@ -1766,6 +1837,7 @@ router.get("/:id/clicks", authRequired, async (req, res) => {
   }
 
   const id = Number(req.params.id);
+
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
