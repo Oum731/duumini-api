@@ -399,7 +399,8 @@ router.post(
       }
       const finalName = rawName;
 
-      const finalCountryCode = normalizeCountryCode(
+      const finalCountryCode = await normalizeCountryCode(
+        pool,
         country_code || country,
         "MA"
       );
@@ -550,7 +551,7 @@ router.put(
 
       const newCountryCode =
         country_code || country
-          ? normalizeCountryCode(country_code || country, existing.country_code || "MA")
+          ? await normalizeCountryCode(pool, country_code || country, existing.country_code || "MA")
           : existing.country_code || "MA";
 
       await pool.query(
