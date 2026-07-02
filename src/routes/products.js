@@ -1975,6 +1975,26 @@ router.post(
             return res.status(403).json({ error: "Forbidden" });
           }
           finalShopId = Number(shop.id);
+        } else if (shop_id != null && shop_id !== "") {
+          // ✅ Le vendeur/restaurant a explicitement choisi une boutique
+          // (multi-boutiques) — on vérifie qu'elle lui appartient bien.
+          const sid = Number(shop_id) || 0;
+          if (!sid) {
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          }
+          const [[shop]] = await conn.query(
+            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            [sid]
+          );
+          if (!shop) {
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          }
+          if (String(shop.owner_id) !== String(actorId)) {
+            return res
+              .status(403)
+              .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
+          }
+          finalShopId = Number(shop.id);
         } else {
           const [[shop]] = await conn.query(
             `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
@@ -2245,6 +2265,22 @@ router.put(
           );
           if (!shop) {
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          }
+          newShopIdParam = sid;
+        } else if (sid > 0 && isActingVendorOrRestaurant(req)) {
+          // ✅ Le vendeur/restaurant peut changer la boutique d'un produit
+          // (multi-boutiques), à condition qu'elle lui appartienne.
+          const [[shop]] = await conn.query(
+            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            [sid]
+          );
+          if (!shop) {
+            return res.status(400).json({ error: "Boutique invalide (shop_id)" });
+          }
+          if (String(shop.owner_id) !== String(actorId)) {
+            return res
+              .status(403)
+              .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
           }
           newShopIdParam = sid;
         }
