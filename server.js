@@ -17,6 +17,7 @@ const { notFound, errorHandler } = require("./src/utils/errors");
 const auth = require("./src/routes/auth");
 const users = require("./src/routes/users");
 const shops = require("./src/routes/shops");
+const companies = require("./src/routes/companies");
 const categories = require("./src/routes/categories");
 const shopCategories = require("./src/routes/shopCategories");
 const products = require("./src/routes/products");
@@ -335,6 +336,7 @@ if (adminUsers) {
 }
 
 app.use("/api/shops", shops);
+app.use("/api/companies", companies);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
 app.use("/api/sub-categories", subCategories);
