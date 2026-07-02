@@ -1957,13 +1957,14 @@ router.post(
       const citiesCol = await getCitiesColCached(pool);
 
       let finalShopId = null;
+      let finalCountryCode = "MA";
       const actorId = actingUserId(req);
       const forcedShopId = actingShopId(req);
 
       if (isActingVendorOrRestaurant(req)) {
         if (forcedShopId) {
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
             [forcedShopId]
           );
           if (!shop) {
@@ -1975,6 +1976,7 @@ router.post(
             return res.status(403).json({ error: "Forbidden" });
           }
           finalShopId = Number(shop.id);
+          finalCountryCode = shop.country_code || "MA";
         } else if (shop_id != null && shop_id !== "") {
           // ✅ Le vendeur/restaurant a explicitement choisi une boutique
           // (multi-boutiques) — on vérifie qu'elle lui appartient bien.
@@ -1983,7 +1985,7 @@ router.post(
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
           if (!shop) {
@@ -1995,9 +1997,10 @@ router.post(
               .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
           }
           finalShopId = Number(shop.id);
+          finalCountryCode = shop.country_code || "MA";
         } else {
           const [[shop]] = await conn.query(
-            `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
+            `SELECT id, country_code FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
             [actorId]
           );
           if (!shop) {
@@ -2006,6 +2009,7 @@ router.post(
               .json({ error: "Aucune boutique associée à ce compte" });
           }
           finalShopId = Number(shop.id);
+          finalCountryCode = shop.country_code || "MA";
         }
       } else if (isAdmin(req.user)) {
         const sid = Number(shop_id) || 0;
@@ -2015,13 +2019,14 @@ router.post(
             .json({ error: "shop_id requis pour la création par un admin" });
         }
         const [[shop]] = await conn.query(
-          `SELECT id FROM shops WHERE id=? LIMIT 1`,
+          `SELECT id, country_code FROM shops WHERE id=? LIMIT 1`,
           [sid]
         );
         if (!shop) {
           return res.status(400).json({ error: "Boutique invalide (shop_id)" });
         }
         finalShopId = sid;
+        finalCountryCode = shop.country_code || "MA";
       } else {
         return res.status(403).json({ error: "Forbidden" });
       }
@@ -2081,7 +2086,7 @@ router.post(
       await conn.beginTransaction();
 
       let insertSql = `INSERT INTO products
-        (shop_id, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
+        (shop_id, country_code, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active, vertical`;
 
@@ -2089,6 +2094,7 @@ router.post(
 
       const insertVals = [
         finalShopId,
+        finalCountryCode,
         category_id ? Number(category_id) : null,
         isDrink ? null : resolvedSub.id,
         name,
@@ -2256,22 +2262,24 @@ router.put(
       }
 
       let newShopIdParam = null;
+      let newCountryCodeParam = null;
       if (shop_id != null && shop_id !== "") {
         const sid = Number(shop_id) || 0;
         if (sid > 0 && isAdmin(req.user)) {
           const [[shop]] = await conn.query(
-            `SELECT id FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, country_code FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
           if (!shop) {
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           newShopIdParam = sid;
+          newCountryCodeParam = shop.country_code || "MA";
         } else if (sid > 0 && isActingVendorOrRestaurant(req)) {
           // ✅ Le vendeur/restaurant peut changer la boutique d'un produit
           // (multi-boutiques), à condition qu'elle lui appartienne.
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
           if (!shop) {
@@ -2283,6 +2291,7 @@ router.put(
               .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
           }
           newShopIdParam = sid;
+          newCountryCodeParam = shop.country_code || "MA";
         }
       }
 
@@ -2367,6 +2376,7 @@ router.put(
            is_active           = COALESCE(?, is_active),
            category_id         = COALESCE(?, category_id),
            shop_id             = COALESCE(?, shop_id),
+           country_code        = COALESCE(?, country_code),
            vertical            = COALESCE(?, vertical)
 
          WHERE id=?`,
@@ -2396,6 +2406,7 @@ router.put(
           active,
           category_id != null && category_id !== "" ? Number(category_id) : null,
           newShopIdParam,
+          newCountryCodeParam,
           vertFinal,
 
           id,

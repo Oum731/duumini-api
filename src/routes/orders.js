@@ -1563,6 +1563,7 @@ async function lockProductForItem(conn, productId) {
         p.price,
         p.stock,
         p.shop_id,
+        p.country_code,
         p.promo_eligible,
         p.promo_discount_type,
         p.promo_discount_value
@@ -2060,6 +2061,7 @@ router.get("/", authRequired, async (req, res) => {
 async function buildCleanItemsWithPromo({ conn, items }) {
   let itemsAmount = 0;
   const cleanItems = [];
+  let orderCountryCode = null;
 
   for (const it of items) {
     const product_id = Number(it?.product_id);
@@ -2145,10 +2147,14 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       variant_meta,
     });
 
+    // ✅ Le pays de la commande suit le premier article du panier — en
+    // pratique un panier reste mono-pays (un vendeur/marché par pays).
+    if (!orderCountryCode) orderCountryCode = p.country_code || "MA";
+
     itemsAmount += unit_price * qty;
   }
 
-  return { cleanItems, itemsAmount };
+  return { cleanItems, itemsAmount, orderCountryCode: orderCountryCode || "MA" };
 }
 
 /* =========================
@@ -2701,7 +2707,7 @@ router.post("/admin", authRequired, async (req, res) => {
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+    const { cleanItems, itemsAmount, orderCountryCode } = await buildCleanItemsWithPromo({
       conn,
       items,
     });
@@ -2861,6 +2867,10 @@ router.post("/admin", authRequired, async (req, res) => {
       affiliatePack.orderCols,
       affiliatePack.orderMeta,
     );
+
+    cols.push("country_code");
+    placeholders.push("?");
+    vals.push(orderCountryCode || "MA");
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
@@ -3131,7 +3141,7 @@ router.post("/", authRequired, async (req, res) => {
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+    const { cleanItems, itemsAmount, orderCountryCode } = await buildCleanItemsWithPromo({
       conn,
       items,
     });
@@ -3284,6 +3294,10 @@ router.post("/", authRequired, async (req, res) => {
       affiliatePack.orderCols,
       affiliatePack.orderMeta,
     );
+
+    cols.push("country_code");
+    placeholders.push("?");
+    vals.push(orderCountryCode || "MA");
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,
@@ -3544,7 +3558,7 @@ router.post("/guest", async (req, res) => {
     const promoCols = await getOrderItemsPromoColsCached(pool);
     const discountCols = await getOrdersDiscountColsCached(pool);
 
-    const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+    const { cleanItems, itemsAmount, orderCountryCode } = await buildCleanItemsWithPromo({
       conn,
       items,
     });
@@ -3696,6 +3710,10 @@ router.post("/guest", async (req, res) => {
       affiliatePack.orderCols,
       affiliatePack.orderMeta,
     );
+
+    cols.push("country_code");
+    placeholders.push("?");
+    vals.push(orderCountryCode || "MA");
 
     const [r] = await conn.query(
       `INSERT INTO orders (${cols.join(",")}) VALUES (${placeholders.join(",")})`,

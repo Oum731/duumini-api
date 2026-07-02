@@ -11,6 +11,7 @@ const {
   isVendor,
 } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
+const { normalizeCountryCode } = require("../utils/country");
 const { env } = require("../lib/env");
 
 const router = Router();
@@ -385,6 +386,7 @@ router.post(
         address,
         city,
         country,
+        country_code,
         lat,
         lng,
         logo: logoText,
@@ -396,6 +398,11 @@ router.post(
         return res.status(400).json({ error: "name required" });
       }
       const finalName = rawName;
+
+      const finalCountryCode = normalizeCountryCode(
+        country_code || country,
+        "MA"
+      );
 
       const baseSlug = slugify(finalName);
       const slug = await generateUniqueSlug(pool, baseSlug);
@@ -423,8 +430,8 @@ router.post(
       const [r] = await pool.query(
         `INSERT INTO shops (
            owner_id, name, slug, description, category_id, address, city, country,
-           lat, lng, logo, cover
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           country_code, lat, lng, logo, cover
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           owner_id,
           finalName,
@@ -434,6 +441,7 @@ router.post(
           address || null,
           city || null,
           country || "Maroc",
+          finalCountryCode,
           lat || null,
           lng || null,
           logoUrl,
@@ -497,6 +505,7 @@ router.put(
         address,
         city,
         country,
+        country_code,
         lat,
         lng,
         logo: logoText,
@@ -539,9 +548,15 @@ router.put(
         coverUrl = await uploadBufferToCloudinary(coverFile, "shops/cover");
       }
 
+      const newCountryCode =
+        country_code || country
+          ? normalizeCountryCode(country_code || country, existing.country_code || "MA")
+          : existing.country_code || "MA";
+
       await pool.query(
         `UPDATE shops
-         SET name=?, slug=?, description=?, category_id=?, address=?, city=?, country=?, lat=?, lng=?, logo=?, cover=?
+         SET name=?, slug=?, description=?, category_id=?, address=?, city=?, country=?,
+             country_code=?, lat=?, lng=?, logo=?, cover=?
          WHERE id=?`,
         [
           newName,
@@ -551,6 +566,7 @@ router.put(
           address != null ? address : existing.address,
           city != null ? city : existing.city,
           country || existing.country || "Maroc",
+          newCountryCode,
           lat != null ? lat : existing.lat,
           lng != null ? lng : existing.lng,
           logoUrl,
