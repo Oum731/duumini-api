@@ -31,11 +31,23 @@ function canManage(req) {
   );
 }
 
-function currentShopId(req) {
+// ✅ req.user n'a jamais de `shop_id` réel (voir expenses.js) : on résout
+// la boutique du vendeur/fournisseur/restaurant connecté via owner_id.
+async function resolveOwnShopId(pool, userId) {
+  const uid = toNum(userId, 0) || null;
+  if (!uid) return null;
+  const [[row]] = await pool.query(
+    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+    [uid]
+  );
+  return row?.id ? Number(row.id) : null;
+}
+
+async function currentShopId(req, pool) {
   if (isAdmin(req.user)) {
     return toNum(req.query.shop_id || req.body?.shop_id, 0) || null;
   }
-  return toNum(req.user?.shop_id, 0) || null;
+  return resolveOwnShopId(pool, req.user?.id);
 }
 
 router.get("/", authRequired, async (req, res) => {
@@ -45,7 +57,7 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = currentShopId(req);
+    const shopId = await currentShopId(req, pool);
 
     const params = [];
     let where = "WHERE is_active = 1";
@@ -89,7 +101,7 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = currentShopId(req);
+    const shopId = await currentShopId(req, pool);
     const name = cleanStr(req.body?.name, 100);
     const color = cleanStr(req.body?.color, 20);
 

@@ -6,7 +6,13 @@ const PDFDocument = require("pdfkit");
 const bcrypt = require("bcryptjs");
 
 const { getPool } = require("../lib/db");
-const { authRequired, isAdmin, isVendor } = require("../middlewares/auth");
+const {
+  authRequired,
+  isAdmin,
+  isVendor,
+  isSupplier,
+  isRestaurant,
+} = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { env } = require("../lib/env");
 const {
@@ -3907,6 +3913,94 @@ router.post("/guest", async (req, res) => {
     return res.status(500).json({ error: e.message });
   } finally {
     conn.release();
+  }
+});
+
+/* =========================
+ * ✅ CA summary (aligné sur GET /expenses/summary : mêmes bornes de
+ * période SQL — CURDATE()/YEARWEEK(...,1) — pour permettre un calcul de
+ * solde net cohérent côté frontend. req.user n'a pas de `shop_id` réel
+ * (voir expenses.js) : on résout la boutique du vendeur via owner_id.
+ * =======================*/
+async function resolveOwnShopIdForOrders(pool, userId) {
+  const uid = Number(userId) || null;
+  if (!uid) return null;
+  const [[row]] = await pool.query(
+    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+    [uid],
+  );
+  return row?.id ? Number(row.id) : null;
+}
+
+router.get("/summary", authRequired, async (req, res) => {
+  try {
+    const pool = getPool();
+    const canScope =
+      isAdmin(req.user) ||
+      isVendor(req.user) ||
+      isSupplier(req.user) ||
+      isRestaurant(req.user);
+
+    if (!canScope) {
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    const shopId = isAdmin(req.user)
+      ? Number(req.query.shop_id) || null
+      : await resolveOwnShopIdForOrders(pool, req.user?.id);
+
+    const joinItems = shopId
+      ? `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          JOIN products p ON p.id = oi.product_id
+          WHERE p.shop_id = ?
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `
+      : `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `;
+    const params = shopId ? [shopId] : [];
+
+    const [[row]] = await pool.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN DATE(o.updated_at) = CURDATE() THEN oi_amt.amount ELSE 0 END), 0) AS today,
+        COALESCE(SUM(CASE WHEN YEARWEEK(o.updated_at, 1) = YEARWEEK(CURDATE(), 1) THEN oi_amt.amount ELSE 0 END), 0) AS week,
+        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) AND MONTH(o.updated_at) = MONTH(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS month,
+        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS year,
+        COUNT(*) AS orders_count
+      FROM orders o
+      ${joinItems}
+      WHERE o.status = 'DONE'
+      `,
+      params,
+    );
+
+    return res.json({
+      today: Number(row?.today || 0),
+      week: Number(row?.week || 0),
+      month: Number(row?.month || 0),
+      year: Number(row?.year || 0),
+      orders_count: Number(row?.orders_count || 0),
+    });
+  } catch (e) {
+    console.error("GET /orders/summary error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
+    return res.status(500).json({
+      error: "Erreur serveur lors du calcul du résumé des ventes.",
+      details: e?.sqlMessage || e?.message || "unknown_error",
+    });
   }
 });
 

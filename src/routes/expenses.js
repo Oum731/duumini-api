@@ -69,27 +69,40 @@ function canManageExpenses(req) {
   );
 }
 
-function requestShopId(req) {
+// ✅ req.user n'a jamais de `shop_id` réel (seulement `effective_shop_id`
+// en impersonation admin) : on résout la boutique du vendeur/fournisseur/
+// restaurant connecté via owner_id, comme le fait déjà shops.js (/mine).
+async function resolveOwnShopId(pool, userId) {
+  const uid = toNum(userId, 0) || null;
+  if (!uid) return null;
+  const [[row]] = await pool.query(
+    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
+    [uid]
+  );
+  return row?.id ? Number(row.id) : null;
+}
+
+async function requestShopId(req, pool) {
   if (isAdmin(req.user)) {
     return toNum(req.query.shop_id || req.body?.shop_id, 0) || null;
   }
-  return toNum(req.user?.shop_id, 0) || null;
+  return resolveOwnShopId(pool, req.user?.id);
 }
 
-function forbiddenByRole(req, shopId) {
+async function forbiddenByRole(req, shopId, pool) {
   if (isAdmin(req.user)) return false;
-  const myShopId = toNum(req.user?.shop_id, 0) || null;
+  const myShopId = await resolveOwnShopId(pool, req.user?.id);
   if (!myShopId || !shopId) return false;
   return Number(myShopId) !== Number(shopId);
 }
 
-function buildExpenseWhere({ query = {}, user = null }) {
+async function buildExpenseWhere({ query = {}, user = null, pool }) {
   const where = [];
   const params = [];
 
   const shopId = isAdmin(user)
     ? toNum(query.shop_id, 0) || null
-    : toNum(user?.shop_id, 0) || null;
+    : await resolveOwnShopId(pool, user?.id);
 
   const categoryId = toNum(query.category_id, 0);
   const categoryName = cleanStr(query.category_name, 100);
@@ -258,9 +271,10 @@ router.get("/", authRequired, async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
     const offset = (page - 1) * pageSize;
 
-    const { where, params } = buildExpenseWhere({
+    const { where, params } = await buildExpenseWhere({
       query: req.query,
       user: req.user,
+      pool,
     });
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -351,7 +365,7 @@ router.get("/summary", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
+    const { where, params } = await buildExpenseWhere({ query: req.query, user: req.user, pool });
     const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
 
     const [[row]] = await pool.query(
@@ -398,7 +412,7 @@ router.get("/grouped", authRequired, async (req, res) => {
 
     const period = String(req.query.period || "month").toLowerCase();
     const pool = getPool();
-    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
+    const { where, params } = await buildExpenseWhere({ query: req.query, user: req.user, pool });
 
     let selectPeriod = "DATE_FORMAT(e.expense_date, '%Y-%m-%d')";
     if (period === "week") {
@@ -456,7 +470,7 @@ router.get("/by-category", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const { where, params } = buildExpenseWhere({ query: req.query, user: req.user });
+    const { where, params } = await buildExpenseWhere({ query: req.query, user: req.user, pool });
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
     let rows;
@@ -527,7 +541,7 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = requestShopId(req);
+    const shopId = await requestShopId(req, pool);
     const userId = toNum(req.user?.id, 0) || null;
     const categoryId = toNum(req.body?.category_id, 0);
     const categoryFallback = cleanStr(req.body?.category_name, 100);
@@ -627,7 +641,7 @@ router.put("/:id", authRequired, async (req, res) => {
     );
 
     if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
-    if (forbiddenByRole(req, existing.shop_id)) {
+    if (await forbiddenByRole(req, existing.shop_id, pool)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
@@ -727,7 +741,7 @@ router.delete("/:id", authRequired, async (req, res) => {
     );
 
     if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
-    if (forbiddenByRole(req, existing.shop_id)) {
+    if (await forbiddenByRole(req, existing.shop_id, pool)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
