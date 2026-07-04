@@ -383,12 +383,26 @@ router.get("/summary", authRequired, async (req, res) => {
       params
     );
 
+    // ✅ Total réellement non filtré (scope boutique uniquement, sans
+    // from/to/category/status/... ) — distinct de filtered_total qui reflète
+    // les filtres actifs de l'UI. Sert la "vue globale depuis le début".
+    const allTimeShopId = await requestShopId(req, pool);
+    const [[allTimeRow]] = await pool.query(
+      `
+      SELECT COALESCE(SUM(e.amount), 0) AS all_time
+      FROM expenses e
+      WHERE 1=1 ${allTimeShopId ? "AND e.shop_id = ?" : ""}
+      `,
+      allTimeShopId ? [allTimeShopId] : []
+    );
+
     return res.json({
       today: Number(row?.today || 0),
       week: Number(row?.week || 0),
       month: Number(row?.month || 0),
       year: Number(row?.year || 0),
       filtered_total: Number(row?.filtered_total || 0),
+      all_time: Number(allTimeRow?.all_time || 0),
     });
   } catch (e) {
     console.error("GET /expenses/summary error:", {

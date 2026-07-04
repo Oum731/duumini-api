@@ -309,12 +309,15 @@ function pickStatusColumn(cols) {
 }
 
 function pickDateColumn(cols) {
+  // ✅ Priorité à la date de complétion (quand la commande passe DONE),
+  // pour aligner le CA des rapports sur la même base que
+  // GET /api/orders/summary et GET /api/expenses/summary.
+  if (cols.updated_at) return "updated_at";
+  if (cols.done_at) return "done_at";
+  if (cols.completed_at) return "completed_at";
   if (cols.created_at) return "created_at";
   if (cols.ordered_at) return "ordered_at";
   if (cols.order_date) return "order_date";
-  if (cols.done_at) return "done_at";
-  if (cols.completed_at) return "completed_at";
-  if (cols.updated_at) return "updated_at";
   return null;
 }
 

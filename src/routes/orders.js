@@ -3975,6 +3975,7 @@ router.get("/summary", authRequired, async (req, res) => {
         COALESCE(SUM(CASE WHEN YEARWEEK(o.updated_at, 1) = YEARWEEK(CURDATE(), 1) THEN oi_amt.amount ELSE 0 END), 0) AS week,
         COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) AND MONTH(o.updated_at) = MONTH(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS month,
         COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS year,
+        COALESCE(SUM(oi_amt.amount), 0) AS all_time,
         COUNT(*) AS orders_count
       FROM orders o
       ${joinItems}
@@ -3988,6 +3989,7 @@ router.get("/summary", authRequired, async (req, res) => {
       week: Number(row?.week || 0),
       month: Number(row?.month || 0),
       year: Number(row?.year || 0),
+      all_time: Number(row?.all_time || 0),
       orders_count: Number(row?.orders_count || 0),
     });
   } catch (e) {

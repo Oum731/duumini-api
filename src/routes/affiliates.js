@@ -1229,6 +1229,7 @@ router.get("/", authRequired, async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
   const q = String(req.query.q || "").trim();
   const status = req.query.status ? normStatus(req.query.status, "") : null;
+  const userId = req.query.user_id ? Number(req.query.user_id) : null;
 
   try {
     const userSelectCols = await buildAffiliateUserSelect(pool);
@@ -1238,6 +1239,11 @@ router.get("/", authRequired, async (req, res) => {
     if (status && ["ACTIVE", "INACTIVE"].includes(status)) {
       where += " AND a.status = ?";
       params.push(status);
+    }
+
+    if (userId && Number.isFinite(userId) && userId > 0) {
+      where += " AND a.user_id = ?";
+      params.push(userId);
     }
 
     if (q) {
@@ -1333,6 +1339,21 @@ router.post("/", authRequired, async (req, res) => {
 
   try {
     await conn.beginTransaction();
+
+    if (userId !== null) {
+      const [[existing]] = await conn.query(
+        "SELECT id FROM affiliates WHERE user_id = ? LIMIT 1",
+        [userId],
+      );
+      if (existing) {
+        await conn.rollback();
+        return res.status(409).json({
+          code: "AFFILIATE_USER_EXISTS",
+          message: "Cet utilisateur est déjà affilié.",
+          affiliate_id: existing.id,
+        });
+      }
+    }
 
     let code = normalizeAffiliateCode(affiliate_code);
     let slug = normalizeSlug(referral_slug);
