@@ -123,6 +123,7 @@ function pickFilters(req) {
     categoryId: req.query.categoryId ?? req.query.category_id ?? null,
     subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
     shopId: req.query.shopId ?? req.query.shop_id ?? null,
+    countryCode: req.query.countryCode ?? req.query.country_code ?? null,
     q: req.query.q ?? "",
     vertical: req.query.vertical ?? req.query.v ?? null,
     includeVariants: parseBoolQuery(req, "includeVariants", 0),
@@ -804,6 +805,7 @@ function baseSelectSql(shopTypeCol, supplierAgg) {
     SELECT
       p.*,
       s.name AS shop_name,
+      s.slug AS shop_slug,
       s.logo AS shop_logo,
       s.cover AS shop_cover,
       s.city AS shop_city
@@ -874,6 +876,7 @@ async function listProducts(pool, opts) {
     categoryId,
     subCategoryId,
     shopId,
+    countryCode,
     q,
     vertical,
     includeVariants,
@@ -920,6 +923,12 @@ async function listProducts(pool, opts) {
   if (shId) {
     whereParts.push("p.shop_id = ?");
     params.push(shId);
+  }
+
+  const cc = String(countryCode || "").trim().toUpperCase();
+  if (cc) {
+    whereParts.push("p.country_code = ?");
+    params.push(cc);
   }
 
   const oid = Number(ownerId) || 0;
@@ -1030,6 +1039,7 @@ async function listHandler(req, res, next) {
     categoryId,
     subCategoryId,
     shopId,
+    countryCode,
     q,
     vertical,
     includeVariants,
@@ -1055,6 +1065,7 @@ async function listHandler(req, res, next) {
       categoryId,
       subCategoryId,
       shopId,
+      countryCode,
       q,
       vertical,
       includeVariants: include,
@@ -1084,7 +1095,7 @@ async function listFoodHandler(req, res, next) {
   });
 
   const activeFilter = parseActiveFilter(req, 1);
-  const { categoryId, subCategoryId, shopId, q, onlyPromos } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, countryCode, q, onlyPromos } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -1099,6 +1110,7 @@ async function listFoodHandler(req, res, next) {
       categoryId,
       subCategoryId,
       shopId,
+      countryCode,
       q,
       vertical: null,
       includeVariants: false,
@@ -1126,7 +1138,7 @@ async function listMarketHandler(req, res, next) {
   });
 
   const activeFilter = parseActiveFilter(req, 1);
-  const { categoryId, subCategoryId, shopId, q, onlyPromos } = pickFilters(req);
+  const { categoryId, subCategoryId, shopId, countryCode, q, onlyPromos } = pickFilters(req);
 
   const pool = getPool();
   try {
@@ -1141,6 +1153,7 @@ async function listMarketHandler(req, res, next) {
       categoryId,
       subCategoryId,
       shopId,
+      countryCode,
       q,
       vertical: null,
       includeVariants: false,
@@ -1592,6 +1605,7 @@ async function topOrderedHandler(req, res, next) {
       SELECT
         p.*,
         s.name AS shop_name,
+        s.slug AS shop_slug,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
         s.city AS shop_city
@@ -1653,6 +1667,7 @@ async function topRatedHandler(req, res, next) {
       SELECT
         p.*,
         s.name AS shop_name,
+        s.slug AS shop_slug,
         s.logo AS shop_logo,
         s.cover AS shop_cover,
         s.city AS shop_city

@@ -151,6 +151,36 @@ router.get(
 );
 
 /* ============================================================================
+ * GET /api/shops/by-slug/:slug
+ * Détail public d'une boutique par slug — pour la vitrine publique
+ * /boutique/:slug. Doit être déclarée avant GET /:id pour éviter que
+ * express matche "by-slug" comme un :id.
+ * ==========================================================================*/
+router.get("/by-slug/:slug", async (req, res) => {
+  const slug = String(req.params.slug || "").trim();
+  if (!slug) return res.status(400).json({ error: "Invalid slug" });
+
+  const pool = getPool();
+  try {
+    const [rows] = await pool.query(
+      `SELECT s.*, sc.name AS category_name, sc.slug AS category_slug
+       FROM shops s
+       LEFT JOIN shop_categories sc ON sc.id = s.category_id
+       WHERE s.slug=?`,
+      [slug]
+    );
+    const shop = rows[0];
+    if (!shop || shop.is_active === 0) {
+      return res.status(404).json({ error: "Shop not found" });
+    }
+    res.json(shop);
+  } catch (e) {
+    console.error("GET /api/shops/by-slug/:slug error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/* ============================================================================
  * GET /api/shops/:id
  * Détail public d’une boutique.
  * ==========================================================================*/
