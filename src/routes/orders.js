@@ -1667,6 +1667,7 @@ router.get("/", authRequired, async (req, res) => {
     null;
 
   const payFilter = normPayStatus(payFilterRaw);
+  const qRaw = String(req.query.q || "").trim();
 
   try {
     const payCols = await getOrdersPayColsCached(pool);
@@ -1833,6 +1834,11 @@ router.get("/", authRequired, async (req, res) => {
         params.push(payFilter);
       }
 
+      if (qRaw) {
+        where += " AND (o.id = ? OR o.status LIKE ? OR o.contact LIKE ?)";
+        params.push(Number(qRaw) || 0, `%${qRaw}%`, `%${qRaw}%`);
+      }
+
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
         params,
@@ -1889,6 +1895,11 @@ router.get("/", authRequired, async (req, res) => {
         params.push(payFilter);
       }
 
+      if (qRaw) {
+        where += " AND (o.id = ? OR o.status LIKE ? OR o.contact LIKE ?)";
+        params.push(Number(qRaw) || 0, `%${qRaw}%`, `%${qRaw}%`);
+      }
+
       const [[{ total }]] = await pool.query(
         `SELECT COUNT(*) total FROM orders o WHERE ${where}`,
         params,
@@ -1942,6 +1953,11 @@ router.get("/", authRequired, async (req, res) => {
       if (payFilter) {
         where += " AND o.payment_status = ?";
         params.push(payFilter);
+      }
+
+      if (qRaw) {
+        where += " AND (o.id = ? OR o.status LIKE ? OR o.contact LIKE ?)";
+        params.push(Number(qRaw) || 0, `%${qRaw}%`, `%${qRaw}%`);
       }
 
       const [[{ total }]] = await pool.query(
@@ -2013,6 +2029,11 @@ router.get("/", authRequired, async (req, res) => {
     if (payFilter) {
       where += " AND o.payment_status = ?";
       params.push(payFilter);
+    }
+
+    if (qRaw) {
+      where += " AND (o.id = ? OR o.status LIKE ? OR o.contact LIKE ?)";
+      params.push(Number(qRaw) || 0, `%${qRaw}%`, `%${qRaw}%`);
     }
 
     const [[{ total }]] = await pool.query(
@@ -4001,6 +4022,116 @@ router.get("/summary", authRequired, async (req, res) => {
 
     return res.status(500).json({
       error: "Erreur serveur lors du calcul du résumé des ventes.",
+      details: e?.sqlMessage || e?.message || "unknown_error",
+    });
+  }
+});
+
+router.get("/top-customers", authRequired, async (req, res) => {
+  try {
+    const pool = getPool();
+    const canScope =
+      isAdmin(req.user) ||
+      isVendor(req.user) ||
+      isSupplier(req.user) ||
+      isRestaurant(req.user);
+
+    if (!canScope) {
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    const shopId = isAdmin(req.user)
+      ? Number(req.query.shop_id) || null
+      : await resolveOwnShopIdForOrders(pool, req.user?.id);
+
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+
+    const joinItems = shopId
+      ? `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          JOIN products p ON p.id = oi.product_id
+          WHERE p.shop_id = ?
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `
+      : `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `;
+    const params = shopId ? [shopId] : [];
+
+    const [rows] = await pool.query(
+      `
+      SELECT o.id, o.user_id, o.contact, o.updated_at, oi_amt.amount
+      FROM orders o
+      ${joinItems}
+      WHERE o.status = 'DONE'
+      `,
+      params,
+    );
+
+    const byKey = new Map();
+
+    for (const r of rows) {
+      const contact = safeParseJSON(r.contact) || {};
+      const phone = String(contact.phone || "").trim();
+      const key =
+        r.user_id != null ? `u:${r.user_id}` : phone ? `p:${phone}` : null;
+      if (!key) continue;
+
+      const name =
+        `${contact.first_name || ""} ${contact.last_name || ""}`.trim() ||
+        contact.commercial_name ||
+        phone ||
+        `Client #${r.user_id}`;
+
+      const amount = Number(r.amount || 0);
+      const updatedAt = r.updated_at ? new Date(r.updated_at).getTime() : 0;
+
+      const entry = byKey.get(key);
+      if (!entry) {
+        byKey.set(key, {
+          customer_key: key,
+          name,
+          phone: phone || null,
+          orders_count: 1,
+          revenue: amount,
+          last_order_at: r.updated_at || null,
+          _lastTs: updatedAt,
+        });
+      } else {
+        entry.orders_count += 1;
+        entry.revenue += amount;
+        if (updatedAt > entry._lastTs) {
+          entry._lastTs = updatedAt;
+          entry.last_order_at = r.updated_at || null;
+        }
+      }
+    }
+
+    const items = Array.from(byKey.values())
+      .map(({ _lastTs, ...rest }) => ({
+        ...rest,
+        revenue: +rest.revenue.toFixed(2),
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, limit);
+
+    return res.json({ items });
+  } catch (e) {
+    console.error("GET /orders/top-customers error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
+    return res.status(500).json({
+      error: "Erreur serveur lors du calcul des meilleurs clients.",
       details: e?.sqlMessage || e?.message || "unknown_error",
     });
   }
