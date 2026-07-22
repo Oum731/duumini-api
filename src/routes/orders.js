@@ -14,6 +14,7 @@ const {
   isRestaurant,
 } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
+const { normPhone } = require("../utils/phone");
 const { env } = require("../lib/env");
 const {
   sendWhatsAppOrderConfirmation,
@@ -109,15 +110,6 @@ function buildGeoLink(gps) {
     return null;
   }
   return `https://maps.google.com/?q=${gps.lat},${gps.lng}`;
-}
-
-function normPhone(p) {
-  const raw = String(p || "").replace(/\s+/g, "");
-  if (!raw) return null;
-  if (raw.startsWith("+")) return raw;
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
-  return raw;
 }
 
 function buildContactFromUser(u) {

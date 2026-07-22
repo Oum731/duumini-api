@@ -3,6 +3,7 @@ const { getPool } = require("../lib/db");
 const bcrypt = require("bcryptjs");
 const { signAccess, signRefresh, verifyRefresh } = require("../utils/jwt");
 const { authRequired, requireRole } = require("../middlewares/auth");
+const { normPhone } = require("../utils/phone");
 
 const router = Router();
 
@@ -19,33 +20,6 @@ function normalizeVille(ville) {
 function toPosInt(x) {
   const n = Number(x);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
-}
-
-function normPhone(p) {
-  let raw = String(p || "")
-    .replace(/\s+/g, "")
-    .replace(/-/g, "")
-    .replace(/\./g, "");
-
-  if (!raw) return null;
-
-  if (raw.startsWith("00")) {
-    raw = "+" + raw.slice(2);
-  }
-
-  if (/^0\d{9}$/.test(raw)) {
-    raw = "+212" + raw.slice(1);
-  }
-
-  if (/^212\d{9}$/.test(raw)) {
-    raw = "+" + raw;
-  }
-
-  if (!raw.startsWith("+")) {
-    raw = "+" + raw;
-  }
-
-  return raw;
 }
 
 function isStrongPassword(pwd) {

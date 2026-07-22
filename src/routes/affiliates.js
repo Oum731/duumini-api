@@ -2,6 +2,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
+const { normPhone } = require("../utils/phone");
 const { env } = require("../lib/env");
 
 const router = Router();
@@ -1410,7 +1411,7 @@ router.post("/", authRequired, async (req, res) => {
         code,
         slug,
         !isBlank(name) ? String(name).trim() : null,
-        !isBlank(phone) ? String(phone).trim() : null,
+        !isBlank(phone) ? normPhone(phone) || String(phone).trim() : null,
         rate,
         cleanStatus,
         !isBlank(notes) ? String(notes).trim() : null,
@@ -1700,7 +1701,7 @@ router.put("/:id", authRequired, async (req, res) => {
 
     if (phone !== undefined) {
       sets.push("phone = ?");
-      vals.push(!isBlank(phone) ? String(phone).trim() : null);
+      vals.push(!isBlank(phone) ? normPhone(phone) || String(phone).trim() : null);
     }
 
     if (commission_rate !== undefined) {

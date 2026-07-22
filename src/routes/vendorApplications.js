@@ -8,6 +8,7 @@ const { getPool } = require("../lib/db");
 const { authRequired, requireRole } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { normalizeCountryCode } = require("../utils/country");
+const { normPhone } = require("../utils/phone");
 const { env } = require("../lib/env");
 
 const router = Router();
@@ -44,15 +45,6 @@ function uploadBufferToCloudinary(file, folder = "vendor-applications") {
 
     uploadStream.end(file.buffer);
   });
-}
-
-function normPhone(p) {
-  const raw = String(p || "").replace(/\s+/g, "");
-  if (!raw) return null;
-  if (raw.startsWith("+")) return raw;
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
-  return raw;
 }
 
 function slugify(str) {
@@ -156,11 +148,22 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const pool = getPool();
     const { page, pageSize, offset, limit } = getPagination(req);
     const status = String(req.query.status || "").toUpperCase();
+    const q = String(req.query.q || "").trim();
 
-    const where = ["PENDING", "APPROVED", "REJECTED"].includes(status)
-      ? "WHERE status = ?"
-      : "";
-    const params = where ? [status] : [];
+    const conditions = [];
+    const params = [];
+
+    if (["PENDING", "APPROVED", "REJECTED"].includes(status)) {
+      conditions.push("status = ?");
+      params.push(status);
+    }
+
+    if (q) {
+      conditions.push("(legal_name LIKE ? OR contact_phone LIKE ? OR contact_email LIKE ?)");
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) total FROM vendor_applications ${where}`,

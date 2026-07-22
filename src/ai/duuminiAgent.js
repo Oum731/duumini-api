@@ -29,6 +29,15 @@ function pickMaxTokens(taskType) {
       return 1700;
     case "seo_audit":
       return 1200;
+    case "ads_meta":
+    case "ads_google":
+      return 900;
+    case "campaign_meta":
+    case "campaign_google":
+    case "weekly_plan":
+      return 1400;
+    case "social_posts":
+      return 1200;
     default:
       return 1200;
   }
@@ -71,6 +80,22 @@ function trimToMaxChars(s, max) {
 
 function arr(obj) {
   return Array.isArray(obj) ? obj : [];
+}
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
+}
+function normalizeKeywords(list) {
+  return arr(list)
+    .map((k) => ({
+      text: cleanText(k?.text || ""),
+      match: ["BROAD", "PHRASE", "EXACT"].includes(String(k?.match || "").toUpperCase())
+        ? String(k.match).toUpperCase()
+        : "PHRASE",
+    }))
+    .filter((k) => k.text)
+    .slice(0, 20);
 }
 
 /* =========================
@@ -170,11 +195,21 @@ function buildWebSiteJsonLd(brandName, siteUrl) {
  * payload:
  *  - slug, lang, current (optional), city(optional), keywords(optional), internal_links(optional)
  */
+const MARKETING_TASKS = [
+  "ads_meta",
+  "ads_google",
+  "campaign_meta",
+  "campaign_google",
+  "social_posts",
+  "weekly_plan",
+];
+
 async function runDuuminiAgent(taskType, payload = {}) {
   const brand = env.DUUMINI_AI_BRAND_NAME || "Duumini";
   const siteUrl = env.DUUMINI_AI_MAIN_URL || "https://www.duumini.com";
+  const isMarketingTask = MARKETING_TASKS.includes(taskType);
 
-  const systemPrompt = `
+  const seoSystemPrompt = `
 Tu es l'agent SEO & contenu officiel de ${brand}.
 Objectif: améliorer le référencement (Google) et la qualité du contenu du site.
 Langue principale: français (FR). Ne mélange pas les langues.
@@ -186,6 +221,21 @@ Règles NON négociables:
 - Le contenu doit être naturel, utile, et orienté utilisateur (pas du bourrage de mots-clés).
 - Générer du contenu adapté au Maroc (villes, habitudes, mots-clés locaux) sans affirmer des faits non fournis.
 `.trim();
+
+  const marketingSystemPrompt = `
+Tu es l'agent marketing & publicité officiel de ${brand}.
+Objectif: produire des textes publicitaires et du contenu marketing clairs, convaincants et conformes aux règles des plateformes (Meta Ads, Google Ads).
+Langue principale: français (FR). Ne mélange pas les langues.
+
+Règles NON négociables:
+- Ne JAMAIS inventer une promotion, un pourcentage, un prix, un délai de livraison, ou une gratuité qui ne serait pas fournie dans le contexte.
+- Si une info n'est pas fournie, rester générique et vrai (qualité, confiance, paiement à la livraison, large choix de produits africains).
+- Répondre STRICTEMENT en JSON valide uniquement (aucun texte autour).
+- Respecter strictement les limites de caractères indiquées pour chaque plateforme.
+- Contenu adapté au Maroc (villes, habitudes) sans affirmer des faits non fournis.
+`.trim();
+
+  const systemPrompt = isMarketingTask ? marketingSystemPrompt : seoSystemPrompt;
 
   const slug = cleanText(payload.slug || "");
   const lang = cleanText(payload.lang || "fr") || "fr";
@@ -296,8 +346,142 @@ Répond STRICTEMENT en JSON:
   "meta_guidelines": { "title": "....", "description": "..." }
 }
 `.trim();
+  } else if (taskType === "ads_meta") {
+    const objective = cleanText(payload.objective || "vente en ligne de produits africains");
+    const offer = cleanText(payload.offer || "épicerie et plats africains livrés au Maroc");
+    const url = cleanText(payload.url || siteUrl);
+    const audience = cleanText(payload.audience || "personnes au Maroc cherchant des produits africains");
+    const variants = clamp(Number(payload.variants) || 2, 1, 5);
+
+    userPrompt = `
+Tâche: rédiger ${variants} variante(s) de publicité Meta (Facebook/Instagram).
+Objectif: ${objective}
+Offre: ${offer}
+URL: ${url}
+Audience: ${audience}
+
+Contraintes par variante:
+- primary_text: 90 à 125 caractères, accrocheur, orienté bénéfice
+- headline: max 40 caractères
+- description: max 30 caractères
+- call_to_action: une valeur Meta standard (ex: SHOP_NOW, LEARN_MORE, ORDER_NOW)
+
+Réponds STRICTEMENT en JSON (exactement ${variants} élément(s) dans "ads"):
+{ "ads": [ { "primary_text": "...", "headline": "...", "description": "...", "call_to_action": "..." } ] }
+`.trim();
+  } else if (taskType === "ads_google") {
+    const objective = cleanText(payload.objective || "vente en ligne de produits africains");
+    const offer = cleanText(payload.offer || "épicerie et plats africains livrés au Maroc");
+    const url = cleanText(payload.url || siteUrl);
+    const audience = cleanText(payload.audience || "personnes au Maroc cherchant des produits africains");
+
+    userPrompt = `
+Tâche: rédiger une annonce Google Ads Search responsive (RSA) + mots-clés associés.
+Objectif: ${objective}
+Offre: ${offer}
+URL: ${url}
+Audience: ${audience}
+
+Contraintes:
+- headlines: 8 à 12 titres, max 30 caractères chacun
+- descriptions: 3 à 4 descriptions, max 90 caractères chacune
+- keywords: 10 à 20 mots-clés pertinents avec un type de correspondance
+
+Réponds STRICTEMENT en JSON:
+{
+  "ads": [ { "headlines": ["..."], "descriptions": ["..."] } ],
+  "keywords": [ { "text": "...", "match": "PHRASE" } ]
+}
+`.trim();
+  } else if (taskType === "campaign_meta") {
+    const objective = cleanText(payload.objective || "vente en ligne de produits africains");
+    const offer = cleanText(payload.offer || "épicerie et plats africains livrés au Maroc");
+    const url = cleanText(payload.url || siteUrl);
+    const audience = cleanText(payload.audience || "personnes au Maroc cherchant des produits africains");
+    const dailyBudget = Number(payload.daily_budget_mad) || 80;
+    const days = Number(payload.days) || 7;
+    const cityFocus = cleanText(payload.city_focus || "Casablanca");
+
+    userPrompt = `
+Tâche: construire une campagne publicitaire Meta complète (campagne + ensemble de publicités + publicité).
+Objectif: ${objective}
+Offre: ${offer}
+URL: ${url}
+Audience: ${audience}
+Budget quotidien indicatif: ${dailyBudget} MAD
+Durée indicative: ${days} jour(s)
+Ville prioritaire: ${cityFocus}
+
+Contraintes créatif:
+- primary_text: 90 à 125 caractères
+- headline: max 40 caractères
+- description: max 30 caractères
+
+Réponds STRICTEMENT en JSON:
+{
+  "meta": {
+    "campaign": { "name": "...", "objective": "OUTCOME_SALES" },
+    "adset": { "name": "...", "daily_budget_mad": ${dailyBudget}, "targeting_hint": { "cities": ["${cityFocus}"], "age_min": 18, "age_max": 55, "interests": ["..."] } },
+    "creative": { "primary_text": "...", "headline": "...", "description": "...", "call_to_action": "SHOP_NOW" }
+  }
+}
+`.trim();
+  } else if (taskType === "campaign_google") {
+    const objective = cleanText(payload.objective || "vente en ligne de produits africains");
+    const offer = cleanText(payload.offer || "épicerie et plats africains livrés au Maroc");
+    const url = cleanText(payload.url || siteUrl);
+    const audience = cleanText(payload.audience || "personnes au Maroc cherchant des produits africains");
+
+    userPrompt = `
+Tâche: construire une campagne Google Ads Search complète (nom de campagne, groupe d'annonces, annonce RSA, mots-clés).
+Objectif: ${objective}
+Offre: ${offer}
+URL: ${url}
+Audience: ${audience}
+
+Contraintes:
+- headlines: exactement 3, max 30 caractères chacun
+- descriptions: exactement 2, max 90 caractères chacune
+- path1/path2: max 15 caractères chacun
+- keywords: 8 à 15 mots-clés
+
+Réponds STRICTEMENT en JSON:
+{
+  "google": {
+    "campaign_name": "...",
+    "adgroup_name": "...",
+    "final_url": "${url}",
+    "ads": [ { "headlines": ["...","...","..."], "descriptions": ["...","..."], "path1": "...", "path2": "..." } ],
+    "keywords": [ { "text": "...", "match": "PHRASE" } ]
+  }
+}
+`.trim();
+  } else if (taskType === "social_posts") {
+    const ville = cleanText(payload.ville || "Casablanca");
+    const channel = cleanText(payload.channel || "all");
+
+    userPrompt = `
+Tâche: proposer 5 publications réseaux sociaux (Instagram/Facebook) pour promouvoir ${brand}.
+Ville prioritaire: ${ville}
+Canal/catégorie: ${channel}
+
+Réponds STRICTEMENT en JSON (exactement 5 éléments, mélange instagram/facebook):
+{ "posts": [ { "platform": "instagram", "caption": "...", "hashtags": ["#..."], "cta": "..." } ] }
+`.trim();
+  } else if (taskType === "weekly_plan") {
+    const ville = cleanText(payload.ville || "Casablanca");
+    const channel = cleanText(payload.channel || "all");
+
+    userPrompt = `
+Tâche: proposer un planning marketing hebdomadaire (7 jours) pour ${brand}.
+Ville prioritaire: ${ville}
+Canal/catégorie: ${channel}
+
+Réponds STRICTEMENT en JSON (exactement 7 éléments, un par jour de la semaine):
+{ "plan": [ { "day": "Lundi", "theme": "...", "channel": "instagram", "action": "..." } ] }
+`.trim();
   } else {
-    throw new Error(`Task type non supporté (SEO only): ${taskType}`);
+    throw new Error(`Task type non supporté: ${taskType}`);
   }
 
   const request = {
@@ -320,7 +504,85 @@ Répond STRICTEMENT en JSON:
   let parsed = extractJsonLoose(content);
   if (!parsed) return { raw: String(content || "") };
 
-  // Post-process: normaliser/champs
+  if (isMarketingTask) {
+    if (taskType === "ads_meta") {
+      parsed.ads = arr(parsed.ads)
+        .map((a) => ({
+          primary_text: trimToMaxChars(a?.primary_text || "", 125),
+          headline: trimToMaxChars(a?.headline || "", 40),
+          description: trimToMaxChars(a?.description || "", 30),
+          call_to_action: cleanText(a?.call_to_action || "SHOP_NOW"),
+        }))
+        .filter((a) => a.primary_text && a.headline);
+    } else if (taskType === "ads_google") {
+      parsed.ads = arr(parsed.ads).map((a) => ({
+        headlines: arr(a?.headlines).map((h) => trimToMaxChars(h, 30)).filter(Boolean).slice(0, 15),
+        descriptions: arr(a?.descriptions).map((d) => trimToMaxChars(d, 90)).filter(Boolean).slice(0, 4),
+      }));
+      parsed.keywords = normalizeKeywords(parsed.keywords);
+    } else if (taskType === "campaign_meta") {
+      const m = parsed.meta && typeof parsed.meta === "object" ? parsed.meta : {};
+      parsed.meta = {
+        campaign: {
+          name: cleanText(m.campaign?.name || `Duumini Campaign ${new Date().toISOString().slice(0, 10)}`),
+          objective: cleanText(m.campaign?.objective || "OUTCOME_SALES"),
+        },
+        adset: {
+          name: cleanText(m.adset?.name || "Duumini AdSet"),
+          daily_budget_mad: Number(m.adset?.daily_budget_mad) || 80,
+          targeting_hint:
+            m.adset?.targeting_hint && typeof m.adset.targeting_hint === "object" ? m.adset.targeting_hint : {},
+        },
+        creative: {
+          primary_text: trimToMaxChars(m.creative?.primary_text || "", 125),
+          headline: trimToMaxChars(m.creative?.headline || "", 40),
+          description: trimToMaxChars(m.creative?.description || "", 30),
+          call_to_action: cleanText(m.creative?.call_to_action || "SHOP_NOW"),
+        },
+      };
+    } else if (taskType === "campaign_google") {
+      const g = parsed.google && typeof parsed.google === "object" ? parsed.google : {};
+      const ad0 = arr(g.ads)[0] || {};
+      parsed.google = {
+        campaign_name: cleanText(g.campaign_name || "Duumini Campaign"),
+        adgroup_name: cleanText(g.adgroup_name || "AdGroup 1"),
+        final_url: cleanText(g.final_url || siteUrl),
+        ads: [
+          {
+            headlines: arr(ad0.headlines).map((h) => trimToMaxChars(h, 30)).filter(Boolean).slice(0, 3),
+            descriptions: arr(ad0.descriptions).map((d) => trimToMaxChars(d, 90)).filter(Boolean).slice(0, 2),
+            path1: trimToMaxChars(ad0.path1 || "", 15),
+            path2: trimToMaxChars(ad0.path2 || "", 15),
+          },
+        ],
+        keywords: normalizeKeywords(g.keywords),
+      };
+    } else if (taskType === "social_posts") {
+      parsed.posts = arr(parsed.posts)
+        .map((p) => ({
+          platform: cleanText(p?.platform || "instagram"),
+          caption: cleanText(p?.caption || ""),
+          hashtags: arr(p?.hashtags).map(cleanText).filter(Boolean).slice(0, 15),
+          cta: cleanText(p?.cta || ""),
+        }))
+        .filter((p) => p.caption)
+        .slice(0, 10);
+    } else if (taskType === "weekly_plan") {
+      parsed.plan = arr(parsed.plan)
+        .map((d) => ({
+          day: cleanText(d?.day || ""),
+          theme: cleanText(d?.theme || ""),
+          channel: cleanText(d?.channel || ""),
+          action: cleanText(d?.action || ""),
+        }))
+        .filter((d) => d.day)
+        .slice(0, 7);
+    }
+
+    return parsed;
+  }
+
+  // Post-process (SEO): normaliser/champs
   parsed.h1 = cleanText(parsed.h1 || "");
   parsed.body = cleanText(parsed.body || "");
   parsed.sections = arr(parsed.sections)

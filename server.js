@@ -95,6 +95,37 @@ try {
   console.warn("[adminContentAi] route missing:", e?.message || e);
 }
 
+// ✅ AI ads (campaign build/publish) — SAFE mode always forces PAUSED ads,
+// see DUUMINI_AI_MODE handling inside each route file.
+let metaCampaign = null;
+let metaAiAds = null;
+let googleCampaign = null;
+let googleAiAds = null;
+
+try {
+  metaCampaign = require("./src/routes/meta_campaign");
+} catch (e) {
+  console.warn("[meta_campaign] route missing:", e?.message || e);
+}
+
+try {
+  metaAiAds = require("./src/routes/meta_ai_ads");
+} catch (e) {
+  console.warn("[meta_ai_ads] route missing:", e?.message || e);
+}
+
+try {
+  googleCampaign = require("./src/routes/google_campaign");
+} catch (e) {
+  console.warn("[google_campaign] route missing:", e?.message || e);
+}
+
+try {
+  googleAiAds = require("./src/routes/google_ai_ads");
+} catch (e) {
+  console.warn("[google_ai_ads] route missing:", e?.message || e);
+}
+
 // (optionnel) env-check admin-only
 let authRequired;
 let isAdmin;
@@ -459,11 +490,14 @@ if (RUN_CRON === "1") {
 }
 
 /* =========================
- * ✅ AI ADS ROUTES DISABLED
+ * ✅ AI ads (campaign build/publish) — mounted at /api/ads.
+ * SAFE mode (default) always creates ads PAUSED; only AUTO mode can
+ * activate spend, see finalActivate in meta_campaign.js/meta_ai_ads.js.
  * ========================= */
-app.use("/api/ads", (_req, res) => {
-  return res.status(410).json({ error: "ads_ai_disabled" });
-});
+if (metaCampaign) app.use("/api/ads", metaCampaign);
+if (metaAiAds) app.use("/api/ads", metaAiAds);
+if (googleCampaign) app.use("/api/ads", googleCampaign);
+if (googleAiAds) app.use("/api/ads", googleAiAds);
 
 /* =========================
  * 404 + Error handler

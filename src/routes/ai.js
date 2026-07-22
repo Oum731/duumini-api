@@ -140,4 +140,37 @@ router.post("/seo/audit", authRequired, isAdmin, async (req, res) => {
   }
 });
 
+const DUUMINI_COPY_TASKS = [
+  "ads_meta",
+  "ads_google",
+  "campaign_meta",
+  "campaign_google",
+  "social_posts",
+  "weekly_plan",
+];
+
+/**
+ * POST /api/ai/duumini (ADMIN)
+ * body: { taskType, payload? }
+ * -> génération de texte marketing (ads/campagnes/posts/planning), pas de persistance
+ */
+router.post("/duumini", authRequired, isAdmin, async (req, res) => {
+  if (!ensureAiOn(res)) return;
+
+  const { taskType, payload = {} } = req.body || {};
+  if (!DUUMINI_COPY_TASKS.includes(taskType)) {
+    return res.status(400).json({ error: "taskType invalide", allowed: DUUMINI_COPY_TASKS });
+  }
+
+  try {
+    const data = await runDuuminiAgent(taskType, payload);
+    return res.json({ ok: true, mode: env.DUUMINI_AI_MODE || "SAFE", data });
+  } catch (err) {
+    return res.status(500).json({
+      error: "duumini_copy_error",
+      details: err?.message || String(err),
+    });
+  }
+});
+
 module.exports = router;

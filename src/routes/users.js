@@ -2,6 +2,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, requireRole } = require("../middlewares/auth");
 const bcrypt = require("bcryptjs");
+const { normPhone } = require("../utils/phone");
 
 const router = Router();
 
@@ -14,15 +15,6 @@ function normalizeVille(ville) {
 function toPosInt(x) {
   const n = Number(x);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
-}
-
-function normPhone(p) {
-  const raw = String(p || "").replace(/\s+/g, "");
-  if (!raw) return null;
-  if (raw.startsWith("+")) return raw;
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (/^0\d{9,}$/.test(raw)) return `+212${raw.slice(1)}`;
-  return raw;
 }
 
 function adminRequired(req, res, next) {
