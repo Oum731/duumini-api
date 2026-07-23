@@ -639,32 +639,93 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
     insertQs.push("?");
   }
 
-  const [result] = await conn.query(
-    `
-      INSERT INTO users (${insertCols.join(", ")})
-      VALUES (${insertQs.join(", ")})
-    `,
-    insertVals,
-  );
+  try {
+    const [result] = await conn.query(
+      `
+        INSERT INTO users (${insertCols.join(", ")})
+        VALUES (${insertQs.join(", ")})
+      `,
+      insertVals,
+    );
 
-  return {
-    user: {
-      id: result.insertId,
-      first_name: firstName,
-      last_name: lastName,
-      phone,
-      role: requestedRole,
-      city: addressObj?.city || null,
-      commune: addressObj?.commune || null,
-      district: addressObj?.district || null,
-      address_line: addressObj?.address_line || null,
-      landmark: addressObj?.landmark || null,
-      commercial_name: requestedRole === "VENDEUR" ? commercialName : null,
-      ice: requestedRole === "VENDEUR" ? ice : null,
-    },
-    created: true,
-    plainPassword,
-  };
+    return {
+      user: {
+        id: result.insertId,
+        first_name: firstName,
+        last_name: lastName,
+        phone,
+        role: requestedRole,
+        city: addressObj?.city || null,
+        commune: addressObj?.commune || null,
+        district: addressObj?.district || null,
+        address_line: addressObj?.address_line || null,
+        landmark: addressObj?.landmark || null,
+        commercial_name: requestedRole === "VENDEUR" ? commercialName : null,
+        ice: requestedRole === "VENDEUR" ? ice : null,
+      },
+      created: true,
+      plainPassword,
+    };
+  } catch (e) {
+    // ✅ Course critique : un compte avec ce même téléphone vient d'être
+    // créé entre le SELECT ci-dessus et cet INSERT (double clic, requête
+    // rejouée...). Plutôt que de laisser fuiter l'erreur SQL brute, on
+    // retombe sur le compte qui vient d'apparaître.
+    const msg = String(e?.message || "").toLowerCase();
+    const isPhoneDup =
+      e?.code === "ER_DUP_ENTRY" &&
+      (msg.includes("uq_users_phone") || msg.includes("'phone'"));
+
+    if (!isPhoneDup) throw e;
+
+    const [[racedExisting]] = await conn.query(
+      `
+        SELECT ${selectCols.join(", ")}
+        FROM users
+        WHERE phone = ?
+        LIMIT 1
+      `,
+      [phone],
+    );
+
+    if (!racedExisting) throw e;
+
+    await updateUserProfileFromAdminOrder(
+      conn,
+      racedExisting.id,
+      contactObj,
+      addressObj,
+    );
+
+    const [[updated]] = await conn.query(
+      `
+        SELECT ${selectCols.join(", ")}
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+      `,
+      [racedExisting.id],
+    );
+
+    return {
+      user: {
+        id: updated.id,
+        first_name: updated.first_name || null,
+        last_name: updated.last_name || null,
+        phone: normPhone(updated.phone) || phone,
+        role: normalizeCustomerRoleInput(updated.role || "CLIENT"),
+        city: updated.city || null,
+        commune: updated.commune || null,
+        district: updated.district || null,
+        address_line: updated.address_line || null,
+        landmark: updated.landmark || null,
+        commercial_name: updated.commercial_name || null,
+        ice: updated.ice || null,
+      },
+      created: false,
+      plainPassword: null,
+    };
+  }
 }
 /* =========================
  * ✅ Admin discount helpers
