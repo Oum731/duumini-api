@@ -430,10 +430,37 @@ async function updateUserProfileFromAdminOrder(
 
   if (!sets.length) return;
 
-  await conn.query(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [
-    ...vals,
-    userId,
-  ]);
+  try {
+    await conn.query(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [
+      ...vals,
+      userId,
+    ]);
+  } catch (e) {
+    // ✅ Un autre compte possède déjà la forme normalisée de ce numéro
+    // (compte "fantôme" créé avant le rattachement des numéros — le
+    // backfill n'a pas encore tourné). On ne bloque pas la mise à jour
+    // du profil / la commande pour autant : on retente sans toucher au
+    // téléphone plutôt que de laisser fuiter l'erreur SQL brute.
+    const msg = String(e?.message || "").toLowerCase();
+    const isPhoneDup =
+      e?.code === "ER_DUP_ENTRY" &&
+      (msg.includes("uq_users_phone") || msg.includes("'phone'"));
+
+    if (!isPhoneDup) throw e;
+
+    const phoneSetIdx = sets.indexOf("phone = ?");
+    if (phoneSetIdx === -1) throw e;
+
+    const setsWithoutPhone = sets.filter((_, i) => i !== phoneSetIdx);
+    const valsWithoutPhone = vals.filter((_, i) => i !== phoneSetIdx);
+
+    if (!setsWithoutPhone.length) return;
+
+    await conn.query(
+      `UPDATE users SET ${setsWithoutPhone.join(", ")} WHERE id = ?`,
+      [...valsWithoutPhone, userId],
+    );
+  }
 }
 /* =========================
  * ✅ Auto-create client account
