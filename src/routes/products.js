@@ -124,6 +124,7 @@ function pickFilters(req) {
     subCategoryId: req.query.subCategoryId ?? req.query.sub_category_id ?? null,
     shopId: req.query.shopId ?? req.query.shop_id ?? null,
     countryCode: req.query.countryCode ?? req.query.country_code ?? null,
+    brand: req.query.brand ?? null,
     q: req.query.q ?? "",
     vertical: req.query.vertical ?? req.query.v ?? null,
     includeVariants: parseBoolQuery(req, "includeVariants", 0),
@@ -877,6 +878,7 @@ async function listProducts(pool, opts) {
     subCategoryId,
     shopId,
     countryCode,
+    brand,
     q,
     vertical,
     includeVariants,
@@ -929,6 +931,12 @@ async function listProducts(pool, opts) {
   if (cc) {
     whereParts.push("p.country_code = ?");
     params.push(cc);
+  }
+
+  const brandFilter = String(brand || "").trim();
+  if (brandFilter) {
+    whereParts.push("p.brand = ?");
+    params.push(brandFilter);
   }
 
   const oid = Number(ownerId) || 0;
@@ -1040,6 +1048,7 @@ async function listHandler(req, res, next) {
     subCategoryId,
     shopId,
     countryCode,
+    brand,
     q,
     vertical,
     includeVariants,
@@ -1066,6 +1075,7 @@ async function listHandler(req, res, next) {
       subCategoryId,
       shopId,
       countryCode,
+      brand,
       q,
       vertical,
       includeVariants: include,
@@ -1948,10 +1958,12 @@ router.post(
     const {
       category_id,
       name,
+      brand,
       slug,
       price,
       currency,
       description,
+      conditionnement,
       stock,
       is_featured,
       promo_eligible,
@@ -2101,7 +2113,7 @@ router.post(
       await conn.beginTransaction();
 
       let insertSql = `INSERT INTO products
-        (shop_id, country_code, category_id, sub_category_id, name, slug, price, currency, description, stock, is_featured,
+        (shop_id, country_code, category_id, sub_category_id, name, brand, slug, price, currency, description, conditionnement, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active, vertical`;
 
@@ -2113,10 +2125,12 @@ router.post(
         category_id ? Number(category_id) : null,
         isDrink ? null : resolvedSub.id,
         name,
+        brand ? String(brand).trim() || null : null,
         makeSlug(),
         Number(price),
         currency || "MAD",
         description || null,
+        conditionnement ? String(conditionnement).trim() || null : null,
         stock != null ? Number(stock) : 0,
         is_featured ? 1 : 0,
         promoEligibleFinal,
@@ -2239,9 +2253,11 @@ router.put(
 
     const {
       name,
+      brand,
       price,
       currency,
       description,
+      conditionnement,
       stock,
       is_featured,
       promo_eligible,
@@ -2362,9 +2378,11 @@ router.put(
       await conn.query(
         `UPDATE products SET
            name                = COALESCE(?, name),
+           brand               = COALESCE(?, brand),
            price               = COALESCE(?, price),
            currency            = COALESCE(?, currency),
            description         = COALESCE(?, description),
+           conditionnement     = COALESCE(?, conditionnement),
            stock               = COALESCE(?, stock),
            is_featured         = COALESCE(?, is_featured),
 
@@ -2397,9 +2415,11 @@ router.put(
          WHERE id=?`,
         [
           name ?? null,
+          brand !== undefined ? (String(brand).trim() || null) : null,
           price != null ? Number(price) : null,
           currency ?? null,
           description ?? null,
+          conditionnement !== undefined ? (String(conditionnement).trim() || null) : null,
           stock != null ? Number(stock) : null,
           is_featured === undefined ? null : is_featured ? 1 : 0,
 
@@ -2674,6 +2694,33 @@ router.get(
   requireRole("VENDEUR", "RESTAURANT", "ADMIN"),
   cachedJson("AUTH", PRODUCTS_CACHE_TTL_MS),
   getManageByIdHandler
+);
+
+router.get(
+  "/brands",
+  cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS),
+  async (req, res, next) => {
+    const pool = getPool();
+    try {
+      const vertical = normalizeVertical(req.query.vertical, null);
+      const params = [];
+      let sql = `
+        SELECT brand, COUNT(*) AS product_count
+          FROM products
+         WHERE brand IS NOT NULL AND brand <> '' AND is_active = 1
+      `;
+      if (vertical) {
+        sql += ` AND vertical = ?`;
+        params.push(vertical);
+      }
+      sql += ` GROUP BY brand ORDER BY brand ASC`;
+
+      const [rows] = await pool.query(sql, params);
+      res.json({ items: rows.map((r) => ({ brand: r.brand, count: Number(r.product_count) })) });
+    } catch (e) {
+      next(e);
+    }
+  }
 );
 
 router.get("/", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listHandler);
