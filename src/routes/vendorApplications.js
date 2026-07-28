@@ -24,7 +24,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
 });
 
-const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT"];
+const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE"];
 
 function uploadBufferToCloudinary(file, folder = "vendor-applications") {
   if (!file || !file.buffer) return Promise.resolve(null);
