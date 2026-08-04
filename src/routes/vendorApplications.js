@@ -167,6 +167,10 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const { page, pageSize, offset, limit } = getPagination(req);
     const status = String(req.query.status || "").toUpperCase();
     const q = String(req.query.q || "").trim();
+    const applicantTypes = String(req.query.applicant_type || "")
+      .split(",")
+      .map((t) => t.trim().toUpperCase())
+      .filter((t) => ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE", "LIVREUR"].includes(t));
 
     const conditions = [];
     const params = [];
@@ -174,6 +178,11 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     if (["PENDING", "APPROVED", "REJECTED"].includes(status)) {
       conditions.push("status = ?");
       params.push(status);
+    }
+
+    if (applicantTypes.length) {
+      conditions.push(`applicant_type IN (${applicantTypes.map(() => "?").join(",")})`);
+      params.push(...applicantTypes);
     }
 
     if (q) {
