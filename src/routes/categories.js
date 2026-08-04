@@ -21,6 +21,20 @@ function slugify(str) {
   return out || Date.now().toString(36);
 }
 
+function parseImageUrlsColumn(raw) {
+  if (!raw) return null;
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      const cleaned = arr.map((u) => String(u || "").trim()).filter(Boolean);
+      return cleaned.length ? cleaned : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function parseBoolFlag(value, defaultValue = null) {
   if (value === undefined || value === null) return defaultValue;
   const v = String(value).trim().toLowerCase();
@@ -54,8 +68,10 @@ async function getCategoriesColumns(pool) {
   try {
     const verticalCol = await detectColumn(conn, "categories", ["vertical"]);
     const isActiveCol = await detectColumn(conn, "categories", ["is_active", "active", "enabled"]);
+    const imageCol = await detectColumn(conn, "categories", ["image_url"]);
+    const imagePoolCol = await detectColumn(conn, "categories", ["image_urls"]);
 
-    _catsColumns = { verticalCol, isActiveCol };
+    _catsColumns = { verticalCol, isActiveCol, imageCol, imagePoolCol };
     _catsColumnsLoaded = true;
     return _catsColumns;
   } finally {
@@ -157,11 +173,21 @@ router.get("/", async (req, res) => {
     );
 
     const [rows] = await pool.query(
-      `SELECT * FROM categories WHERE ${whereSql} ORDER BY name ASC LIMIT ? OFFSET ?`,
+      `SELECT categories.*,
+              (SELECT COUNT(*) FROM products
+                WHERE products.category_id = categories.id AND products.is_active = 1
+              ) AS product_count
+         FROM categories
+        WHERE ${whereSql}
+        ORDER BY name ASC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
-    res.json({ items: rows, pageInfo: buildPageInfo(total, page, pageSize) });
+    const items = cols.imagePoolCol
+      ? rows.map((r) => ({ ...r, [cols.imagePoolCol]: parseImageUrlsColumn(r[cols.imagePoolCol]) }))
+      : rows;
+
+    res.json({ items, pageInfo: buildPageInfo(total, page, pageSize) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -200,6 +226,14 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     }
 
     const active = cols.isActiveCol ? parseBoolFlag(req.body?.is_active, 1) : null;
+    const imageUrl =
+      cols.imageCol && req.body?.image_url !== undefined
+        ? String(req.body.image_url || "").trim() || null
+        : null;
+    const imageUrls =
+      cols.imagePoolCol && Array.isArray(req.body?.image_urls)
+        ? req.body.image_urls.map((u) => String(u || "").trim()).filter(Boolean)
+        : null;
 
     const fields = ["name", "slug"];
     const values = [name, finalSlug];
@@ -214,6 +248,16 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
       values.push(active == null ? 1 : active);
     }
 
+    if (cols.imageCol && imageUrl) {
+      fields.push(cols.imageCol);
+      values.push(imageUrl);
+    }
+
+    if (cols.imagePoolCol && imageUrls && imageUrls.length) {
+      fields.push(cols.imagePoolCol);
+      values.push(JSON.stringify(imageUrls));
+    }
+
     const sql = `INSERT INTO categories (${fields.join(", ")}) VALUES (${fields.map(() => "?").join(", ")})`;
     const [r] = await conn.query(sql, values);
 
@@ -223,6 +267,8 @@ router.post("/", authRequired, requireRole("ADMIN"), async (req, res) => {
       slug: finalSlug,
       ...(cols.verticalCol ? { vertical } : {}),
       ...(cols.isActiveCol ? { is_active: values[fields.indexOf(cols.isActiveCol)] } : {}),
+      ...(cols.imageCol ? { image_url: imageUrl } : {}),
+      ...(cols.imagePoolCol ? { image_urls: imageUrls } : {}),
     });
   } catch (e) {
     if (e && e.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "Duplicate slug" });
@@ -272,6 +318,21 @@ router.put("/:id", authRequired, requireRole("ADMIN"), async (req, res) => {
       const active = parseBoolFlag(req.body?.is_active, null);
       if (active === null) return res.status(400).json({ error: "is_active invalid" });
       patch[cols.isActiveCol] = active;
+    }
+
+    if (cols.imageCol && req.body?.image_url !== undefined) {
+      patch[cols.imageCol] = String(req.body.image_url || "").trim() || null;
+    }
+
+    if (cols.imagePoolCol && req.body?.image_urls !== undefined) {
+      if (req.body.image_urls === null) {
+        patch[cols.imagePoolCol] = null;
+      } else if (Array.isArray(req.body.image_urls)) {
+        const cleaned = req.body.image_urls.map((u) => String(u || "").trim()).filter(Boolean);
+        patch[cols.imagePoolCol] = cleaned.length ? JSON.stringify(cleaned) : null;
+      } else {
+        return res.status(400).json({ error: "image_urls must be an array or null" });
+      }
     }
 
     const keys = Object.keys(patch);
