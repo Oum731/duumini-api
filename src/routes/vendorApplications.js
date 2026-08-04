@@ -24,7 +24,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
 });
 
-const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE"];
+const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE", "LIVREUR"];
 
 function uploadBufferToCloudinary(file, folder = "vendor-applications") {
   if (!file || !file.buffer) return Promise.resolve(null);
@@ -80,6 +80,8 @@ router.post(
   upload.fields([
     { name: "dfe_file", maxCount: 1 },
     { name: "rc_file", maxCount: 1 },
+    { name: "id_document_file", maxCount: 1 },
+    { name: "photo_file", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -91,6 +93,7 @@ router.post(
         country_code,
         city,
         message,
+        id_document_type,
       } = req.body || {};
 
       const type = String(applicant_type || "").toUpperCase();
@@ -111,16 +114,28 @@ router.post(
 
       const dfeFile = (req.files && req.files.dfe_file && req.files.dfe_file[0]) || null;
       const rcFile = (req.files && req.files.rc_file && req.files.rc_file[0]) || null;
+      const idDocFile =
+        (req.files && req.files.id_document_file && req.files.id_document_file[0]) || null;
+      const photoFile = (req.files && req.files.photo_file && req.files.photo_file[0]) || null;
 
-      const [dfeUrl, rcUrl] = await Promise.all([
+      const [dfeUrl, rcUrl, idDocUrl, photoUrl] = await Promise.all([
         uploadBufferToCloudinary(dfeFile, "vendor-applications/dfe"),
         uploadBufferToCloudinary(rcFile, "vendor-applications/rc"),
+        uploadBufferToCloudinary(idDocFile, "vendor-applications/identity"),
+        uploadBufferToCloudinary(photoFile, "vendor-applications/photo"),
       ]);
+
+      const cleanIdDocType = ["PASSPORT", "CARTE_SEJOUR", "CNI"].includes(
+        String(id_document_type || "").toUpperCase()
+      )
+        ? String(id_document_type).toUpperCase()
+        : null;
 
       const [r] = await pool.query(
         `INSERT INTO vendor_applications
-           (applicant_type, legal_name, contact_phone, contact_email, country_code, city, message, dfe_url, rc_url)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+           (applicant_type, legal_name, contact_phone, contact_email, country_code, city, message,
+            dfe_url, rc_url, id_document_url, id_document_type, photo_url)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           type,
           cleanLegalName,
@@ -131,6 +146,9 @@ router.post(
           message || null,
           dfeUrl,
           rcUrl,
+          idDocUrl,
+          cleanIdDocType,
+          photoUrl,
         ]
       );
 
@@ -257,21 +275,42 @@ router.patch(
       );
       const newUserId = userResult.insertId;
 
-      const slug = await generateUniqueSlug(pool, slugify(application.legal_name));
-      await conn.query(
-        `INSERT INTO shops
-           (owner_id, name, slug, description, address, city, country, country_code)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
-        [
-          newUserId,
-          application.legal_name,
-          slug,
-          application.message || null,
-          application.city || null,
-          application.country_code === "CI" ? "Côte d'Ivoire" : "Maroc",
-          application.country_code,
-        ]
-      );
+      if (application.applicant_type === "LIVREUR") {
+        // Un livreur n'a pas de boutique : on crée son profil livreur
+        // (pays/ville de rattachement + pièce d'identité/photo transmises
+        // depuis la candidature) au lieu d'une ligne `shops`. Le compte est
+        // créé mais `verification_status` reste à PENDING_VISIT (valeur par
+        // défaut) : il ne peut accepter des courses qu'après validation
+        // manuelle par un admin suite au passage physique à l'agence.
+        await conn.query(
+          `INSERT INTO livreur_profiles (user_id, country_code, city, id_document_url, id_document_type, photo_url)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            newUserId,
+            application.country_code,
+            application.city || null,
+            application.id_document_url || null,
+            application.id_document_type || null,
+            application.photo_url || null,
+          ]
+        );
+      } else {
+        const slug = await generateUniqueSlug(pool, slugify(application.legal_name));
+        await conn.query(
+          `INSERT INTO shops
+             (owner_id, name, slug, description, address, city, country, country_code)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
+          [
+            newUserId,
+            application.legal_name,
+            slug,
+            application.message || null,
+            application.city || null,
+            application.country_code === "CI" ? "Côte d'Ivoire" : "Maroc",
+            application.country_code,
+          ]
+        );
+      }
 
       await conn.query(
         `UPDATE vendor_applications
