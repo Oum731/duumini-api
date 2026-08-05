@@ -10,6 +10,8 @@ const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { normalizeCountryCode } = require("../utils/country");
 const { normPhone } = require("../utils/phone");
 const { env } = require("../lib/env");
+const { sendWhatsAppMessage } = require("../services/twilio");
+const { findZoneForPoint } = require("../utils/zones");
 
 const router = Router();
 
@@ -25,6 +27,41 @@ const upload = multer({
 });
 
 const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE", "LIVREUR"];
+
+const ID_DOCUMENT_LABELS = {
+  CNI: "carte d'identité nationale",
+  CARTE_SEJOUR: "carte de séjour",
+  PASSPORT: "passeport",
+};
+
+/**
+ * ✅ Message envoyé automatiquement au livreur dès que sa candidature est
+ * approuvée — lui demande de passer à l'agence DUUMINI avec ses documents
+ * originaux pour valider définitivement son inscription (le compte est créé
+ * mais `verification_status` reste PENDING_VISIT jusqu'à ce passage).
+ */
+function buildLivreurApprovalWhatsAppMessage({ legalName, password, idDocumentType }) {
+  const docLabel = ID_DOCUMENT_LABELS[idDocumentType] || "pièce d'identité";
+  const lines = [
+    `🛵 *Candidature DUUMINI approuvée*`,
+    ``,
+    `Bonjour ${legalName || ""},`.trim(),
+    ``,
+    `Votre candidature en tant que livreur DUUMINI a été approuvée. Votre compte a été créé.`,
+    ``,
+    `Pour finaliser votre inscription, merci de vous présenter à l'agence DUUMINI avec :`,
+    `• Votre ${docLabel} originale`,
+    `• Une pièce d'identité si différente du document déjà transmis`,
+    ``,
+    `📍 Agence DUUMINI : 5 rue Ennoussour RDC, Casablanca`,
+    ``,
+    `Vous pourrez alors accepter des courses depuis votre espace livreur.`,
+  ];
+  if (password) {
+    lines.push(``, `Mot de passe temporaire pour vous connecter : *${password}*`);
+  }
+  return lines.join("\n");
+}
 
 function uploadBufferToCloudinary(file, folder = "vendor-applications") {
   if (!file || !file.buffer) return Promise.resolve(null);
@@ -92,6 +129,8 @@ router.post(
         contact_email,
         country_code,
         city,
+        lat,
+        lng,
         message,
         id_document_type,
       } = req.body || {};
@@ -131,11 +170,24 @@ router.post(
         ? String(id_document_type).toUpperCase()
         : null;
 
+      // ✅ Position optionnelle (surtout utile pour LIVREUR) — dégradation
+      // gracieuse si absente ou invalide, le candidat n'est jamais bloqué
+      // par un refus de géolocalisation.
+      const cleanLat = Number(lat);
+      const cleanLng = Number(lng);
+      const hasValidCoords =
+        Number.isFinite(cleanLat) &&
+        Number.isFinite(cleanLng) &&
+        cleanLat >= -90 &&
+        cleanLat <= 90 &&
+        cleanLng >= -180 &&
+        cleanLng <= 180;
+
       const [r] = await pool.query(
         `INSERT INTO vendor_applications
-           (applicant_type, legal_name, contact_phone, contact_email, country_code, city, message,
+           (applicant_type, legal_name, contact_phone, contact_email, country_code, city, lat, lng, message,
             dfe_url, rc_url, id_document_url, id_document_type, photo_url)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           type,
           cleanLegalName,
@@ -143,6 +195,8 @@ router.post(
           contact_email || null,
           finalCountryCode,
           city || null,
+          hasValidCoords ? cleanLat : null,
+          hasValidCoords ? cleanLng : null,
           message || null,
           dfeUrl,
           rcUrl,
@@ -291,9 +345,27 @@ router.patch(
         // créé mais `verification_status` reste à PENDING_VISIT (valeur par
         // défaut) : il ne peut accepter des courses qu'après validation
         // manuelle par un admin suite au passage physique à l'agence.
+        //
+        // ✅ Si une position a été capturée à la candidature, on la copie
+        // directement dans last_lat/last_lng (+ résolution de zone) — le
+        // livreur a une position exploitable dès l'approbation, sans
+        // attendre sa première connexion à son tableau de bord.
+        let zoneCode = null;
+        const hasCoords = application.lat != null && application.lng != null;
+        if (hasCoords) {
+          try {
+            const zone = await findZoneForPoint(pool, Number(application.lat), Number(application.lng));
+            zoneCode = zone?.code || null;
+          } catch {
+            // pas bloquant — le livreur mettra à jour sa position depuis son tableau de bord
+          }
+        }
+
         await conn.query(
-          `INSERT INTO livreur_profiles (user_id, country_code, city, id_document_url, id_document_type, photo_url)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO livreur_profiles
+             (user_id, country_code, city, id_document_url, id_document_type, photo_url,
+              last_lat, last_lng, last_location_at, zone_code)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             newUserId,
             application.country_code,
@@ -301,6 +373,10 @@ router.patch(
             application.id_document_url || null,
             application.id_document_type || null,
             application.photo_url || null,
+            hasCoords ? application.lat : null,
+            hasCoords ? application.lng : null,
+            hasCoords ? new Date() : null,
+            zoneCode,
           ]
         );
       } else {
@@ -330,7 +406,29 @@ router.patch(
 
       await conn.commit();
 
-      res.json({ ok: true, user_id: newUserId });
+      let whatsappSent = false;
+      if (application.applicant_type === "LIVREUR") {
+        // ✅ Non bloquant : le compte reste créé même si Twilio est
+        // indisponible — l'admin garde la main pour recontacter manuellement.
+        try {
+          await sendWhatsAppMessage(
+            application.contact_phone,
+            buildLivreurApprovalWhatsAppMessage({
+              legalName: application.legal_name,
+              password,
+              idDocumentType: application.id_document_type,
+            })
+          );
+          whatsappSent = true;
+        } catch (e) {
+          console.error(
+            "PATCH /api/vendor-applications/:id/approve — envoi WhatsApp échoué:",
+            e?.message || e
+          );
+        }
+      }
+
+      res.json({ ok: true, user_id: newUserId, whatsapp_sent: whatsappSent });
     } catch (e) {
       await conn.rollback();
       console.error("PATCH /api/vendor-applications/:id/approve error:", e);

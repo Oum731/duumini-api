@@ -120,131 +120,152 @@ async function notifyTripStatus(requesterUserId, tripId, status) {
   }
 }
 
+/* ========= Création partagée (utilisateur connecté OU invité) ========= */
+/* Toute la logique de validation/tarification/insertion vit ici pour que
+   POST / (connecté) et POST /guest (sans compte) restent parfaitement
+   cohérentes — un seul endroit à faire évoluer. */
+async function createTrip(res, body, requesterUserId) {
+  const {
+    pickup_address,
+    pickup_lat,
+    pickup_lng,
+    dropoff_address,
+    dropoff_lat,
+    dropoff_lng,
+    package_description,
+    payment_method,
+    country_code,
+    requester_phone,
+    requester_name,
+    trip_type,
+    is_heavy_package,
+  } = body || {};
+
+  const pLat = Number(pickup_lat);
+  const pLng = Number(pickup_lng);
+  const dLat = Number(dropoff_lat);
+  const dLng = Number(dropoff_lng);
+
+  if (!isValidCoord(pLat, pLng) || !isValidCoord(dLat, dLng)) {
+    return res.status(400).json({ error: "Coordonnées de départ/arrivée invalides" });
+  }
+
+  const cleanPickupAddress = String(pickup_address || "").trim();
+  const cleanDropoffAddress = String(dropoff_address || "").trim();
+  if (!cleanPickupAddress || !cleanDropoffAddress) {
+    return res.status(400).json({ error: "Adresses de départ et d'arrivée requises" });
+  }
+
+  const cleanPhone = normPhone(requester_phone);
+  if (!cleanPhone) {
+    return res.status(400).json({ error: "Numéro de téléphone invalide" });
+  }
+
+  const method = String(payment_method || "CASH").toUpperCase();
+  if (!PAYMENT_METHODS.includes(method)) {
+    return res.status(400).json({
+      error: `payment_method invalide (attendu: ${PAYMENT_METHODS.join(", ")})`,
+    });
+  }
+
+  const tripType = String(trip_type || "PICKUP").toUpperCase();
+  if (!TRIP_TYPES.includes(tripType)) {
+    return res.status(400).json({
+      error: `trip_type invalide (attendu: ${TRIP_TYPES.join(", ")})`,
+    });
+  }
+  const isHeavy = !!is_heavy_package;
+
+  const pool = getPool();
+  const finalCountryCode = await normalizeCountryCode(pool, country_code, "MA");
+
+  const zone = await findZoneForPoint(pool, pLat, pLng);
+  if (!zone) {
+    return res.status(422).json({
+      error: "Ce service n'est pas encore disponible dans votre secteur.",
+    });
+  }
+
+  const distanceKm = Math.round(haversineKm(pLat, pLng, dLat, dLng) * 100) / 100;
+  const price = computePrice(distanceKm, isHeavy, tripType);
+  const commissionAmount = Math.round(((price * COMMISSION_RATE) / 100) * 100) / 100;
+
+  const [r] = await pool.query(
+    `INSERT INTO courier_trips
+       (requester_user_id, country_code, zone_code, pickup_address, pickup_lat, pickup_lng,
+        dropoff_address, dropoff_lat, dropoff_lng, distance_km, package_description,
+        trip_type, is_heavy_package, price, commission_rate, commission_amount, payment_method,
+        requester_phone, requester_name)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      requesterUserId,
+      finalCountryCode,
+      zone.code,
+      cleanPickupAddress,
+      pLat,
+      pLng,
+      cleanDropoffAddress,
+      dLat,
+      dLng,
+      distanceKm,
+      package_description ? String(package_description).trim() : null,
+      tripType,
+      isHeavy ? 1 : 0,
+      price,
+      COMMISSION_RATE,
+      commissionAmount,
+      method,
+      cleanPhone,
+      requester_name ? String(requester_name).trim() : null,
+    ]
+  );
+
+  const trip = {
+    id: r.insertId,
+    country_code: finalCountryCode,
+    pickup_address: cleanPickupAddress,
+    pickup_lat: pLat,
+    pickup_lng: pLng,
+    dropoff_address: cleanDropoffAddress,
+    distance_km: distanceKm,
+    price,
+  };
+
+  try {
+    await queueLivreurNotifications(pool, trip, zone);
+  } catch (e) {
+    console.error("courierTrips: notification queue failed:", e?.message || e);
+  }
+
+  return res.status(201).json({
+    id: r.insertId,
+    distance_km: distanceKm,
+    price,
+    commission_amount: commissionAmount,
+    status: "REQUESTED",
+  });
+}
+
 /* ========= POST / ========= */
-/* Réservation d'une course — tout utilisateur connecté. */
+/* Réservation d'une course — utilisateur connecté. */
 router.post("/", authRequired, async (req, res) => {
   try {
-    const {
-      pickup_address,
-      pickup_lat,
-      pickup_lng,
-      dropoff_address,
-      dropoff_lat,
-      dropoff_lng,
-      package_description,
-      payment_method,
-      country_code,
-      requester_phone,
-      requester_name,
-      trip_type,
-      is_heavy_package,
-    } = req.body || {};
-
-    const pLat = Number(pickup_lat);
-    const pLng = Number(pickup_lng);
-    const dLat = Number(dropoff_lat);
-    const dLng = Number(dropoff_lng);
-
-    if (!isValidCoord(pLat, pLng) || !isValidCoord(dLat, dLng)) {
-      return res.status(400).json({ error: "Coordonnées de départ/arrivée invalides" });
-    }
-
-    const cleanPickupAddress = String(pickup_address || "").trim();
-    const cleanDropoffAddress = String(dropoff_address || "").trim();
-    if (!cleanPickupAddress || !cleanDropoffAddress) {
-      return res.status(400).json({ error: "Adresses de départ et d'arrivée requises" });
-    }
-
-    const cleanPhone = normPhone(requester_phone);
-    if (!cleanPhone) {
-      return res.status(400).json({ error: "Numéro de téléphone invalide" });
-    }
-
-    const method = String(payment_method || "CASH").toUpperCase();
-    if (!PAYMENT_METHODS.includes(method)) {
-      return res.status(400).json({
-        error: `payment_method invalide (attendu: ${PAYMENT_METHODS.join(", ")})`,
-      });
-    }
-
-    const tripType = String(trip_type || "PICKUP").toUpperCase();
-    if (!TRIP_TYPES.includes(tripType)) {
-      return res.status(400).json({
-        error: `trip_type invalide (attendu: ${TRIP_TYPES.join(", ")})`,
-      });
-    }
-    const isHeavy = !!is_heavy_package;
-
-    const pool = getPool();
-    const finalCountryCode = await normalizeCountryCode(pool, country_code, "MA");
-
-    const zone = await findZoneForPoint(pool, pLat, pLng);
-    if (!zone) {
-      return res.status(422).json({
-        error: "Ce service n'est pas encore disponible dans votre secteur.",
-      });
-    }
-
-    const distanceKm = Math.round(haversineKm(pLat, pLng, dLat, dLng) * 100) / 100;
-    const price = computePrice(distanceKm, isHeavy, tripType);
-    const commissionAmount = Math.round(((price * COMMISSION_RATE) / 100) * 100) / 100;
-
-    const [r] = await pool.query(
-      `INSERT INTO courier_trips
-         (requester_user_id, country_code, zone_code, pickup_address, pickup_lat, pickup_lng,
-          dropoff_address, dropoff_lat, dropoff_lng, distance_km, package_description,
-          trip_type, is_heavy_package, price, commission_rate, commission_amount, payment_method,
-          requester_phone, requester_name)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        req.user.id,
-        finalCountryCode,
-        zone.code,
-        cleanPickupAddress,
-        pLat,
-        pLng,
-        cleanDropoffAddress,
-        dLat,
-        dLng,
-        distanceKm,
-        package_description ? String(package_description).trim() : null,
-        tripType,
-        isHeavy ? 1 : 0,
-        price,
-        COMMISSION_RATE,
-        commissionAmount,
-        method,
-        cleanPhone,
-        requester_name ? String(requester_name).trim() : null,
-      ]
-    );
-
-    const trip = {
-      id: r.insertId,
-      country_code: finalCountryCode,
-      pickup_address: cleanPickupAddress,
-      pickup_lat: pLat,
-      pickup_lng: pLng,
-      dropoff_address: cleanDropoffAddress,
-      distance_km: distanceKm,
-      price,
-    };
-
-    try {
-      await queueLivreurNotifications(pool, trip, zone);
-    } catch (e) {
-      console.error("courierTrips: notification queue failed:", e?.message || e);
-    }
-
-    res.status(201).json({
-      id: r.insertId,
-      distance_km: distanceKm,
-      price,
-      commission_amount: commissionAmount,
-      status: "REQUESTED",
-    });
+    return await createTrip(res, req.body, req.user.id);
   } catch (e) {
     console.error("POST /api/courier-trips error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/* ========= POST /guest ========= */
+/* Réservation d'une course — visiteur sans compte (même convention que
+   POST /api/orders/guest : requester_user_id NULL, identifié par
+   téléphone). */
+router.post("/guest", async (req, res) => {
+  try {
+    return await createTrip(res, req.body, null);
+  } catch (e) {
+    console.error("POST /api/courier-trips/guest error:", e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
