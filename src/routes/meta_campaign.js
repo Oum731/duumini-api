@@ -1,6 +1,6 @@
 // src/routes/meta_campaign.js
 const { Router } = require("express");
-const { authRequired, isAdmin } = require("../middlewares/auth");
+const { authRequired, requireRole } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
 const { putDraft, getDraft, delDraft } = require("../lib/aiDraftStore");
 const { createCampaign, createAdSet, createAdCreative, createAd, buildTargeting } = require("../lib/metaAds");
@@ -20,7 +20,7 @@ function isAuto() {
  * body (optionnel): { objective, offer, url, audience, daily_budget_mad, days, city_focus }
  * -> retourne draft_id + preview (campagne complète)
  */
-router.post("/meta/build", authRequired, isAdmin, async (req, res) => {
+router.post("/meta/build", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (isOff()) return res.status(403).json({ error: "ai_mode_off" });
   if (!env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY manquant" });
 
@@ -33,7 +33,11 @@ router.post("/meta/build", authRequired, isAdmin, async (req, res) => {
       return res.status(500).json({ error: "IA n'a pas renvoyé une campagne meta valide", raw: ai });
     }
 
-    const info = putDraft("meta", meta);
+    const info = putDraft("meta", {
+      meta,
+      url: String(payload.url || "").trim() || undefined,
+      image_url: String(payload.image_url || "").trim() || undefined,
+    });
     return res.json({ ok: true, mode: env.DUUMINI_AI_MODE || "SAFE", draft_id: info.id, preview: meta });
   } catch (err) {
     return res.status(500).json({ error: "meta_build_error", details: err.message });
@@ -46,7 +50,7 @@ router.post("/meta/build", authRequired, isAdmin, async (req, res) => {
  * - SAFE: toujours PAUSED
  * - AUTO: activate si activate=true
  */
-router.post("/meta/publish", authRequired, isAdmin, async (req, res) => {
+router.post("/meta/publish", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (isOff()) return res.status(403).json({ error: "ai_mode_off" });
 
   const { draft_id, activate = false } = req.body || {};
@@ -60,7 +64,9 @@ router.post("/meta/publish", authRequired, isAdmin, async (req, res) => {
   const finalActivate = isAuto() ? !!activate : false;
   const status = finalActivate ? "ACTIVE" : "PAUSED";
 
-  const meta = d.payload || {};
+  const meta = d.payload?.meta || {};
+  const targetUrl = d.payload?.url || env.DUUMINI_AI_MAIN_URL || "https://duumini.com";
+  const targetImage = d.payload?.image_url || undefined;
   const pageId = env.META_PAGE_ID;
   if (!pageId) return res.status(500).json({ error: "META_PAGE_ID manquant" });
 
@@ -89,7 +95,8 @@ router.post("/meta/publish", authRequired, isAdmin, async (req, res) => {
       primaryText: meta.creative?.primary_text,
       headline: meta.creative?.headline,
       description: meta.creative?.description,
-      url: env.DUUMINI_AI_MAIN_URL || "https://duumini.com",
+      url: targetUrl,
+      picture: targetImage,
       callToAction: meta.creative?.call_to_action || "SHOP_NOW",
     });
 

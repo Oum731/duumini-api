@@ -1,6 +1,6 @@
 // api/routes/meta_ai_ads.js
 const { Router } = require("express");
-const { authRequired, isAdmin } = require("../middlewares/auth");
+const { authRequired, requireRole } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
 const { createAdCreative, createAd } = require("../lib/metaAds");
 const { env } = require("../lib/env");
@@ -18,7 +18,7 @@ function isAuto() {
  * POST /api/ads/meta/auto
  * body: { offer, url, audience, objective, adset_id, page_id, autoActivate? }
  */
-router.post("/meta/auto", authRequired, isAdmin, async (req, res) => {
+router.post("/meta/auto", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (isOff()) {
     return res.status(403).json({ error: "ai_mode_off" });
   }

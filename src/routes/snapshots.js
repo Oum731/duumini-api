@@ -1,9 +1,9 @@
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-let authRequired, isAdmin;
+let authRequired, requireRole;
 
 try {
-  ({ authRequired, isAdmin } = require("../middlewares/auth"));
+  ({ authRequired, requireRole } = require("../middlewares/auth"));
 } catch {}
 
 const router = Router();
@@ -246,7 +246,7 @@ async function upsertYearlySnapshot(ykey) {
  * Routes (admin only)
  * =======================*/
 const protectAdmin = [];
-if (authRequired && isAdmin) protectAdmin.push(authRequired, isAdmin);
+if (authRequired && requireRole) protectAdmin.push(authRequired, requireRole("ADMIN"));
 
 router.post("/month", ...protectAdmin, async (req, res) => {
   const key = String(req.query.key || req.body?.key || "").trim();

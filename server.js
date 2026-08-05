@@ -131,9 +131,10 @@ try {
 // (optionnel) env-check admin-only
 let authRequired;
 let isAdmin;
+let requireRole;
 
 try {
-  ({ authRequired, isAdmin } = require("./src/middlewares/auth"));
+  ({ authRequired, isAdmin, requireRole } = require("./src/middlewares/auth"));
 } catch {}
 
 /* =========================
@@ -426,8 +427,8 @@ if (products && products.shareRouter) {
 /* =========================
  * Admin env-check (optionnel)
  * ========================= */
-if (authRequired && isAdmin) {
-  app.get("/api/admin/env-check", authRequired, isAdmin, (_req, res) => {
+if (authRequired && requireRole) {
+  app.get("/api/admin/env-check", authRequired, requireRole("ADMIN"), (_req, res) => {
     return res.json({
       ok: true,
       ai: {

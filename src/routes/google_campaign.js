@@ -1,6 +1,6 @@
 // src/routes/google_campaign.js
 const { Router } = require("express");
-const { authRequired, isAdmin } = require("../middlewares/auth");
+const { authRequired, requireRole } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
 const { putDraft, getDraft } = require("../lib/aiDraftStore");
 const { env } = require("../lib/env");
@@ -78,7 +78,7 @@ function toGoogleCsv(google) {
  * POST /api/ads/google/build
  * -> draft_id + preview
  */
-router.post("/google/build", authRequired, isAdmin, async (req, res) => {
+router.post("/google/build", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (isOff()) return res.status(403).json({ error: "ai_mode_off" });
   if (!env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY manquant" });
 
@@ -100,7 +100,7 @@ router.post("/google/build", authRequired, isAdmin, async (req, res) => {
  * GET /api/ads/google/export?draft_id=...
  * -> CSV download
  */
-router.get("/google/export", authRequired, isAdmin, async (req, res) => {
+router.get("/google/export", authRequired, requireRole("ADMIN"), async (req, res) => {
   const draft_id = req.query.draft_id;
   const d = getDraft(draft_id);
   if (!d || d.type !== "google") return res.status(404).json({ error: "draft_not_found" });

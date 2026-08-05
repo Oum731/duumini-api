@@ -140,26 +140,31 @@ async function createAdSet({
  * Creative + Ad (existing)
  * =======================*/
 
-async function createAdCreative({ name, pageId, primaryText, headline, description, url, callToAction }) {
+async function createAdCreative({ name, pageId, primaryText, headline, description, url, picture, callToAction }) {
   const endpoint = `${META_GRAPH}/${AD_ACCOUNT_ID}/adcreatives`;
   const safeUrl = String(url || "").trim();
   if (!pageId || !safeUrl) throw new Error("createAdCreative: pageId et url requis");
+
+  const linkData = {
+    message: String(primaryText || "").trim(),
+    link: safeUrl,
+    caption: safeUrl.replace(/^https?:\/\//, ""),
+    name: String(headline || "").trim(),
+    description: String(description || "").trim(),
+    call_to_action: {
+      type: normalizeCta(callToAction),
+      value: { link: safeUrl },
+    },
+  };
+
+  const safePicture = String(picture || "").trim();
+  if (safePicture) linkData.picture = safePicture;
 
   const payload = {
     name: name || `Duumini Creative - ${new Date().toISOString()}`,
     object_story_spec: {
       page_id: String(pageId),
-      link_data: {
-        message: String(primaryText || "").trim(),
-        link: safeUrl,
-        caption: safeUrl.replace(/^https?:\/\//, ""),
-        name: String(headline || "").trim(),
-        description: String(description || "").trim(),
-        call_to_action: {
-          type: normalizeCta(callToAction),
-          value: { link: safeUrl },
-        },
-      },
+      link_data: linkData,
     },
   };
 

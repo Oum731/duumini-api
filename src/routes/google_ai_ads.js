@@ -1,6 +1,6 @@
 // api/routes/google_ai_ads.js
 const { Router } = require("express");
-const { authRequired, isAdmin } = require("../middlewares/auth");
+const { authRequired, requireRole } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
 const { env } = require("../lib/env");
 
@@ -14,7 +14,7 @@ function isOff() {
  * POST /api/ads/google/generate
  * body: { objective, offer, url, audience, variants }
  */
-router.post("/google/generate", authRequired, isAdmin, async (req, res) => {
+router.post("/google/generate", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (isOff()) {
     return res.status(403).json({ error: "ai_mode_off" });
   }

@@ -1,6 +1,6 @@
 // src/routes/ai.js
 const { Router } = require("express");
-const { authRequired, isAdmin } = require("../middlewares/auth");
+const { authRequired, requireRole } = require("../middlewares/auth");
 const { runDuuminiAgent } = require("../ai/duuminiAgent");
 const { upsertDraft } = require("../lib/contentStore");
 const { env } = require("../lib/env");
@@ -28,7 +28,7 @@ function ensureAiOn(res) {
  * body: { slug, lang?, type?, current?, keywords?, internal_links? }
  * -> crée/maj un draft dans DB (content_items)
  */
-router.post("/seo/optimize-page", authRequired, isAdmin, async (req, res) => {
+router.post("/seo/optimize-page", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (!ensureAiOn(res)) return;
 
   const {
@@ -78,7 +78,7 @@ router.post("/seo/optimize-page", authRequired, isAdmin, async (req, res) => {
  * POST /api/ai/seo/generate-city-page (ADMIN)
  * body: { city, slug?, lang?, keywords? }
  */
-router.post("/seo/generate-city-page", authRequired, isAdmin, async (req, res) => {
+router.post("/seo/generate-city-page", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (!ensureAiOn(res)) return;
 
   const { city, slug, lang = "fr", keywords = [] } = req.body || {};
@@ -126,7 +126,7 @@ router.post("/seo/generate-city-page", authRequired, isAdmin, async (req, res) =
  * POST /api/ai/seo/audit (ADMIN)
  * body: { urls?: [] }
  */
-router.post("/seo/audit", authRequired, isAdmin, async (req, res) => {
+router.post("/seo/audit", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (!ensureAiOn(res)) return;
 
   try {
@@ -154,7 +154,7 @@ const DUUMINI_COPY_TASKS = [
  * body: { taskType, payload? }
  * -> génération de texte marketing (ads/campagnes/posts/planning), pas de persistance
  */
-router.post("/duumini", authRequired, isAdmin, async (req, res) => {
+router.post("/duumini", authRequired, requireRole("ADMIN"), async (req, res) => {
   if (!ensureAiOn(res)) return;
 
   const { taskType, payload = {} } = req.body || {};
