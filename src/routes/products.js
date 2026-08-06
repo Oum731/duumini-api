@@ -2786,4 +2786,127 @@ router.patch(
     }
   }
 );
+/* =========================
+ * Partage (OG tags) — pont serveur pour Facebook/WhatsApp/Instagram
+ * =========================
+ * Les crawlers de Facebook/WhatsApp n'exécutent pas le JS de la SPA : ils ne
+ * voient donc jamais les balises og:* posées côté client par <Seo> (voir
+ * duumini-web/src/components/Seo.tsx). Cette route sert une page HTML
+ * rendue côté serveur avec les vraies balises produit (image/titre/prix/
+ * description), puis redirige les humains vers la fiche produit réelle.
+ * L'hébergement frontend route déjà /share/product/:id vers ce chemin pour
+ * les User-Agents de bots (vérifié en prod : 404 avant cette implémentation
+ * faute de route ici, 302 pour les navigateurs normaux).
+ */
+const WEB_SITE_URL = "https://www.duumini.com";
+const DEFAULT_SHARE_IMAGE = "https://duumini.com/hero-stats.webp";
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function shortText(str, max) {
+  const s = String(str ?? "").trim();
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1).trimEnd() + "…";
+}
+
+function formatPriceLabel(product) {
+  const currency = product?.currency || "MAD";
+  const fmt = (n) =>
+    new Intl.NumberFormat("fr-FR", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(Number(n) || 0);
+
+  if (product?.has_promo && product?.promo_price != null) {
+    return `${fmt(product.promo_price)} au lieu de ${fmt(product.price)}`;
+  }
+  return fmt(product?.price);
+}
+
+async function shareProductHandler(req, res) {
+  const raw = String(req.params.idOrSlug || "").trim();
+  const asId = parseIdParam(raw);
+
+  try {
+    const pool = getPool();
+    const conn = await pool.getConnection();
+    let product = null;
+    try {
+      product = asId
+        ? await getProductFullBy(conn, pool, `WHERE p.id=? AND p.is_active=1`, [asId], {
+            wantVariants: false,
+            wantImages: false,
+          })
+        : await getProductFullBy(
+            conn,
+            pool,
+            `WHERE LOWER(TRIM(p.slug))=? AND p.is_active=1`,
+            [raw.toLowerCase()],
+            { wantVariants: false, wantImages: false }
+          );
+    } finally {
+      conn.release();
+    }
+
+    if (!product) {
+      return res.redirect(302, WEB_SITE_URL);
+    }
+
+    const canonicalUrl = `${WEB_SITE_URL}/products/${encodeURIComponent(raw)}`;
+    const title = escapeHtml(product.name || "Produit Duumini");
+    const priceLabel = formatPriceLabel(product);
+    const rawDesc = shortText(product.description || "", 140);
+    const description = escapeHtml(
+      rawDesc
+        ? `${priceLabel} — ${rawDesc}`
+        : `${priceLabel} — Découvrez ce produit sur DUUMINI, livré à travers l'Afrique.`
+    );
+    const image = escapeHtml(product.cover || DEFAULT_SHARE_IMAGE);
+    const safeCanonical = escapeHtml(canonicalUrl);
+
+    const html = `<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<title>${title} | Duumini</title>
+<meta name="description" content="${description}" />
+<link rel="canonical" href="${safeCanonical}" />
+<meta name="robots" content="noindex, nofollow" />
+<meta property="og:type" content="product" />
+<meta property="og:site_name" content="Duumini" />
+<meta property="og:title" content="${title}" />
+<meta property="og:description" content="${description}" />
+<meta property="og:image" content="${image}" />
+<meta property="og:url" content="${safeCanonical}" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="${title}" />
+<meta name="twitter:description" content="${description}" />
+<meta name="twitter:image" content="${image}" />
+<script>window.location.replace(${JSON.stringify(canonicalUrl)});</script>
+</head>
+<body>
+<p>Redirection vers <a href="${safeCanonical}">${title}</a>…</p>
+</body>
+</html>`;
+
+    res.set("Cache-Control", "public, max-age=600");
+    res.type("html").send(html);
+  } catch (e) {
+    res.redirect(302, WEB_SITE_URL);
+  }
+}
+
+const shareRouter = express.Router();
+shareRouter.get("/product/:idOrSlug", shareProductHandler);
+
 module.exports = router;
+module.exports.shareRouter = shareRouter;
