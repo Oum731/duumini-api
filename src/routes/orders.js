@@ -12,6 +12,7 @@ const {
   isVendor,
   isSupplier,
   isRestaurant,
+  isCommercial,
 } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { normPhone } = require("../utils/phone");
@@ -2606,7 +2607,11 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
   }
 });
 router.post("/admin", authRequired, async (req, res) => {
-  if (!isAdmin(req.user)) {
+  // ✅ Ouvert aux ADMIN (comme avant) et aux comptes COMMERCIAL, qui
+  // s'en servent pour déclarer leurs propres ventes (voir commercial_id
+  // plus bas — jamais pris depuis le body pour un commercial, uniquement
+  // req.user.id, pour éviter qu'il s'attribue les ventes d'un autre).
+  if (!isAdmin(req.user) && !isCommercial(req.user)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
@@ -2622,6 +2627,10 @@ router.post("/admin", authRequired, async (req, res) => {
     admin_discount = null,
     customer_role = null,
     affiliate_code = null,
+    // ✅ Un admin peut saisir une déclaration pour le compte d'un
+    // commercial (filet de sécurité) ; un commercial ne peut jamais
+    // choisir cette valeur lui-même, elle est ignorée dans son cas.
+    commercial_id: commercialIdInput = null,
   } = req.body || {};
 
   const customerId = Number(customer_id || 0);
@@ -2974,6 +2983,37 @@ router.post("/admin", authRequired, async (req, res) => {
       affiliatePack.orderCols,
       affiliatePack.orderMeta,
     );
+
+    // ✅ Attribution "commercial" : req.user.id si l'appelant est lui-même
+    // COMMERCIAL (jamais depuis le body), sinon commercial_id fourni par
+    // un admin qui saisit pour le compte d'un commercial (filet de
+    // sécurité, décision validée : la déclaration en propre reste le
+    // chemin par défaut).
+    const finalCommercialId = isCommercial(req.user)
+      ? req.user.id
+      : isAdmin(req.user) && commercialIdInput
+        ? Number(commercialIdInput) || null
+        : null;
+
+    if (finalCommercialId) {
+      const [[commercialProfile]] = await conn.query(
+        `SELECT commission_rate FROM commercial_profiles WHERE user_id = ? LIMIT 1`,
+        [finalCommercialId],
+      );
+      const commissionRate = commercialProfile
+        ? Number(commercialProfile.commission_rate)
+        : 0;
+      const commissionAmount = +(discountedItemsAmount * commissionRate).toFixed(2);
+
+      cols.push(
+        "commercial_id",
+        "commercial_commission_rate",
+        "commercial_commission_amount",
+        "commercial_commission_status",
+      );
+      placeholders.push("?", "?", "?", "?");
+      vals.push(finalCommercialId, commissionRate, commissionAmount, "PENDING");
+    }
 
     cols.push("country_code");
     placeholders.push("?");

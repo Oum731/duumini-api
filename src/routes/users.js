@@ -33,6 +33,7 @@ function normalizeRole(role) {
     "FOURNISSEUR",
     "RESTAURANT",
     "LIVREUR",
+    "COMMERCIAL",
     "ADMIN",
   ];
   return ROLES.includes(r) ? r : "MEMBER";
@@ -341,11 +342,22 @@ router.post("/", authRequired, adminRequired, async (req, res) => {
 
     const hash = await bcrypt.hash(String(password), 10);
 
-    await pool.query(
+    const [result] = await pool.query(
       `INSERT INTO users (phone, password, role, first_name, last_name)
        VALUES (?,?,?,?,?)`,
       [cleanPhone, hash, _role, first_name || null, last_name || null]
     );
+
+    // ✅ Pas de flux de candidature pour COMMERCIAL (contrairement à
+    // LIVREUR) : l'admin crée le compte directement ici, donc c'est ici
+    // qu'on pose la ligne commercial_profiles (taux par défaut,
+    // ajustable ensuite depuis CommercialsAdminPage).
+    if (_role === "COMMERCIAL") {
+      await pool.query(
+        `INSERT INTO commercial_profiles (user_id) VALUES (?)`,
+        [result.insertId]
+      );
+    }
 
     return res.status(201).json({ ok: true });
   } catch (e) {
@@ -462,6 +474,13 @@ router.patch("/:id/role", authRequired, adminRequired, async (req, res) => {
 
   try {
     await pool.query(`UPDATE users SET role=? WHERE id=?`, [_role, id]);
+
+    if (_role === "COMMERCIAL") {
+      await pool.query(
+        `INSERT IGNORE INTO commercial_profiles (user_id) VALUES (?)`,
+        [id]
+      );
+    }
 
     const [rows] = await pool.query(
       `SELECT id, phone, role, first_name, last_name, avatar, ville, commune, quartier, sexe, created_at

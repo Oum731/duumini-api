@@ -242,6 +242,8 @@ const isRestaurant = (u) => getActingRole(u) === "RESTAURANT";
 
 const isLivreur = (u) => getActingRole(u) === "LIVREUR";
 
+const isCommercial = (u) => getActingRole(u) === "COMMERCIAL";
+
 module.exports = {
   authRequired,
   optionalAuth,
@@ -251,4 +253,5 @@ module.exports = {
   isSupplier,
   isRestaurant,
   isLivreur,
+  isCommercial,
 };
