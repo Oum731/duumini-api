@@ -2,7 +2,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const bcrypt = require("bcryptjs");
 const { signAccess, signRefresh, verifyRefresh } = require("../utils/jwt");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, getProfileFlags } = require("../middlewares/auth");
 const { normPhone } = require("../utils/phone");
 
 const router = Router();
@@ -149,10 +149,18 @@ router.post("/login", async (req, res) => {
       role: user.role,
     });
 
+    // ✅ Le hash bcrypt n'a rien à faire côté client — corrigé au passage
+    // (le SELECT plus haut le récupère pour bcrypt.compare, mais il ne
+    // doit jamais quitter le serveur).
+    delete user.password;
+
+    // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
+    const profileFlags = await getProfileFlags(pool, user.id);
+
     return res.json({
       access_token,
       refresh_token,
-      user,
+      user: { ...user, ...profileFlags },
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });

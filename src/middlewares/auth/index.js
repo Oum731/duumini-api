@@ -41,6 +41,27 @@ function toPosInt(x) {
 }
 
 /**
+ * ✅ Accès double rôle (ex. un livreur qui devient aussi commercial) :
+ * l'accès aux espaces livreur/commercial ne se base plus uniquement sur
+ * `users.role` (une seule valeur) mais aussi sur la présence d'une ligne
+ * de profil dans la table dédiée — les deux peuvent coexister pour un
+ * même user_id, `users.role` reste juste le "rôle principal" affiché.
+ * Utilisé à la fois par attachUserOrThrow (requêtes authentifiées) et par
+ * le login (pour renvoyer les flags dès la connexion).
+ */
+async function getProfileFlags(pool, userId) {
+  const [[lp]] = await pool.query(
+    "SELECT 1 x FROM livreur_profiles WHERE user_id=? LIMIT 1",
+    [userId]
+  );
+  const [[cp]] = await pool.query(
+    "SELECT 1 x FROM commercial_profiles WHERE user_id=? LIMIT 1",
+    [userId]
+  );
+  return { has_livreur_profile: !!lp, has_commercial_profile: !!cp };
+}
+
+/**
  * ✅ Impersonation support (robuste)
  * - payload peut contenir: actor_admin_id, impersonate_shop_id, impersonate_user_id
  * - DB = source de vérité pour role du "vrai" token owner (admin/user)
@@ -153,6 +174,8 @@ async function attachUserOrThrow(req) {
     }
   }
 
+  const profileFlags = await getProfileFlags(pool, effective_user_id);
+
   req.user = {
     // ✅ identité réelle (token owner)
     id: Number(u.id),
@@ -170,6 +193,9 @@ async function attachUserOrThrow(req) {
     effective_user_id: Number(effective_user_id),
     effective_role: String(effective_role || role),
     effective_shop_id: effective_shop_id != null ? Number(effective_shop_id) : null,
+
+    // ✅ accès double rôle (voir getProfileFlags)
+    ...profileFlags,
   };
 }
 
@@ -240,14 +266,42 @@ const isSupplier = (u) => {
 
 const isRestaurant = (u) => getActingRole(u) === "RESTAURANT";
 
-const isLivreur = (u) => getActingRole(u) === "LIVREUR";
+// ✅ Accès double rôle : vrai si rôle principal correspond OU si l'utilisateur
+// a une ligne de profil dans la table dédiée (voir getProfileFlags) — un
+// livreur qui devient aussi commercial garde role='LIVREUR' mais passe ces
+// deux checks.
+const isLivreur = (u) => getActingRole(u) === "LIVREUR" || !!u?.has_livreur_profile;
 
-const isCommercial = (u) => getActingRole(u) === "COMMERCIAL";
+const isCommercial = (u) =>
+  getActingRole(u) === "COMMERCIAL" || !!u?.has_commercial_profile;
+
+// ✅ Garde générique basée sur une fonction de capacité (isLivreur/isCommercial/...)
+// plutôt que sur un match de rôle strict — même forme que requireRole pour
+// rester un remplacement direct sur les routes en libre-service.
+function requireCapability(checkFn, label) {
+  return async (req, res, next) => {
+    if (req.method === "OPTIONS") return next();
+    try {
+      if (!req.user) await attachUserOrThrow(req);
+      if (!checkFn(req.user)) {
+        return res
+          .status(403)
+          .json({ error: `Forbidden: requires ${label} capability` });
+      }
+      return next();
+    } catch (e) {
+      const status = e?.status || 401;
+      return res.status(status).json({ error: e?.message || "Unauthorized" });
+    }
+  };
+}
 
 module.exports = {
   authRequired,
   optionalAuth,
   requireRole,
+  requireCapability,
+  getProfileFlags,
   isAdmin,
   isVendor,
   isSupplier,

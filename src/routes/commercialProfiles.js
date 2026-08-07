@@ -8,14 +8,14 @@
 const { Router } = require("express");
 
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, requireCapability, isCommercial } = require("../middlewares/auth");
 
 const router = Router();
 
 /* ========= GET /me ========= */
 /* Le commercial connecté consulte son propre CA du mois, ses commandes,
    ses clients et son solde de commission dû. */
-router.get("/me", authRequired, requireRole("COMMERCIAL"), async (req, res) => {
+router.get("/me", authRequired, requireCapability(isCommercial, "COMMERCIAL"), async (req, res) => {
   try {
     const pool = getPool();
 

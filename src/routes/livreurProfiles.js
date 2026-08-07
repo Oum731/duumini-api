@@ -7,7 +7,7 @@
 const { Router } = require("express");
 
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, requireCapability, isLivreur } = require("../middlewares/auth");
 const { findZoneForPoint } = require("../utils/zones");
 
 const router = Router();
@@ -25,7 +25,7 @@ function isValidCoord(lat, lng) {
 
 /* ========= GET /me ========= */
 /* Le livreur connecté consulte son propre statut + solde dû. */
-router.get("/me", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.get("/me", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const pool = getPool();
 
@@ -89,7 +89,7 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
 /* Le livreur connecté diffuse sa position pendant qu'il est en ligne — sert
    au matching de proximité pour de nouvelles courses (basse fréquence,
    distinct du suivi live d'une course active sur courierTrips.js). */
-router.patch("/me/position", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.patch("/me/position", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const lat = Number(req.body?.lat);
     const lng = Number(req.body?.lng);
@@ -117,7 +117,7 @@ router.patch("/me/position", authRequired, requireRole("LIVREUR"), async (req, r
 /* ========= PATCH /me/availability ========= */
 /* Le livreur connecté se déclare disponible/hors ligne pour de nouvelles
    courses (n'affecte pas les courses déjà acceptées). */
-router.patch("/me/availability", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.patch("/me/availability", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const isAvailable = !!req.body?.is_available;
 

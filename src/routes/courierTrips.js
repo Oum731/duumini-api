@@ -10,7 +10,7 @@
 const { Router } = require("express");
 
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, requireCapability, isLivreur } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { normalizeCountryCode } = require("../utils/country");
 const { normPhone } = require("../utils/phone");
@@ -272,7 +272,7 @@ router.post("/guest", async (req, res) => {
 
 /* ========= GET /available ========= */
 /* Courses en attente d'un livreur, dans le pays du livreur connecté. */
-router.get("/available", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.get("/available", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const pool = getPool();
     const { page, pageSize, offset, limit } = getPagination(req);
@@ -359,7 +359,7 @@ router.get("/:id", authRequired, async (req, res) => {
 
 /* ========= PATCH /:id/accept ========= */
 /* Un livreur accepte une course ouverte — atomique pour éviter la double-acceptation. */
-router.patch("/:id/accept", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.patch("/:id/accept", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const id = Number(req.params.id) || 0;
     if (!id) return res.status(400).json({ error: "Invalid id" });
@@ -409,7 +409,7 @@ router.patch("/:id/accept", authRequired, requireRole("LIVREUR"), async (req, re
 
 /* ========= PATCH /:id/status ========= */
 /* Progression ACCEPTED -> IN_PROGRESS -> DELIVERED, par le livreur assigné. */
-router.patch("/:id/status", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.patch("/:id/status", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const id = Number(req.params.id) || 0;
     const status = String(req.body?.status || "").toUpperCase();
@@ -493,7 +493,7 @@ router.patch("/:id/cancel", authRequired, async (req, res) => {
 /* Le livreur assigné diffuse sa position pendant une course active — carte
    de suivi client en direct. Fréquent (quelques secondes), donc uniquement
    l'event WS dédié, jamais de push (pas de notifyUser ici). */
-router.patch("/:id/position", authRequired, requireRole("LIVREUR"), async (req, res) => {
+router.patch("/:id/position", authRequired, requireCapability(isLivreur, "LIVREUR"), async (req, res) => {
   try {
     const id = Number(req.params.id) || 0;
     if (!id) return res.status(400).json({ error: "Invalid id" });
