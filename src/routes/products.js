@@ -1961,6 +1961,7 @@ router.post(
       brand,
       slug,
       price,
+      supplier_price_ht,
       currency,
       description,
       conditionnement,
@@ -2113,7 +2114,7 @@ router.post(
       await conn.beginTransaction();
 
       let insertSql = `INSERT INTO products
-        (shop_id, country_code, category_id, sub_category_id, name, brand, slug, price, currency, description, conditionnement, stock, is_featured,
+        (shop_id, country_code, category_id, sub_category_id, name, brand, slug, price, supplier_price_ht, currency, description, conditionnement, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active, vertical`;
 
@@ -2128,6 +2129,7 @@ router.post(
         brand ? String(brand).trim() || null : null,
         makeSlug(),
         Number(price),
+        supplier_price_ht != null && supplier_price_ht !== "" ? Number(supplier_price_ht) : null,
         currency || "MAD",
         description || null,
         conditionnement ? String(conditionnement).trim() || null : null,
@@ -2255,6 +2257,7 @@ router.put(
       name,
       brand,
       price,
+      supplier_price_ht,
       currency,
       description,
       conditionnement,
@@ -2380,6 +2383,7 @@ router.put(
            name                = COALESCE(?, name),
            brand               = COALESCE(?, brand),
            price               = COALESCE(?, price),
+           supplier_price_ht   = COALESCE(?, supplier_price_ht),
            currency            = COALESCE(?, currency),
            description         = COALESCE(?, description),
            conditionnement     = COALESCE(?, conditionnement),
@@ -2417,6 +2421,7 @@ router.put(
           name ?? null,
           brand !== undefined ? (String(brand).trim() || null) : null,
           price != null ? Number(price) : null,
+          supplier_price_ht != null && supplier_price_ht !== "" ? Number(supplier_price_ht) : null,
           currency ?? null,
           description ?? null,
           conditionnement !== undefined ? (String(conditionnement).trim() || null) : null,
