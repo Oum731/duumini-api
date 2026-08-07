@@ -100,6 +100,14 @@ const env = {
    * =======================*/
   PUSHY_API_KEY: pick("PUSHY_API_KEY") || "",
 
+  /* =========================
+   * CATALOGUE B2B (optionnel) — code d'accès partagé aux
+   * fournisseurs/partenaires pour /api/products/b2b-catalogue.
+   * Pas une vraie authentification, juste un frein simple contre la
+   * découverte accidentelle/indexation (décision produit validée).
+   * =======================*/
+  CATALOG_B2B_ACCESS_CODE: pick("CATALOG_B2B_ACCESS_CODE") || "",
+
   APP_PUBLIC_URL: process.env.APP_PUBLIC_URL || "http://localhost:4000",
 
   LISTENERS_ENABLED:
@@ -161,6 +169,7 @@ function logEnv() {
   console.log("[ENV] META_AD_ACCESS_TOKEN =", mask(env.META_AD_ACCESS_TOKEN));
   console.log("[ENV] META_PAGE_ID =", mask(env.META_PAGE_ID));
   console.log("[ENV] META_DEFAULT_ADSET_ID =", mask(env.META_DEFAULT_ADSET_ID));
+  console.log("[ENV] CATALOG_B2B_ACCESS_CODE =", mask(env.CATALOG_B2B_ACCESS_CODE));
 }
 
 module.exports = { env, pick, required, requireIf, logEnv };

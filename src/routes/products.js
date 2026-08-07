@@ -645,6 +645,21 @@ function stripDuuminiRateFromProduct(row) {
   return { ...rest, price: clientPrice, vendor_price: vendorNet };
 }
 
+// ✅ Champs de prix internes (coût d'achat, prix partenaire B2B) — ne
+// doivent jamais être exposés par les routes publiques (catalogue grand
+// public, fiche produit publique, top ventes). stripDuuminiRateFromProduct
+// ci-dessus ne filtre que duumini_rate ; ces deux champs restaient donc
+// visibles publiquement avant ce correctif. Les routes de gestion
+// (admin/vendeur) continuent de les recevoir intacts.
+const INTERNAL_PRICE_FIELDS = ["supplier_price_ht", "partner_price_ht"];
+
+function omitInternalPriceFields(row) {
+  if (!row) return row;
+  const clean = { ...row };
+  for (const f of INTERNAL_PRICE_FIELDS) delete clean[f];
+  return clean;
+}
+
 async function resolveSubCategory(conn, { sub_category_id, category_id }) {
   const sid = Number(sub_category_id) || 0;
   if (!sid) return null;
@@ -1022,6 +1037,12 @@ async function listProducts(pool, opts) {
   rows = await attachVariantsToProducts(pool, rows, {
     includeVariants: !!includeVariants,
   });
+
+  // ✅ Catalogue grand public : jamais de coût interne / prix partenaire
+  // B2B dans la réponse, quel que soit l'appelant (voir omitInternalPriceFields).
+  if (catalogueMode === "PUBLIC_CLIENT") {
+    rows = rows.map(omitInternalPriceFields);
+  }
 
   return { rows, total };
 }
@@ -1513,7 +1534,7 @@ async function getPublicBySlugHandler(req, res, next) {
 
     if (!full) return res.status(404).json({ error: "Not found" });
 
-    res.json(full);
+    res.json(omitInternalPriceFields(full));
   } catch (e) {
     next(e);
   } finally {
@@ -1543,7 +1564,7 @@ async function getPublicByIdHandler(req, res, next) {
 
     if (!full) return res.status(404).json({ error: "Not found" });
 
-    res.json(full);
+    res.json(omitInternalPriceFields(full));
   } catch (e) {
     next(e);
   } finally {
@@ -1651,10 +1672,10 @@ async function topOrderedHandler(req, res, next) {
 
     const mapped = (rowsRaw || []).map((r) => {
       const base = withPromoComputed(stripDuuminiRateFromProduct(r));
-      return {
+      return omitInternalPriceFields({
         ...base,
         shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
-      };
+      });
     });
 
     res.json(withCities(mapped, citiesCol));
@@ -1712,13 +1733,59 @@ async function topRatedHandler(req, res, next) {
 
     const mapped = (rowsRaw || []).map((r) => {
       const base = withPromoComputed(stripDuuminiRateFromProduct(r));
-      return {
+      return omitInternalPriceFields({
         ...base,
         shop_type: r.shop_type ? normalizeShopType(r.shop_type) : null,
-      };
+      });
     });
 
     res.json(withCities(mapped, citiesCol));
+  } catch (e) {
+    next(e);
+  }
+}
+
+// ✅ Catalogue B2B (book fournisseurs/partenaires) — protégé par un code
+// d'accès partagé (env.CATALOG_B2B_ACCESS_CODE), pas par une vraie
+// authentification. SELECT explicite et minimal : ne réutilise jamais
+// p.*/baseSelectSql pour éviter tout risque d'exposer un futur champ
+// interne par erreur (voir omitInternalPriceFields plus haut pour le
+// même principe côté catalogue public).
+async function b2bCatalogueHandler(req, res, next) {
+  if (!env.CATALOG_B2B_ACCESS_CODE) {
+    return res.status(503).json({ error: "Catalogue B2B non configuré" });
+  }
+
+  const code = String(req.query.code || "");
+  if (code !== env.CATALOG_B2B_ACCESS_CODE) {
+    return res.status(403).json({ error: "Code d'accès invalide" });
+  }
+
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.brand,
+        p.conditionnement,
+        p.country_code,
+        p.partner_price_ht,
+        c.name AS category_name,
+        (SELECT url
+           FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY sort_order ASC, id ASC
+          LIMIT 1) AS cover
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.is_active = 1
+      ORDER BY p.created_at DESC
+      `
+    );
+
+    res.json({ items: rows || [] });
   } catch (e) {
     next(e);
   }
@@ -1962,6 +2029,7 @@ router.post(
       slug,
       price,
       supplier_price_ht,
+      partner_price_ht,
       currency,
       description,
       conditionnement,
@@ -2114,7 +2182,7 @@ router.post(
       await conn.beginTransaction();
 
       let insertSql = `INSERT INTO products
-        (shop_id, country_code, category_id, sub_category_id, name, brand, slug, price, supplier_price_ht, currency, description, conditionnement, stock, is_featured,
+        (shop_id, country_code, category_id, sub_category_id, name, brand, slug, price, supplier_price_ht, partner_price_ht, currency, description, conditionnement, stock, is_featured,
          promo_eligible, promo_discount_type, promo_discount_value, promo_free_delivery,
          duumini_rate, is_active, vertical`;
 
@@ -2130,6 +2198,7 @@ router.post(
         makeSlug(),
         Number(price),
         supplier_price_ht != null && supplier_price_ht !== "" ? Number(supplier_price_ht) : null,
+        partner_price_ht != null && partner_price_ht !== "" ? Number(partner_price_ht) : null,
         currency || "MAD",
         description || null,
         conditionnement ? String(conditionnement).trim() || null : null,
@@ -2258,6 +2327,7 @@ router.put(
       brand,
       price,
       supplier_price_ht,
+      partner_price_ht,
       currency,
       description,
       conditionnement,
@@ -2384,6 +2454,7 @@ router.put(
            brand               = COALESCE(?, brand),
            price               = COALESCE(?, price),
            supplier_price_ht   = COALESCE(?, supplier_price_ht),
+           partner_price_ht    = COALESCE(?, partner_price_ht),
            currency            = COALESCE(?, currency),
            description         = COALESCE(?, description),
            conditionnement     = COALESCE(?, conditionnement),
@@ -2422,6 +2493,7 @@ router.put(
           brand !== undefined ? (String(brand).trim() || null) : null,
           price != null ? Number(price) : null,
           supplier_price_ht != null && supplier_price_ht !== "" ? Number(supplier_price_ht) : null,
+          partner_price_ht != null && partner_price_ht !== "" ? Number(partner_price_ht) : null,
           currency ?? null,
           description ?? null,
           conditionnement !== undefined ? (String(conditionnement).trim() || null) : null,
@@ -2731,6 +2803,10 @@ router.get(
 router.get("/", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listHandler);
 router.get("/african-food", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listFoodHandler);
 router.get("/african-market", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), listMarketHandler);
+
+// Pas de cachedJson ici : la réponse dépend du code d'accès fourni
+// (403/503 selon les cas), pas juste des paramètres de filtre habituels.
+router.get("/b2b-catalogue", b2bCatalogueHandler);
 
 router.get("/promotions", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), promotionsHandler);
 router.get("/top-ordered", cachedJson("PUBLIC", PRODUCTS_CACHE_TTL_MS), topOrderedHandler);
