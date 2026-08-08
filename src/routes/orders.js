@@ -2857,9 +2857,22 @@ router.post("/admin", authRequired, async (req, res) => {
     const orderTotal = discountedItemsAmount + deliveryFee;
     const totalCommission = computeDuuminiCommission(discountedItemsAmount);
 
+    // ✅ Commercial et affiliation ne doivent jamais se chevaucher sur une
+    // même commande (une vente ne peut pas être à la fois déclarée par un
+    // commercial ET créditée à un affilié) — calculé ici, avant l'affilié,
+    // pour pouvoir ignorer tout affiliate_code dès qu'un commercial est
+    // rattaché. Filet de sécurité serveur : le frontend ne doit déjà plus
+    // jamais envoyer les deux ensemble (voir services/orders.ts), mais on
+    // ne fait pas confiance uniquement au client sur une question d'argent.
+    const finalCommercialIdForAffiliateGuard = isCommercial(req.user)
+      ? req.user.id
+      : isAdmin(req.user) && commercialIdInput
+        ? Number(commercialIdInput) || null
+        : null;
+
     const affiliatePack = await buildAffiliateOrderMeta(
       conn,
-      affiliate_code,
+      finalCommercialIdForAffiliateGuard ? null : affiliate_code,
       discountedItemsAmount,
     );
 
@@ -2988,12 +3001,9 @@ router.post("/admin", authRequired, async (req, res) => {
     // COMMERCIAL (jamais depuis le body), sinon commercial_id fourni par
     // un admin qui saisit pour le compte d'un commercial (filet de
     // sécurité, décision validée : la déclaration en propre reste le
-    // chemin par défaut).
-    const finalCommercialId = isCommercial(req.user)
-      ? req.user.id
-      : isAdmin(req.user) && commercialIdInput
-        ? Number(commercialIdInput) || null
-        : null;
+    // chemin par défaut). Déjà calculé plus haut pour pouvoir exclure
+    // l'affiliation dès qu'un commercial est rattaché — même valeur.
+    const finalCommercialId = finalCommercialIdForAffiliateGuard;
 
     if (finalCommercialId) {
       const [[commercialProfile]] = await conn.query(
