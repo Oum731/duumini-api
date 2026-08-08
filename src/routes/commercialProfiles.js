@@ -133,17 +133,25 @@ router.get(
       if (!userId) return res.status(400).json({ error: "Invalid userId" });
 
       const pool = getPool();
+      // ✅ Beaucoup de commandes déclarées par un commercial sont des
+      // commandes invité (orders.user_id NULL, ex: #609/Désiré) : le nom/
+      // téléphone du compte (u.*) est alors vide. On retombe sur
+      // orders.contact (le nom réellement saisi pour cette commande) — et
+      // on regroupe par téléphone du contact quand il n'y a pas de compte,
+      // pour ne pas éclater/mélanger les clients invités entre eux.
       const [rows] = await pool.query(
         `SELECT
-           o.user_id AS client_user_id,
-           u.first_name, u.last_name, u.phone,
+           MAX(o.user_id) AS client_user_id,
+           COALESCE(MAX(u.first_name), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.first_name'))), 'null')) AS first_name,
+           COALESCE(MAX(u.last_name), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.last_name'))), 'null')) AS last_name,
+           COALESCE(MAX(u.phone), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone'))), 'null')) AS phone,
            COUNT(*) AS orders_count,
            SUM(o.total) AS revenue_total,
            MAX(o.created_at) AS last_order_at
          FROM orders o
          LEFT JOIN users u ON u.id = o.user_id
         WHERE o.commercial_id = ?
-        GROUP BY o.user_id, u.first_name, u.last_name, u.phone
+        GROUP BY COALESCE(o.user_id, JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone')))
         ORDER BY revenue_total DESC`,
         [userId]
       );
