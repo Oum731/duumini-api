@@ -1028,6 +1028,17 @@ async function getOrderWithPerm(conn, id, user) {
       );
 
       if (!own) return { status: 403, error: "Forbidden" };
+    } else if (
+      // ✅ Un commercial peut consulter une commande qui lui est rattachée
+      // (orders.commercial_id), même si orders.user_id ne pointe pas vers
+      // son propre compte (souvent NULL/invité) — nécessaire pour qu'il
+      // puisse reconstruire un reçu WhatsApp identique à celui d'un admin
+      // (GET /api/orders/:id, seule route qui renvoie items+totals complets).
+      isCommercial(user) &&
+      orderRaw.commercial_id != null &&
+      String(orderRaw.commercial_id) === String(user.id)
+    ) {
+      // ok
     } else if (String(orderRaw.user_id) !== String(user.id)) {
       return { status: 403, error: "Forbidden" };
     }
@@ -1102,14 +1113,26 @@ async function getVendorsForOrder(orderId) {
   return (rows || []).map((r) => r.user_id);
 }
 
-async function enqueueOrderCreatedNotifications(orderId, total, currency) {
+async function enqueueOrderCreatedNotifications(
+  orderId,
+  total,
+  currency,
+  commercialId = null,
+) {
   const [adminIds, vendorIds] = await Promise.all([
     getAdminUserIds(),
     getVendorsForOrder(orderId),
   ]);
 
+  // ✅ Le commercial rattaché (s'il y en a un) doit aussi être notifié —
+  // sinon une vente déclarée pour son compte par un admin passe
+  // silencieusement, invisible tant qu'il ne recharge pas /commercial.
   const allUserIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
+    new Set([
+      ...(adminIds || []),
+      ...(vendorIds || []),
+      ...(commercialId ? [commercialId] : []),
+    ]),
   );
   if (!allUserIds.length) return;
 
@@ -1125,6 +1148,7 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
     total: totalNum,
     currency: cur,
     status: "OPEN",
+    commercial_id: commercialId || null,
   };
 
   const payload = JSON.stringify(payloadObj);
@@ -1144,7 +1168,12 @@ async function enqueueOrderCreatedNotifications(orderId, total, currency) {
   );
 }
 
-async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
+async function emitOrderCreatedRealtimeWSOnly(
+  orderId,
+  total,
+  currency,
+  commercialId = null,
+) {
   let notifyUser;
   try {
     ({ notifyUser } = require("../services/notify"));
@@ -1157,8 +1186,15 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
     getVendorsForOrder(orderId),
   ]);
 
+  // ✅ Même raison que ci-dessus : sans ça, ni le tableau de bord du
+  // commercial (CommercialHome) ni la liste admin (CommercialsAdminPage)
+  // ne se rafraîchissent tout seuls quand une vente lui est attribuée.
   const userIds = Array.from(
-    new Set([...(adminIds || []), ...(vendorIds || [])]),
+    new Set([
+      ...(adminIds || []),
+      ...(vendorIds || []),
+      ...(commercialId ? [commercialId] : []),
+    ]),
   );
   if (!userIds.length) return;
 
@@ -1174,6 +1210,7 @@ async function emitOrderCreatedRealtimeWSOnly(orderId, total, currency) {
     total: totalNum,
     currency: cur,
     status: "OPEN",
+    commercial_id: commercialId || null,
   };
 
   await Promise.all(
@@ -3152,11 +3189,21 @@ router.post("/admin", authRequired, async (req, res) => {
     await conn.commit();
 
     try {
-      await enqueueOrderCreatedNotifications(orderId, orderTotal, currency);
+      await enqueueOrderCreatedNotifications(
+        orderId,
+        orderTotal,
+        currency,
+        finalCommercialId,
+      );
     } catch {}
 
     try {
-      await emitOrderCreatedRealtimeWSOnly(orderId, orderTotal, currency);
+      await emitOrderCreatedRealtimeWSOnly(
+        orderId,
+        orderTotal,
+        currency,
+        finalCommercialId,
+      );
     } catch {}
 
     try {
