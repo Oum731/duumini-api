@@ -200,9 +200,11 @@ router.patch("/:userId/rate", authRequired, requireRole("ADMIN"), async (req, re
 });
 
 /* ========= PATCH /:userId/settle ========= */
-/* Admin : règle en une fois tout le solde de commission dû par ce
-   commercial (patron exact de livreurProfiles.js, orders au lieu de
-   courier_trips). */
+/* Admin : confirme le versement en une fois de toute la commission due
+   PAR DUUMINI à ce commercial (pourcentage de ses ventes, comme pour un
+   affilié — direction inverse de livreurProfiles.js où c'est le livreur
+   qui doit une commission à DUUMINI sur les courses encaissées en cash ;
+   même mécanique de flag PENDING -> PAID, sens différent). */
 router.patch("/:userId/settle", authRequired, requireRole("ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.userId) || 0;
