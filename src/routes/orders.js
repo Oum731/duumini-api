@@ -1030,13 +1030,17 @@ async function getOrderWithPerm(conn, id, user) {
       if (!own) return { status: 403, error: "Forbidden" };
     } else if (
       // ✅ Un commercial peut consulter une commande qui lui est rattachée
-      // (orders.commercial_id), même si orders.user_id ne pointe pas vers
-      // son propre compte (souvent NULL/invité) — nécessaire pour qu'il
-      // puisse reconstruire un reçu WhatsApp identique à celui d'un admin
+      // (orders.commercial_id) même si orders.user_id ne pointe pas vers
+      // son propre compte (souvent NULL/invité), OU une commande qu'il a
+      // lui-même déclarée (orders.created_by_admin_id) même si elle est
+      // créditée à un collègue ou à DUUMINI — sinon il ne peut plus
+      // récupérer sa propre déclaration pour en reconstruire le reçu
       // (GET /api/orders/:id, seule route qui renvoie items+totals complets).
       isCommercial(user) &&
-      orderRaw.commercial_id != null &&
-      String(orderRaw.commercial_id) === String(user.id)
+      ((orderRaw.commercial_id != null &&
+        String(orderRaw.commercial_id) === String(user.id)) ||
+        (orderRaw.created_by_admin_id != null &&
+          String(orderRaw.created_by_admin_id) === String(user.id)))
     ) {
       // ok
     } else if (String(orderRaw.user_id) !== String(user.id)) {
@@ -1045,6 +1049,22 @@ async function getOrderWithPerm(conn, id, user) {
   }
 
   const order = stripCommissionFromOrderRow(orderRaw, user);
+
+  // ✅ Nom du commercial responsable de la vente, pour le reçu ("Vendu
+  // par : <Nom>"). order.commercial_id n'est qu'un id brut — le reçu a
+  // besoin d'un nom lisible. Si pas de commercial rattaché, le frontend
+  // affiche "DUUMINI" (vente directe) — voir OrderReceipt.tsx/orderUtils.ts.
+  if (order.commercial_id) {
+    const [[commercialUser]] = await conn.query(
+      `SELECT first_name, last_name FROM users WHERE id = ? LIMIT 1`,
+      [order.commercial_id],
+    );
+    order.commercial_seller_name = commercialUser
+      ? `${commercialUser.first_name || ""} ${commercialUser.last_name || ""}`.trim() || null
+      : null;
+  } else {
+    order.commercial_seller_name = null;
+  }
 
   let itemsSql = `
     SELECT
@@ -2645,9 +2665,8 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
 });
 router.post("/admin", authRequired, async (req, res) => {
   // ✅ Ouvert aux ADMIN (comme avant) et aux comptes COMMERCIAL, qui
-  // s'en servent pour déclarer leurs propres ventes (voir commercial_id
-  // plus bas — jamais pris depuis le body pour un commercial, uniquement
-  // req.user.id, pour éviter qu'il s'attribue les ventes d'un autre).
+  // s'en servent pour déclarer leurs propres ventes ou celles d'un
+  // collègue (voir commercial_id plus bas).
   if (!isAdmin(req.user) && !isCommercial(req.user)) {
     return res.status(403).json({ error: "Forbidden" });
   }
@@ -2664,10 +2683,11 @@ router.post("/admin", authRequired, async (req, res) => {
     admin_discount = null,
     customer_role = null,
     affiliate_code = null,
-    // ✅ Un admin peut saisir une déclaration pour le compte d'un
-    // commercial (filet de sécurité) ; un commercial ne peut jamais
-    // choisir cette valeur lui-même, elle est ignorée dans son cas.
-    commercial_id: commercialIdInput = null,
+    // ✅ Pas de valeur par défaut ici (volontaire) : il faut pouvoir
+    // distinguer "champ absent" (undefined → self par défaut pour un
+    // commercial) de "explicitement vide/0/null" (→ DUUMINI, vente
+    // directe, aucun commercial crédité). Voir finalCommercialIdForAffiliateGuard.
+    commercial_id: commercialIdInput,
   } = req.body || {};
 
   const customerId = Number(customer_id || 0);
@@ -2901,8 +2921,20 @@ router.post("/admin", authRequired, async (req, res) => {
     // rattaché. Filet de sécurité serveur : le frontend ne doit déjà plus
     // jamais envoyer les deux ensemble (voir services/orders.ts), mais on
     // ne fait pas confiance uniquement au client sur une question d'argent.
+    //
+    // ✅ Un commercial peut désormais aussi préciser à qui créditer la
+    // vente (lui-même par défaut, un autre commercial, ou personne/DUUMINI
+    // pour une vente directe) — même logique que pour un admin, décision
+    // produit validée. commercial_id absent du body → self (comportement
+    // historique inchangé pour les appelants qui ne l'envoient pas) ;
+    // valeur falsy explicite (0/null/"") → DUUMINI ; nombre positif →
+    // ce commercial précis (soi-même ou un collègue).
     const finalCommercialIdForAffiliateGuard = isCommercial(req.user)
-      ? req.user.id
+      ? commercialIdInput === undefined
+        ? req.user.id
+        : commercialIdInput
+          ? Number(commercialIdInput) || null
+          : null
       : isAdmin(req.user) && commercialIdInput
         ? Number(commercialIdInput) || null
         : null;
@@ -3034,11 +3066,8 @@ router.post("/admin", authRequired, async (req, res) => {
       affiliatePack.orderMeta,
     );
 
-    // ✅ Attribution "commercial" : req.user.id si l'appelant est lui-même
-    // COMMERCIAL (jamais depuis le body), sinon commercial_id fourni par
-    // un admin qui saisit pour le compte d'un commercial (filet de
-    // sécurité, décision validée : la déclaration en propre reste le
-    // chemin par défaut). Déjà calculé plus haut pour pouvoir exclure
+    // ✅ Attribution "commercial" — déjà calculé plus haut (voir
+    // finalCommercialIdForAffiliateGuard) pour pouvoir exclure
     // l'affiliation dès qu'un commercial est rattaché — même valeur.
     const finalCommercialId = finalCommercialIdForAffiliateGuard;
 

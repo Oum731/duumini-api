@@ -61,6 +61,33 @@ router.get("/me", authRequired, requireCapability(isCommercial, "COMMERCIAL"), a
   }
 });
 
+/* ========= GET /directory ========= */
+/* Un commercial consulte la liste (id + nom, rien de financier) de tous
+   les commerciaux — pour pouvoir, lors d'une déclaration de vente,
+   créditer un collègue plutôt que lui-même. Volontairement séparé de
+   GET / (ADMIN only, expose CA/commission de chacun) — un commercial ne
+   doit pas voir les chiffres des autres, juste pouvoir les nommer. */
+router.get(
+  "/directory",
+  authRequired,
+  requireCapability(isCommercial, "COMMERCIAL"),
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const [rows] = await pool.query(
+        `SELECT cp.user_id, u.first_name, u.last_name
+           FROM commercial_profiles cp
+           JOIN users u ON u.id = cp.user_id
+          ORDER BY u.first_name, u.last_name`
+      );
+      res.json({ items: rows });
+    } catch (e) {
+      console.error("GET /api/commercial-profiles/directory error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
+
 /* ========= GET / ========= */
 /* Admin : classement de tous les commerciaux — CA du mois, nb commandes,
    nb clients, solde dû. Trié par CA décroissant (le score validé). */
