@@ -1,6 +1,6 @@
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, isAdmin, isCommercial } = require("../middlewares/auth");
 const bcrypt = require("bcryptjs");
 const { normPhone } = require("../utils/phone");
 
@@ -264,6 +264,80 @@ router.put("/me", authRequired, async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+/* ============================
+ *   Recherche client (COMMERCIAL + ADMIN)
+ * ============================ */
+// ✅ Version allégée de GET / (ADMIN only) — permet à un commercial de
+// chercher un client déjà existant par nom/téléphone avant de déclarer
+// une vente, exactement comme le fait l'admin (AdminOrderForClientModal),
+// mais sans exposer la liste complète des comptes ni de données
+// financières. Réutilise le même compte trouvé par téléphone que
+// findOrCreateCustomerAccount (orders.js) — évite de créer un doublon.
+router.get("/search-clients", authRequired, async (req, res) => {
+  if (!isAdmin(req.user) && !isCommercial(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const q = String(req.query.q || "").trim();
+
+  const pool = getPool();
+  // ✅ q vide -> liste complète (comme listAllAdminUsers({pageSize:2000})
+  // côté admin), chargée une fois puis filtrée localement par le
+  // frontend — même principe que le catalogue produits (loadProducts).
+  // q renseigné -> filtre déjà en base (nom/téléphone), conservé pour un
+  // usage ciblé éventuel.
+  let whereSql = "";
+  const params = [];
+  if (q) {
+    const like = `%${q}%`;
+    // ✅ Ne cherche sur le téléphone que s'il reste au moins un chiffre
+    // après nettoyage — sinon "%%" matcherait tous les numéros et
+    // renverrait la table entière au lieu de filtrer par nom.
+    const qPhoneDigits = (normPhone(q) || q).replace(/[^\d+]/g, "");
+    const hasPhonePart = qPhoneDigits.length > 0;
+
+    const whereParts = [
+      "first_name LIKE ?",
+      "last_name LIKE ?",
+      "CONCAT(COALESCE(first_name,''), ' ', COALESCE(last_name,'')) LIKE ?",
+    ];
+    params.push(like, like, like);
+    if (hasPhonePart) {
+      whereParts.push("phone LIKE ?");
+      params.push(`%${qPhoneDigits}%`);
+    }
+    whereSql = `WHERE ${whereParts.join(" OR ")}`;
+  }
+  params.push(2000);
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, first_name, last_name, phone, role, ville, commune, quartier
+         FROM users
+         ${whereSql}
+        ORDER BY first_name, last_name
+        LIMIT ?`,
+      params
+    );
+
+    res.json({
+      items: rows.map((u) => ({
+        id: u.id,
+        first_name: u.first_name || null,
+        last_name: u.last_name || null,
+        phone: u.phone || null,
+        role: u.role || null,
+        city: u.ville || null,
+        commune: u.commune || null,
+        district: u.quartier || null,
+      })),
+    });
+  } catch (e) {
+    console.error("GET /api/users/search-clients error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
