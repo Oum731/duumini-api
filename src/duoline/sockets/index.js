@@ -21,6 +21,26 @@ function registerSockets(io) {
   });
 
   let activeCall = null; // { callerId, callType, connectedAt, answered }
+  let ringPushTimer = null;
+
+  function stopRingPush() {
+    clearInterval(ringPushTimer);
+    ringPushTimer = null;
+  }
+
+  // Un seul push ne fait qu'un "ding" ponctuel sur le téléphone (app fermée/
+  // verrouillée) — on le renvoie toutes les 4s pendant ~20s pour se
+  // rapprocher d'une vraie sonnerie tant que personne n'a décroché/refusé.
+  function startRingPush(callerId, callerName, callType) {
+    stopRingPush();
+    const body = callType === "video" ? "Appel vidéo entrant 🎥" : "Appel audio entrant 📞";
+    let sent = 1;
+    ringPushTimer = setInterval(() => {
+      if (sent >= 5) return stopRingPush();
+      sent += 1;
+      notifyOthers(callerId, { title: callerName, body, tag: "call", url: "/chat" });
+    }, 4000);
+  }
 
   async function logCallEnd(status) {
     if (!activeCall) return;
@@ -107,8 +127,10 @@ function registerSockets(io) {
         tag: "call",
         url: "/chat",
       });
+      startRingPush(socket.user.id, socket.user.name, payload.callType);
     });
     socket.on("call:answer", (payload) => {
+      stopRingPush();
       if (activeCall) {
         activeCall.connectedAt = Date.now();
         activeCall.answered = true;
@@ -118,16 +140,19 @@ function registerSockets(io) {
     socket.on("call:ice-candidate", (payload) => socket.to(ROOM).emit("call:ice-candidate", payload));
 
     socket.on("call:hangup", (payload) => {
+      stopRingPush();
       socket.to(ROOM).emit("call:hangup", payload);
       logCallEnd(activeCall?.answered ? "answered" : "missed");
     });
 
     socket.on("call:decline", (payload) => {
+      stopRingPush();
       socket.to(ROOM).emit("call:decline", payload);
       logCallEnd("declined");
     });
 
     socket.on("disconnect", () => {
+      stopRingPush();
       socket.to(ROOM).emit("presence:offline", { userId: socket.user.id });
       logCallEnd(activeCall?.answered ? "answered" : "missed");
     });
