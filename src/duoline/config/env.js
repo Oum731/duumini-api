@@ -8,7 +8,9 @@ function num(v, fallback) {
 
 const env = {
   jwtSecret: process.env.DUOLINE_JWT_SECRET || "dev_secret_a_changer",
-  jwtExpiresIn: process.env.DUOLINE_JWT_EXPIRES_IN || "7d",
+  // Reste connecté indéfiniment (app privée à 2) — se reconnecter seulement
+  // en cas de déconnexion explicite ou de changement d'appareil.
+  jwtExpiresIn: process.env.DUOLINE_JWT_EXPIRES_IN || "3650d",
 
   db: {
     host: process.env.DUOLINE_DB_HOST || "127.0.0.1",
