@@ -515,23 +515,6 @@ if (googleCampaign) app.use("/api/ads", googleCampaign);
 if (googleAiAds) app.use("/api/ads", googleAiAds);
 
 /* =========================
- * 404 + Error handler
- * ========================= */
-app.use(notFound);
-
-app.use((err, req, res, next) => {
-  if (err) {
-    console.error("[error]", {
-      id: req?.id,
-      msg: err?.message,
-      stack: err?.stack,
-    });
-  }
-
-  return errorHandler(err, req, res, next);
-});
-
-/* =========================
  * Server + Socket + Worker
  * ========================= */
 const server = http.createServer(app);
@@ -556,6 +539,40 @@ try {
 } catch (e) {
   console.warn("[ws] socket attach skipped:", e?.message || e);
 }
+
+/* =========================
+ * ✅ DuoLine (app privée à 2, montée en module isolé)
+ * Namespace socket.io séparé (/duoline), sa propre base MySQL, son propre
+ * JWT — aucune interférence avec le reste de l'API. Voir src/duoline/.
+ * ========================= */
+if (io) {
+  try {
+    const { createDuolineModule } = require("./src/duoline");
+    app.use("/duoline", createDuolineModule(io));
+    console.log("[duoline] module mounted at /duoline");
+  } catch (e) {
+    console.error("[duoline] mount failed:", e?.message || e);
+  }
+} else {
+  console.warn("[duoline] skipped: socket.io not attached");
+}
+
+/* =========================
+ * 404 + Error handler
+ * ========================= */
+app.use(notFound);
+
+app.use((err, req, res, next) => {
+  if (err) {
+    console.error("[error]", {
+      id: req?.id,
+      msg: err?.message,
+      stack: err?.stack,
+    });
+  }
+
+  return errorHandler(err, req, res, next);
+});
 
 /* ✅ Worker notifications contrôlé par env */
 const RUN_WORKER =
