@@ -32,7 +32,7 @@ async function notifyOthers(excludeUserId, payload) {
         if (err.statusCode === 410 || err.statusCode === 404) {
           await sub.destroy();
         } else {
-          console.error("[duoline] Erreur push:", err.message);
+          console.error("[duoline] Erreur push:", err.statusCode, err.body || err.message);
         }
       }
     })

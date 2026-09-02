@@ -16,9 +16,23 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 // uniquement utile si jamais Cloudinary n'était pas configuré côté hôte).
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-async function storeFile(file) {
+function typeFromMime(mime = "") {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return "file";
+}
+
+async function storeFile(file, kind) {
   if (isCloudinaryConfigured) {
-    const result = await uploadBuffer(file.buffer, { resource_type: "auto" });
+    // Les photos iPhone sont souvent en HEIC et les vidéos en HEVC/.mov —
+    // illisibles par <img>/<video> dans la plupart des navigateurs. On
+    // force la conversion vers un format lisible partout à l'upload.
+    const options = { resource_type: "auto" };
+    if (kind === "image") options.format = "jpg";
+    if (kind === "video") options.format = "mp4";
+
+    const result = await uploadBuffer(file.buffer, options);
     return result.secure_url;
   }
 
@@ -26,13 +40,6 @@ async function storeFile(file) {
   const filename = `${unique}${path.extname(file.originalname)}`;
   fs.writeFileSync(path.join(uploadsDir, filename), file.buffer);
   return `/duoline/uploads/${filename}`;
-}
-
-function typeFromMime(mime = "") {
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("video/")) return "video";
-  if (mime.startsWith("audio/")) return "audio";
-  return "file";
 }
 
 // La factory reçoit le namespace socket.io "/duoline" pour diffuser le
@@ -44,11 +51,12 @@ function createMediaRouter(io) {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
 
     const duration = req.body?.duration ? Math.round(Number(req.body.duration)) : null;
-    const fileUrl = await storeFile(req.file);
+    const kind = typeFromMime(req.file.mimetype);
+    const fileUrl = await storeFile(req.file, kind);
 
     const message = await Message.create({
       senderId: req.user.id,
-      type: typeFromMime(req.file.mimetype),
+      type: kind,
       content: fileUrl,
       fileName: req.file.originalname,
       fileSize: req.file.size,

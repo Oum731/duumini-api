@@ -25,7 +25,7 @@ const env = {
   vapid: {
     publicKey: process.env.VAPID_PUBLIC_KEY || "",
     privateKey: process.env.VAPID_PRIVATE_KEY || "",
-    subject: process.env.VAPID_SUBJECT || "mailto:contact@duoline.local",
+    subject: process.env.VAPID_SUBJECT || "mailto:traoresouro7826@gmail.com",
   },
 
   cloudinary: {
