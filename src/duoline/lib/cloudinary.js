@@ -26,6 +26,21 @@ function uploadBuffer(buffer, options = {}) {
   });
 }
 
+// Pipe un flux (ex: le flux multipart reçu du client) directement vers
+// Cloudinary, sans le bufferiser en entier d'abord — le transfert
+// client -> nous et notre transfert nous -> Cloudinary se chevauchent au
+// lieu de se succéder, ce qui réduit nettement le temps total d'envoi.
+function uploadFromStream(readable, options = {}) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: "auto", folder: "duoline", ...options },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    readable.on("error", reject);
+    readable.pipe(stream);
+  });
+}
+
 // URL de livraison avec transformation à la demande (générée par Cloudinary
 // au premier appel puis mise en cache côté CDN — contrairement à passer
 // `format` à l'upload, ça ne bloque jamais la requête d'upload elle-même).
@@ -33,4 +48,10 @@ function transformedUrl(publicId, options) {
   return cloudinary.url(publicId, { secure: true, ...options });
 }
 
-module.exports = { isCloudinaryConfigured, uploadBuffer, transformedUrl };
+// Déclenche la conversion à la demande tout de suite après l'upload, sans
+// attendre qu'un viewer la demande — met le résultat en cache CDN plus tôt.
+function warmUrl(url) {
+  fetch(url).catch(() => {});
+}
+
+module.exports = { isCloudinaryConfigured, uploadBuffer, uploadFromStream, transformedUrl, warmUrl };
