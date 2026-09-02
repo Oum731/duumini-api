@@ -12,9 +12,14 @@ const { isCloudinaryConfigured, uploadBuffer } = require("../lib/cloudinary");
 const uploadsDir = path.join(__dirname, "..", "uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
 
+// 95 Mo : reste sous la limite de 100 Mo/fichier du plan Cloudinary Free
+// utilisé ici (au-delà, Cloudinary refuserait de toute façon). Les vraies
+// vidéos de téléphone (quelques dizaines de Mo) passent large.
+const MAX_FILE_SIZE = 95 * 1024 * 1024;
+
 // En mémoire : soit envoyé à Cloudinary, soit écrit sur disque (fallback,
 // uniquement utile si jamais Cloudinary n'était pas configuré côté hôte).
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_SIZE } });
 
 function typeFromMime(mime = "") {
   if (mime.startsWith("image/")) return "image";
@@ -47,7 +52,23 @@ async function storeFile(file, kind) {
 function createMediaRouter(io) {
   const router = Router();
 
-  router.post("/upload", requireAuth, upload.single("file"), async (req, res) => {
+  // Multer est appelé "à la main" (plutôt qu'en middleware direct) pour
+  // pouvoir renvoyer un message clair au client si le fichier est trop
+  // volumineux, au lieu d'un 500 générique après une longue attente.
+  router.post("/upload", requireAuth, (req, res, next) => {
+    upload.single("file")(req, res, (err) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res
+            .status(413)
+            .json({ error: `Fichier trop volumineux (max ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} Mo)` });
+        }
+        console.error("[duoline] Erreur upload:", err.message);
+        return res.status(400).json({ error: "Échec de l'upload" });
+      }
+      next();
+    });
+  }, async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
 
     const duration = req.body?.duration ? Math.round(Number(req.body.duration)) : null;
