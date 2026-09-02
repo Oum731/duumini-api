@@ -7,7 +7,7 @@ const { requireAuth } = require("../middleware/auth");
 const { notifyOthers } = require("../lib/push");
 const { isPartnerOnline } = require("../lib/presence");
 const { ROOM } = require("../config/constants");
-const { isCloudinaryConfigured, uploadBuffer } = require("../lib/cloudinary");
+const { isCloudinaryConfigured, uploadBuffer, transformedUrl } = require("../lib/cloudinary");
 
 const uploadsDir = path.join(__dirname, "..", "uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -30,14 +30,26 @@ function typeFromMime(mime = "") {
 
 async function storeFile(file, kind) {
   if (isCloudinaryConfigured) {
-    // Les photos iPhone sont souvent en HEIC et les vidéos en HEVC/.mov —
-    // illisibles par <img>/<video> dans la plupart des navigateurs. On
-    // force la conversion vers un format lisible partout à l'upload.
-    const options = { resource_type: "auto" };
-    if (kind === "image") options.format = "jpg";
-    if (kind === "video") options.format = "mp4";
+    // Les photos iPhone sont souvent en HEIC — conversion en jpg à l'upload,
+    // rapide, sans problème.
+    if (kind === "image") {
+      const result = await uploadBuffer(file.buffer, { resource_type: "image", format: "jpg" });
+      return result.secure_url;
+    }
 
-    const result = await uploadBuffer(file.buffer, options);
+    if (kind === "video") {
+      // Les vidéos iPhone sont souvent en HEVC/.mov, illisibles par <video>
+      // dans la plupart des navigateurs — mais forcer la conversion mp4
+      // PENDANT l'upload fait échouer Cloudinary sur les fichiers un peu
+      // gros ("too large to process synchronously"). On stocke tel quel
+      // (rapide, jamais de limite synchrone) et on demande la conversion
+      // à la lecture : Cloudinary la fait au 1er accès puis la met en
+      // cache CDN, aucun autre appel n'attend la transcodification.
+      const result = await uploadBuffer(file.buffer, { resource_type: "video" });
+      return transformedUrl(result.public_id, { resource_type: "video", format: "mp4" });
+    }
+
+    const result = await uploadBuffer(file.buffer, { resource_type: "auto" });
     return result.secure_url;
   }
 

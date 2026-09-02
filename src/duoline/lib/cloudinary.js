@@ -26,4 +26,11 @@ function uploadBuffer(buffer, options = {}) {
   });
 }
 
-module.exports = { isCloudinaryConfigured, uploadBuffer };
+// URL de livraison avec transformation à la demande (générée par Cloudinary
+// au premier appel puis mise en cache côté CDN — contrairement à passer
+// `format` à l'upload, ça ne bloque jamais la requête d'upload elle-même).
+function transformedUrl(publicId, options) {
+  return cloudinary.url(publicId, { secure: true, ...options });
+}
+
+module.exports = { isCloudinaryConfigured, uploadBuffer, transformedUrl };
