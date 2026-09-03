@@ -13,6 +13,9 @@ const User = sequelize.define(
     email: { type: DataTypes.STRING, allowNull: false, unique: true },
     passwordHash: { type: DataTypes.STRING, allowNull: false },
     avatarUrl: { type: DataTypes.STRING, allowNull: true },
+    // Le nom que CE compte a choisi d'afficher pour son/sa partenaire — ne
+    // change rien pour l'autre personne, purement local à ce compte.
+    partnerNickname: { type: DataTypes.STRING, allowNull: true },
   },
   { tableName: "users", timestamps: true }
 );

@@ -65,6 +65,15 @@ function registerSockets(io) {
     socket.join(ROOM);
     socket.to(ROOM).emit("presence:online", { userId: socket.user.id, name: socket.user.name });
 
+    // Un appel sonne encore et cette personne vient (re)connecter son socket
+    // (ex: elle a tapé sur la notification, app relancée à froid) -> on lui
+    // renvoie l'offre tout de suite, sinon elle ne recevrait jamais
+    // l'événement "call:offer" (raté pendant que l'app était fermée) et ne
+    // pourrait jamais décrocher.
+    if (activeCall && !activeCall.answered && activeCall.callerId !== socket.user.id) {
+      socket.emit("call:offer", { sdp: activeCall.sdp, callType: activeCall.callType });
+    }
+
     const toDeliver = await Message.findAll({
       where: { senderId: { [Op.ne]: socket.user.id }, deliveredAt: null },
       attributes: ["id"],
@@ -93,9 +102,11 @@ function registerSockets(io) {
       io.to(ROOM).emit("message:new", full);
       ack?.({ ok: true, id: message.id });
 
+      // Pas le contenu du message dans la notification (confidentialité —
+      // visible sur l'écran verrouillé sinon), juste qu'il y en a un.
       notifyOthers(socket.user.id, {
         title: socket.user.name,
-        body: content.trim().slice(0, 120),
+        body: "Nouveau message 💬",
         tag: "message",
         url: "/chat",
       });
@@ -119,7 +130,13 @@ function registerSockets(io) {
 
     // --- Signaling WebRTC (appels audio/vidéo) ---
     socket.on("call:offer", (payload) => {
-      activeCall = { callerId: socket.user.id, callType: payload.callType, connectedAt: null, answered: false };
+      activeCall = {
+        callerId: socket.user.id,
+        callType: payload.callType,
+        sdp: payload.sdp,
+        connectedAt: null,
+        answered: false,
+      };
       socket.to(ROOM).emit("call:offer", payload);
       notifyOthers(socket.user.id, {
         title: socket.user.name,

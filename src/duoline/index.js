@@ -10,6 +10,7 @@ const { messagesRouter } = require("./routes/messages");
 const { createMediaRouter } = require("./routes/media");
 const { pushRouter } = require("./routes/push");
 const { turnRouter } = require("./routes/turn");
+const { partnerRouter } = require("./routes/partner");
 const { registerSockets } = require("./sockets");
 const { uploadsDir } = require("./routes/media");
 
@@ -38,6 +39,7 @@ function createDuolineModule(io) {
   router.use("/api/media", createMediaRouter(nsp));
   router.use("/api/push", pushRouter);
   router.use("/api/ice-servers", turnRouter);
+  router.use("/api/partner", partnerRouter);
 
   return router;
 }
