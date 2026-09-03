@@ -138,6 +138,29 @@ function registerSockets(io) {
       ack?.({ ok: true });
     });
 
+    // Suppression d'un message par son expéditeur — pas de fenêtre de temps
+    // (contrairement à l'édition), contenu effacé mais la ligne reste comme
+    // trace ("message supprimé") pour ne pas décaler l'historique.
+    socket.on("message:delete", async ({ id }, ack) => {
+      const message = await Message.findByPk(id);
+      if (!message || message.senderId !== socket.user.id) {
+        return ack?.({ ok: false, error: "Suppression impossible" });
+      }
+
+      message.deletedAt = new Date();
+      message.content = null;
+      message.fileName = null;
+      message.fileSize = null;
+      message.mimeType = null;
+      await message.save();
+
+      const full = await Message.findByPk(message.id, {
+        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+      });
+      io.to(ROOM).emit("message:deleted", full);
+      ack?.({ ok: true });
+    });
+
     socket.on("message:read", async ({ messageIds }) => {
       if (!Array.isArray(messageIds) || messageIds.length === 0) return;
 
