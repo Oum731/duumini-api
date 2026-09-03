@@ -161,6 +161,27 @@ function registerSockets(io) {
       ack?.({ ok: true });
     });
 
+    // Réaction rapide (❤️👍😂...) — une seule par personne et par message ;
+    // renvoyer le même emoji la retire (basculement géré côté client).
+    socket.on("message:react", async ({ id, emoji }, ack) => {
+      const message = await Message.findByPk(id);
+      if (!message) return ack?.({ ok: false, error: "Message introuvable" });
+
+      const current = message.reactions || {};
+      const next = { ...current };
+      const key = String(socket.user.id);
+      if (!emoji) delete next[key];
+      else next[key] = emoji;
+      message.reactions = next;
+      await message.save();
+
+      const full = await Message.findByPk(message.id, {
+        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+      });
+      io.to(ROOM).emit("message:reacted", full);
+      ack?.({ ok: true });
+    });
+
     socket.on("message:read", async ({ messageIds }) => {
       if (!Array.isArray(messageIds) || messageIds.length === 0) return;
 
