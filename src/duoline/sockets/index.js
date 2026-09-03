@@ -8,6 +8,8 @@ const { ROOM } = require("../config/constants");
 
 // `io` est ici le namespace socket.io "/duoline" (io.of("/duoline")), pas le
 // Server racine — isolé du reste des sockets de duumini-api.
+const EDIT_WINDOW_MS = 5 * 60 * 1000;
+
 function registerSockets(io) {
   io.use((socket, next) => {
     try {
@@ -110,6 +112,30 @@ function registerSockets(io) {
         tag: "message",
         url: "/chat",
       });
+    });
+
+    // Modification d'un message texte déjà envoyé, dans les 5 minutes.
+    socket.on("message:edit", async ({ id, content }, ack) => {
+      const text = (content || "").trim();
+      if (!text) return ack?.({ ok: false, error: "Message vide" });
+
+      const message = await Message.findByPk(id);
+      if (!message || message.senderId !== socket.user.id || message.type !== "text") {
+        return ack?.({ ok: false, error: "Modification impossible" });
+      }
+      if (Date.now() - new Date(message.createdAt).getTime() > EDIT_WINDOW_MS) {
+        return ack?.({ ok: false, error: "Délai de modification dépassé (5 min)" });
+      }
+
+      message.content = text;
+      message.editedAt = new Date();
+      await message.save();
+
+      const full = await Message.findByPk(message.id, {
+        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+      });
+      io.to(ROOM).emit("message:edited", full);
+      ack?.({ ok: true });
     });
 
     socket.on("message:read", async ({ messageIds }) => {

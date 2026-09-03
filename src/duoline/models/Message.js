@@ -24,6 +24,7 @@ const Message = sequelize.define(
     callStatus: { type: DataTypes.ENUM("answered", "missed", "declined"), allowNull: true },
     deliveredAt: { type: DataTypes.DATE, allowNull: true },
     readAt: { type: DataTypes.DATE, allowNull: true },
+    editedAt: { type: DataTypes.DATE, allowNull: true }, // message texte modifié après envoi (< 5 min)
   },
   { tableName: "messages", timestamps: true }
 );
