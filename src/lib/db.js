@@ -17,6 +17,11 @@ function getPool() {
       timezone: 'Z',
       charset: 'utf8mb4',
       ssl: env.MYSQL_SSL ? { rejectUnauthorized: true } : undefined,
+      // Force la résolution IPv4 : certains hébergeurs (Render notamment)
+      // n'ont pas de route IPv6 vers l'hôte MySQL, ce qui fait échouer une
+      // tentative de connexion sur l'enregistrement AAAA avant même
+      // d'essayer l'IPv4 — inutile si le serveur MySQL n'écoute qu'en IPv4.
+      family: 4,
     });
   }
   return pool;
