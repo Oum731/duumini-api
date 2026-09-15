@@ -261,4 +261,47 @@ router.get("/debts", authRequired, async (req, res) => {
   }
 });
 
+/* =========================
+ * ✅ NEW: Vue géographique des clients — où sont nos clients ?
+ * Regroupe par ville extraite de orders.address (JSON) — c'est le champ le
+ * plus fiable disponible sur une commande (voir buildAddressObj dans
+ * orders.js), plus robuste que orders.contact qui n'est renseigné que côté
+ * "qui contacter" et pas toujours pour les comptes existants.
+ * =======================*/
+router.get("/clients-by-zone", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const pool = getPool();
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(o.address, '$.city')), 'null'), 'Ville inconnue') AS city,
+        COUNT(*) AS orders_count,
+        COUNT(DISTINCT COALESCE(o.user_id, JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone')))) AS clients_count,
+        SUM(o.total) AS total_amount
+      FROM orders o
+      WHERE o.status <> 'CANCELLED'
+      GROUP BY city
+      ORDER BY clients_count DESC, total_amount DESC
+      LIMIT 100
+      `
+    );
+
+    const items = (rows || []).map((r) => ({
+      city: r.city,
+      orders_count: Number(r.orders_count),
+      clients_count: Number(r.clients_count),
+      total_amount: Number(r.total_amount),
+    }));
+
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
