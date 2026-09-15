@@ -268,6 +268,47 @@ router.get("/debts", authRequired, async (req, res) => {
  * orders.js), plus robuste que orders.contact qui n'est renseigné que côté
  * "qui contacter" et pas toujours pour les comptes existants.
  * =======================*/
+// Villes connues sous plusieurs graphies dans les commandes (faute de
+// frappe courante, ex: "Dhakla" pour "Dakhla") : la collation ci-dessous
+// fusionne déjà casse + accents (Casablanca/CASABLANCA/casablanca,
+// Fes/Fès...), mais pas les vraies variantes orthographiques.
+const CITY_ALIASES = { dhakla: "dakhla" };
+const CITY_LABELS = {
+  casablanca: "Casablanca",
+  marrakech: "Marrakech",
+  rabat: "Rabat",
+  agadir: "Agadir",
+  fes: "Fès",
+  meknes: "Meknès",
+  kenitra: "Kénitra",
+  tanger: "Tanger",
+  dakhla: "Dakhla",
+  sale: "Salé",
+  settat: "Settat",
+  izgane: "Inezgane",
+  hoceima: "Al Hoceïma",
+  oujda: "Oujda",
+  mohammedia: "Mohammedia",
+  benguerir: "Benguerir",
+  bouskoura: "Bouskoura",
+  laayoune: "Laâyoune",
+  "ville inconnue": "Ville inconnue",
+  autre: "Autre",
+};
+
+function stripAccents(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+}
+
+function titleCase(s) {
+  return String(s || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\p{L}+/gu, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+}
+
 router.get("/clients-by-zone", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({ error: "Forbidden" });
@@ -276,27 +317,49 @@ router.get("/clients-by-zone", authRequired, async (req, res) => {
   try {
     const pool = getPool();
 
+    // JSON_UNQUOTE()/JSON_EXTRACT() renvoient une chaîne en collation
+    // utf8mb4_bin (sensible à la casse ET aux accents), ce qui faisait
+    // apparaître "Casablanca"/"CASABLANCA"/"casablanca" comme 3 villes
+    // distinctes. On recolle une collation insensible à la casse et aux
+    // accents pour le regroupement.
     const [rows] = await pool.query(
       `
       SELECT
-        COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(o.address, '$.city')), 'null'), 'Ville inconnue') AS city,
+        LOWER(TRIM(COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(o.address, '$.city')), 'null'), 'Ville inconnue')))
+          COLLATE utf8mb4_general_ci AS city_key,
         COUNT(*) AS orders_count,
         COUNT(DISTINCT COALESCE(o.user_id, JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone')))) AS clients_count,
         SUM(o.total) AS total_amount
       FROM orders o
       WHERE o.status <> 'CANCELLED'
-      GROUP BY city
-      ORDER BY clients_count DESC, total_amount DESC
-      LIMIT 100
+      GROUP BY city_key
       `
     );
 
-    const items = (rows || []).map((r) => ({
-      city: r.city,
-      orders_count: Number(r.orders_count),
-      clients_count: Number(r.clients_count),
-      total_amount: Number(r.total_amount),
-    }));
+    const merged = new Map();
+    for (const r of rows || []) {
+      let asciiKey = stripAccents(r.city_key).toLowerCase().trim();
+      asciiKey = CITY_ALIASES[asciiKey] || asciiKey;
+      const label = CITY_LABELS[asciiKey] || titleCase(asciiKey);
+
+      const prev = merged.get(asciiKey);
+      if (prev) {
+        prev.orders_count += Number(r.orders_count);
+        prev.clients_count += Number(r.clients_count);
+        prev.total_amount += Number(r.total_amount);
+      } else {
+        merged.set(asciiKey, {
+          city: label,
+          orders_count: Number(r.orders_count),
+          clients_count: Number(r.clients_count),
+          total_amount: Number(r.total_amount),
+        });
+      }
+    }
+
+    const items = Array.from(merged.values())
+      .sort((a, b) => b.clients_count - a.clients_count || b.total_amount - a.total_amount)
+      .slice(0, 100);
 
     return res.json({ items });
   } catch (e) {
