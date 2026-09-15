@@ -120,6 +120,7 @@ router.get("/me", authRequired, async (req, res) => {
       // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
       has_livreur_profile: !!req.user.has_livreur_profile,
       has_commercial_profile: !!req.user.has_commercial_profile,
+      has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,
@@ -258,6 +259,7 @@ router.put("/me", authRequired, async (req, res) => {
       // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
       has_livreur_profile: !!req.user.has_livreur_profile,
       has_commercial_profile: !!req.user.has_commercial_profile,
+      has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,

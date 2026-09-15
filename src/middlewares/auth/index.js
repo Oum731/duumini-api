@@ -58,7 +58,27 @@ async function getProfileFlags(pool, userId) {
     "SELECT 1 x FROM commercial_profiles WHERE user_id=? LIMIT 1",
     [userId]
   );
-  return { has_livreur_profile: !!lp, has_commercial_profile: !!cp };
+
+  // ✅ Gestionnaire d'entrepôt : même principe que livreur/commercial,
+  // sauf que la table warehouse_managers (module Stock, Phase 1) peut ne
+  // pas encore exister sur un environnement pas à jour — on avale l'erreur
+  // plutôt que de casser le login/attachUser pour tout le monde.
+  let wp = null;
+  try {
+    const [[row]] = await pool.query(
+      "SELECT 1 x FROM warehouse_managers WHERE user_id=? AND is_active=1 LIMIT 1",
+      [userId]
+    );
+    wp = row || null;
+  } catch {
+    wp = null;
+  }
+
+  return {
+    has_livreur_profile: !!lp,
+    has_commercial_profile: !!cp,
+    has_warehouse_manager_profile: !!wp,
+  };
 }
 
 /**
@@ -275,6 +295,8 @@ const isLivreur = (u) => getActingRole(u) === "LIVREUR" || !!u?.has_livreur_prof
 const isCommercial = (u) =>
   getActingRole(u) === "COMMERCIAL" || !!u?.has_commercial_profile;
 
+const isWarehouseManager = (u) => !!u?.has_warehouse_manager_profile;
+
 // ✅ Garde générique basée sur une fonction de capacité (isLivreur/isCommercial/...)
 // plutôt que sur un match de rôle strict — même forme que requireRole pour
 // rester un remplacement direct sur les routes en libre-service.
@@ -308,4 +330,5 @@ module.exports = {
   isRestaurant,
   isLivreur,
   isCommercial,
+  isWarehouseManager,
 };
