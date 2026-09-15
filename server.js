@@ -106,6 +106,14 @@ try {
   console.warn("[supplierDeliveries] route missing:", e?.message || e);
 }
 
+// ✅ NEW: Abonnements entreprises (Phase 4)
+let subscriptions = null;
+try {
+  subscriptions = require("./src/routes/subscriptions");
+} catch (e) {
+  console.warn("[subscriptions] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Admin validation/publish for AI content (SEO-only)
 let adminContentAiRoutes = null;
 try {
@@ -439,6 +447,10 @@ if (warehouses) {
 
 if (supplierDeliveries) {
   app.use("/api/supplier-deliveries", supplierDeliveries);
+}
+
+if (subscriptions) {
+  app.use("/api/subscriptions", subscriptions);
 }
 
 /* =========================
