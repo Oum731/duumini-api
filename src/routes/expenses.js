@@ -10,6 +10,30 @@ const isVendor = auth.isVendor || (() => false);
 const isRestaurant = auth.isRestaurant || (() => false);
 const isSupplier = auth.isSupplier || (() => false);
 
+// ✅ Détection paresseuse + cache mémoire process : évite de faire
+// planter la création/mise à jour de dépense tant que la migration
+// (src/scripts/addExpensesWarehouseId.js) n'a pas été jouée sur cet
+// environnement — même esprit défensif que le reste de l'API (voir
+// detectOrdersPayCols dans orders.js).
+let _expensesHasWarehouseIdCache = null;
+
+async function expensesHasWarehouseId(pool) {
+  if (_expensesHasWarehouseIdCache != null) return _expensesHasWarehouseIdCache;
+
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'expenses'
+        AND COLUMN_NAME = 'warehouse_id'
+    `
+  );
+
+  _expensesHasWarehouseIdCache = rows.length > 0;
+  return _expensesHasWarehouseIdCache;
+}
+
 function toNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -89,6 +113,15 @@ async function requestShopId(req, pool) {
   return resolveOwnShopId(pool, req.user?.id);
 }
 
+// ✅ Une dépense d'entrepôt (loyer, personnel logistique...) n'est pas
+// rattachée à une boutique. Réservé à l'admin pour l'instant — un
+// gestionnaire d'entrepôt qui doit pouvoir déclarer ses propres dépenses
+// est une extension future (voir warehouse_managers, src/routes/warehouses.js).
+function requestWarehouseId(req) {
+  if (!isAdmin(req.user)) return null;
+  return toNum(req.query.warehouse_id || req.body?.warehouse_id, 0) || null;
+}
+
 async function forbiddenByRole(req, shopId, pool) {
   if (isAdmin(req.user)) return false;
   const myShopId = await resolveOwnShopId(pool, req.user?.id);
@@ -104,6 +137,11 @@ async function buildExpenseWhere({ query = {}, user = null, pool }) {
     ? toNum(query.shop_id, 0) || null
     : await resolveOwnShopId(pool, user?.id);
 
+  const warehouseId =
+    isAdmin(user) && (await expensesHasWarehouseId(pool))
+      ? toNum(query.warehouse_id, 0) || null
+      : null;
+
   const categoryId = toNum(query.category_id, 0);
   const categoryName = cleanStr(query.category_name, 100);
   const status = cleanStr(query.status, 20);
@@ -115,6 +153,11 @@ async function buildExpenseWhere({ query = {}, user = null, pool }) {
   if (shopId) {
     where.push("e.shop_id = ?");
     params.push(shopId);
+  }
+
+  if (warehouseId) {
+    where.push("e.warehouse_id = ?");
+    params.push(warehouseId);
   }
 
   if (categoryId > 0) {
@@ -203,6 +246,7 @@ async function queryExpenseList(pool, whereSql, params, pageSize, offset) {
       SELECT
         e.id,
         e.shop_id,
+        e.warehouse_id,
         e.user_id,
         e.category_id,
         e.category_name,
@@ -216,9 +260,11 @@ async function queryExpenseList(pool, whereSql, params, pageSize, offset) {
         e.receipt_url,
         e.created_at,
         e.updated_at,
-        c.color AS category_color
+        c.color AS category_color,
+        w.name AS warehouse_name
       FROM expenses e
       LEFT JOIN expense_categories c ON c.id = e.category_id
+      LEFT JOIN warehouses w ON w.id = e.warehouse_id
       ${whereSql}
       ORDER BY e.expense_date DESC, e.id DESC
       LIMIT ? OFFSET ?
@@ -548,6 +594,69 @@ router.get("/by-category", authRequired, async (req, res) => {
   }
 });
 
+// ✅ NEW: vue consolidée par entrepôt — pour que l'admin voie en un coup
+// d'œil ce que coûte chaque entrepôt, en plus du découpage par boutique
+// déjà possible via ?shop_id sur /by-category et /.
+router.get("/by-warehouse", authRequired, async (req, res) => {
+  try {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    const pool = getPool();
+
+    if (!(await expensesHasWarehouseId(pool))) {
+      return res.status(409).json({
+        error:
+          "Colonne expenses.warehouse_id absente sur cet environnement. Exécute node src/scripts/addExpensesWarehouseId.js puis réessaie.",
+      });
+    }
+
+    const { where, params } = await buildExpenseWhere({
+      query: { ...req.query, warehouse_id: undefined },
+      user: req.user,
+      pool,
+    });
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        e.warehouse_id,
+        w.name AS warehouse_name,
+        COALESCE(SUM(e.amount), 0) AS total,
+        COUNT(*) AS count_items
+      FROM expenses e
+      LEFT JOIN warehouses w ON w.id = e.warehouse_id
+      ${whereSql}
+      GROUP BY e.warehouse_id, w.name
+      ORDER BY total DESC
+      `,
+      params
+    );
+
+    return res.json({
+      items: (rows || []).map((r) => ({
+        warehouse_id: r.warehouse_id,
+        warehouse_name: r.warehouse_name || (r.warehouse_id ? null : "Hors entrepôt"),
+        total: Number(r.total || 0),
+        count_items: Number(r.count_items || 0),
+      })),
+    });
+  } catch (e) {
+    console.error("GET /expenses/by-warehouse error:", {
+      message: e?.message,
+      sqlMessage: e?.sqlMessage,
+      code: e?.code,
+    });
+
+    return res.status(500).json({
+      error: "Erreur serveur lors du calcul par entrepôt.",
+      details: e?.sqlMessage || e?.message || "unknown_error",
+    });
+  }
+});
+
 router.post("/", authRequired, async (req, res) => {
   try {
     if (!canManageExpenses(req)) {
@@ -556,6 +665,7 @@ router.post("/", authRequired, async (req, res) => {
 
     const pool = getPool();
     const shopId = await requestShopId(req, pool);
+    const warehouseId = requestWarehouseId(req);
     const userId = toNum(req.user?.id, 0) || null;
     const categoryId = toNum(req.body?.category_id, 0);
     const categoryFallback = cleanStr(req.body?.category_name, 100);
@@ -582,38 +692,19 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const reference = await generateUniqueExpenseReference(pool);
+    const hasWarehouseId = await expensesHasWarehouseId(pool);
+
+    const insertCols = ["shop_id", "user_id", "category_id", "category_name", "label", "description", "amount", "expense_date", "payment_method", "reference", "status", "receipt_url"];
+    const insertVals = [shopId, userId, category.category_id, category.category_name, label, description, amount, expenseDate, paymentMethod, reference, status, receiptUrl];
+
+    if (hasWarehouseId) {
+      insertCols.splice(1, 0, "warehouse_id");
+      insertVals.splice(1, 0, warehouseId);
+    }
 
     const [result] = await pool.query(
-      `
-      INSERT INTO expenses (
-        shop_id,
-        user_id,
-        category_id,
-        category_name,
-        label,
-        description,
-        amount,
-        expense_date,
-        payment_method,
-        reference,
-        status,
-        receipt_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      [
-        shopId,
-        userId,
-        category.category_id,
-        category.category_name,
-        label,
-        description,
-        amount,
-        expenseDate,
-        paymentMethod,
-        reference,
-        status,
-        receiptUrl,
-      ]
+      `INSERT INTO expenses (${insertCols.join(", ")}) VALUES (${insertCols.map(() => "?").join(", ")})`,
+      insertVals
     );
 
     const rows = await queryExpenseList(pool, "WHERE e.id = ?", [result.insertId], 1, 0);
@@ -685,35 +776,26 @@ router.put("/:id", authRequired, async (req, res) => {
 
     const reference = existing.reference || (await generateUniqueExpenseReference(pool));
 
+    const setClauses = ["category_id = ?", "category_name = ?", "label = ?", "description = ?", "amount = ?", "expense_date = ?", "payment_method = ?", "reference = ?", "status = ?", "receipt_url = ?"];
+    const setVals = [category.category_id, category.category_name, label, description, amount, expenseDate, paymentMethod, reference, status, receiptUrl];
+
+    // ✅ Ne touche warehouse_id que si explicitement fourni dans la requête
+    // (sinon un admin qui corrige juste le libellé effacerait le
+    // rattachement entrepôt existant sans le vouloir).
+    if (
+      isAdmin(req.user) &&
+      req.body?.warehouse_id !== undefined &&
+      (await expensesHasWarehouseId(pool))
+    ) {
+      setClauses.push("warehouse_id = ?");
+      setVals.push(toNum(req.body.warehouse_id, 0) || null);
+    }
+
+    setVals.push(id);
+
     await pool.query(
-      `
-      UPDATE expenses
-      SET
-        category_id = ?,
-        category_name = ?,
-        label = ?,
-        description = ?,
-        amount = ?,
-        expense_date = ?,
-        payment_method = ?,
-        reference = ?,
-        status = ?,
-        receipt_url = ?
-      WHERE id = ?
-      `,
-      [
-        category.category_id,
-        category.category_name,
-        label,
-        description,
-        amount,
-        expenseDate,
-        paymentMethod,
-        reference,
-        status,
-        receiptUrl,
-        id,
-      ]
+      `UPDATE expenses SET ${setClauses.join(", ")} WHERE id = ?`,
+      setVals
     );
 
     const rows = await queryExpenseList(pool, "WHERE e.id = ?", [id], 1, 0);

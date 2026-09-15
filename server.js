@@ -90,6 +90,30 @@ try {
   console.warn("[supplier_orders] route missing:", e?.message || e);
 }
 
+// ✅ NEW: Warehouses / stock management
+let warehouses = null;
+try {
+  warehouses = require("./src/routes/warehouses");
+} catch (e) {
+  console.warn("[warehouses] route missing:", e?.message || e);
+}
+
+// ✅ NEW: Supplier deliveries (traçabilité fournisseurs)
+let supplierDeliveries = null;
+try {
+  supplierDeliveries = require("./src/routes/supplierDeliveries");
+} catch (e) {
+  console.warn("[supplierDeliveries] route missing:", e?.message || e);
+}
+
+// ✅ NEW: Abonnements entreprises (Phase 4)
+let subscriptions = null;
+try {
+  subscriptions = require("./src/routes/subscriptions");
+} catch (e) {
+  console.warn("[subscriptions] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Admin validation/publish for AI content (SEO-only)
 let adminContentAiRoutes = null;
 try {
@@ -415,6 +439,18 @@ if (supplierProducts) {
 
 if (supplierOrders) {
   app.use("/api/supplier-orders", supplierOrders);
+}
+
+if (warehouses) {
+  app.use("/api/warehouses", warehouses);
+}
+
+if (supplierDeliveries) {
+  app.use("/api/supplier-deliveries", supplierDeliveries);
+}
+
+if (subscriptions) {
+  app.use("/api/subscriptions", subscriptions);
 }
 
 /* =========================

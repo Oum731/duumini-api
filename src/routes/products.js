@@ -5,6 +5,7 @@ const multer = require("multer");
 
 const { getPool } = require("../lib/db");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
+const { periodMeta } = require("../services/affiliates");
 const {
   authRequired,
   requireRole,
@@ -1623,13 +1624,26 @@ async function promotionsHandler(req, res, next) {
   }
 }
 
+const TOP_ORDERED_PERIODS = ["DAY", "WEEK", "MONTH", "YEAR"];
+
 async function topOrderedHandler(req, res, next) {
   const pool = getPool();
   const limit = toPositiveInt(req.query.limit, 8);
 
+  // ✅ period optionnel (DAY/WEEK/MONTH/YEAR) — absent = comportement
+  // historique (top all-time), pour ne rien casser côté appelants existants
+  // (HighlightedProducts, TopProductsPage sans période). Mêmes bornes que
+  // les rapports de ventes/commissions (voir periodMeta, services/affiliates.js).
+  const periodType = String(req.query.period || "").trim().toUpperCase();
+  const usePeriod = TOP_ORDERED_PERIODS.includes(periodType);
+  const period = usePeriod ? periodMeta(periodType) : null;
+
   try {
     const citiesCol = await getCitiesColCached(pool);
     const shopTypeCol = await getShopTypeColCached(pool);
+
+    const dateWhere = period ? "AND o.created_at BETWEEN ? AND ?" : "";
+    const dateParams = period ? [`${period.period_start} 00:00:00`, `${period.period_end} 23:59:59`] : [];
 
     const [rowsRaw] = await pool.query(
       `
@@ -1663,11 +1677,12 @@ async function topOrderedHandler(req, res, next) {
       LEFT JOIN sub_categories sc ON sc.id = p.sub_category_id
       WHERE o.status = 'DONE'
         AND p.is_active = 1
+        ${dateWhere}
       GROUP BY p.id
       ORDER BY total_qty DESC
       LIMIT ?
       `,
-      [limit]
+      [...dateParams, limit]
     );
 
     const mapped = (rowsRaw || []).map((r) => {

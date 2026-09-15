@@ -26,6 +26,8 @@ const {
   pushAffiliateOrderColumns,
   finalizeAffiliateOrder,
 } = require("../services/affiliates");
+const { recordStockMovement } = require("../lib/stockLedger");
+const { sumOrderMargin } = require("../lib/pricing");
 const router = Router();
 
 /* =========================
@@ -36,7 +38,7 @@ const DUUMINI_COMMISSION_RATE = 0.09;
 /* =========================
  * CONFIG WHATSAPP ADMIN
  * =======================*/
-const ADMIN_WHATSAPP_HARDCODED_RAW = "+212623677884";
+const ADMIN_WHATSAPP_HARDCODED_RAW = "+212656568827";
 const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   .trim()
   .startsWith("whatsapp:")
@@ -1494,6 +1496,7 @@ async function detectOrderItemsPromoCols(conn) {
     "promo_type",
     "promo_value",
     "base_unit_price",
+    "unit_cost_snapshot",
   ];
 
   const [rows] = await conn.query(
@@ -1514,6 +1517,7 @@ async function detectOrderItemsPromoCols(conn) {
     promo_type: found.has("promo_type"),
     promo_value: found.has("promo_value"),
     base_unit_price: found.has("base_unit_price"),
+    unit_cost_snapshot: found.has("unit_cost_snapshot"),
   };
 }
 
@@ -1710,7 +1714,8 @@ async function lockProductForItem(conn, productId) {
         p.country_code,
         p.promo_eligible,
         p.promo_discount_type,
-        p.promo_discount_value
+        p.promo_discount_value,
+        p.supplier_price_ht
       FROM products p
       WHERE p.id = ? FOR UPDATE
     `,
@@ -2302,6 +2307,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       product_id: p.id,
       qty,
       unit_price,
+      unit_cost: Number(p.supplier_price_ht || 0),
       base_unit_price: promoPack.base_unit_price,
       promo_applied: promoPack.promo_applied,
       promo_type: promoPack.promo_type,
@@ -2912,7 +2918,18 @@ router.post("/admin", authRequired, async (req, res) => {
       itemsAmount - adminDiscountAmount,
     );
     const orderTotal = discountedItemsAmount + deliveryFee;
-    const totalCommission = computeDuuminiCommission(discountedItemsAmount);
+
+    // ✅ Phase 2 : les commissions (Duumini, affilié, commercial) se
+    // calculent sur la marge (prix - coût fournisseur), jamais sur le
+    // prix payé par le client — orderTotal, lui, reste basé sur le prix.
+    // Une remise admin réduit la marge euro pour euro (elle sort de la
+    // marge du vendeur, le coût fournisseur ne change pas), plafonnée à 0.
+    const orderMarginAmount = sumOrderMargin(cleanItems);
+    const discountedMarginAmount = Math.max(
+      0,
+      orderMarginAmount - adminDiscountAmount,
+    );
+    const totalCommission = computeDuuminiCommission(discountedMarginAmount);
 
     // ✅ Commercial et affiliation ne doivent jamais se chevaucher sur une
     // même commande (une vente ne peut pas être à la fois déclarée par un
@@ -2942,7 +2959,7 @@ router.post("/admin", authRequired, async (req, res) => {
     const affiliatePack = await buildAffiliateOrderMeta(
       conn,
       finalCommercialIdForAffiliateGuard ? null : affiliate_code,
-      discountedItemsAmount,
+      discountedMarginAmount,
     );
 
     const payCols = await getOrdersPayColsCached(pool);
@@ -3079,7 +3096,7 @@ router.post("/admin", authRequired, async (req, res) => {
       const commissionRate = commercialProfile
         ? Number(commercialProfile.commission_rate)
         : 0;
-      const commissionAmount = +(discountedItemsAmount * commissionRate).toFixed(2);
+      const commissionAmount = +(discountedMarginAmount * commissionRate).toFixed(2);
 
       cols.push(
         "commercial_id",
@@ -3107,7 +3124,7 @@ router.post("/admin", authRequired, async (req, res) => {
       affiliate: affiliatePack.affiliate,
       orderId,
       displayCode,
-      baseAmount: discountedItemsAmount,
+      baseAmount: discountedMarginAmount,
       orderMeta: affiliatePack.orderMeta,
     });
 
@@ -3125,7 +3142,8 @@ router.post("/admin", authRequired, async (req, res) => {
         (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price ||
+          promoCols.unit_cost_snapshot)
       ) {
         const cols2 = [
           "order_id",
@@ -3161,6 +3179,11 @@ router.post("/admin", authRequired, async (req, res) => {
         if (promoCols.promo_value) {
           cols2.push("promo_value");
           vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+        }
+
+        if (promoCols.unit_cost_snapshot) {
+          cols2.push("unit_cost_snapshot");
+          vals2.push(it.unit_cost != null ? Number(it.unit_cost) : null);
         }
 
         await conn.query(
@@ -3213,6 +3236,16 @@ router.post("/admin", authRequired, async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -3387,12 +3420,16 @@ router.post("/", authRequired, async (req, res) => {
     ).toUpperCase();
 
     const orderTotal = itemsAmount + deliveryFee;
-    const totalCommission = computeDuuminiCommission(itemsAmount);
+
+    // ✅ Phase 2 : commission calculée sur la marge (prix - coût
+    // fournisseur), pas sur le prix — orderTotal reste basé sur le prix.
+    const orderMarginAmount = sumOrderMargin(cleanItems);
+    const totalCommission = computeDuuminiCommission(orderMarginAmount);
 
     const affiliatePack = await buildAffiliateOrderMeta(
       conn,
       affiliate_code,
-      itemsAmount,
+      orderMarginAmount,
     );
 
     const payCols = await getOrdersPayColsCached(pool);
@@ -3544,7 +3581,7 @@ router.post("/", authRequired, async (req, res) => {
       affiliate: affiliatePack.affiliate,
       orderId,
       displayCode,
-      baseAmount: itemsAmount,
+      baseAmount: orderMarginAmount,
       orderMeta: affiliatePack.orderMeta,
     });
 
@@ -3562,7 +3599,8 @@ router.post("/", authRequired, async (req, res) => {
         (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price ||
+          promoCols.unit_cost_snapshot)
       ) {
         const cols2 = [
           "order_id",
@@ -3598,6 +3636,11 @@ router.post("/", authRequired, async (req, res) => {
         if (promoCols.promo_value) {
           cols2.push("promo_value");
           vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+        }
+
+        if (promoCols.unit_cost_snapshot) {
+          cols2.push("unit_cost_snapshot");
+          vals2.push(it.unit_cost != null ? Number(it.unit_cost) : null);
         }
 
         await conn.query(
@@ -3650,6 +3693,16 @@ router.post("/", authRequired, async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -3804,12 +3857,16 @@ router.post("/guest", async (req, res) => {
     ).toUpperCase();
 
     const orderTotal = itemsAmount + deliveryFee;
-    const totalCommission = computeDuuminiCommission(itemsAmount);
+
+    // ✅ Phase 2 : commission calculée sur la marge (prix - coût
+    // fournisseur), pas sur le prix — orderTotal reste basé sur le prix.
+    const orderMarginAmount = sumOrderMargin(cleanItems);
+    const totalCommission = computeDuuminiCommission(orderMarginAmount);
 
     const affiliatePack = await buildAffiliateOrderMeta(
       conn,
       affiliate_code,
-      itemsAmount,
+      orderMarginAmount,
     );
 
     const payCols = await getOrdersPayColsCached(pool);
@@ -3960,7 +4017,7 @@ router.post("/guest", async (req, res) => {
       affiliate: affiliatePack.affiliate,
       orderId,
       displayCode,
-      baseAmount: itemsAmount,
+      baseAmount: orderMarginAmount,
       orderMeta: affiliatePack.orderMeta,
     });
 
@@ -3978,7 +4035,8 @@ router.post("/guest", async (req, res) => {
         (promoCols.promo_applied ||
           promoCols.promo_type ||
           promoCols.promo_value ||
-          promoCols.base_unit_price)
+          promoCols.base_unit_price ||
+          promoCols.unit_cost_snapshot)
       ) {
         const cols2 = [
           "order_id",
@@ -4014,6 +4072,11 @@ router.post("/guest", async (req, res) => {
         if (promoCols.promo_value) {
           cols2.push("promo_value");
           vals2.push(it.promo_value != null ? Number(it.promo_value) : null);
+        }
+
+        if (promoCols.unit_cost_snapshot) {
+          cols2.push("unit_cost_snapshot");
+          vals2.push(it.unit_cost != null ? Number(it.unit_cost) : null);
         }
 
         await conn.query(
@@ -4066,6 +4129,16 @@ router.post("/guest", async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -5349,6 +5422,17 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
           [qty, it.product_id],
         );
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "IN_RETURN_CANCEL",
+        qty,
+        referenceType: "ORDER",
+        referenceId: id,
+        performedBy: req.user?.id || null,
+        note: "Annulation commande",
+      });
     }
 
     await conn.query(
