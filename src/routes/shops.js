@@ -81,10 +81,34 @@ function uploadBufferToCloudinary(file, folder = "shops") {
   });
 }
 
+// ✅ shop_type (VENDOR/SUPPLIER/RESTAURANT) peut ne pas encore exister sur
+// un environnement pas à jour (voir src/scripts/addShopType.js) — détection
+// paresseuse + cache mémoire process, même esprit que le reste de l'API.
+let _shopsHasShopTypeCache = null;
+
+async function shopsHasShopType(pool) {
+  if (_shopsHasShopTypeCache != null) return _shopsHasShopTypeCache;
+
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'shops'
+        AND COLUMN_NAME = 'shop_type'
+    `
+  );
+
+  _shopsHasShopTypeCache = rows.length > 0;
+  return _shopsHasShopTypeCache;
+}
+
+const SHOP_TYPES = ["VENDOR", "SUPPLIER", "RESTAURANT"];
+
 /* ============================================================================
  * GET /api/shops
  * Liste paginée des boutiques (publique), avec recherche q optionnelle.
- * Query: page, pageSize, q
+ * Query: page, pageSize, q, shopType (une valeur ou liste séparée par virgule)
  * ==========================================================================*/
 router.get("/", async (req, res) => {
   const { page, pageSize, offset, limit } = getPagination(req);
@@ -97,6 +121,18 @@ router.get("/", async (req, res) => {
     if (q) {
       where += " AND (s.name LIKE ? OR s.city LIKE ?)";
       paramsCount.push(`%${q}%`, `%${q}%`);
+    }
+
+    if (req.query.shopType && (await shopsHasShopType(pool))) {
+      const types = String(req.query.shopType)
+        .split(",")
+        .map((t) => t.trim().toUpperCase())
+        .filter((t) => SHOP_TYPES.includes(t));
+
+      if (types.length) {
+        where += ` AND s.shop_type IN (${types.map(() => "?").join(",")})`;
+        paramsCount.push(...types);
+      }
     }
 
     const [[{ total }]] = await pool.query(
@@ -421,6 +457,7 @@ router.post(
         lng,
         logo: logoText,
         cover: coverText,
+        shop_type,
       } = req.body || {};
 
       const rawName = (name ?? "").toString().trim();
@@ -428,6 +465,25 @@ router.post(
         return res.status(400).json({ error: "name required" });
       }
       const finalName = rawName;
+
+      // ✅ Seul l'admin peut choisir librement le type
+      // (VENDOR/SUPPLIER/RESTAURANT) — un compte VENDEUR qui crée sa propre
+      // boutique est automatiquement taggé VENDOR (cohérent avec son rôle,
+      // alimente naturellement la page Vendeurs pour les prochains
+      // vendeurs). Un admin qui ne précise rien laisse le type non défini
+      // (NULL) plutôt que de forcer VENDOR — comportement neutre identique
+      // aux boutiques existantes, qui restent NULL tant qu'on ne les tague
+      // pas explicitement (voir addShopType.js).
+      const hasShopType = await shopsHasShopType(pool);
+      const requestedType = String(shop_type || "").toUpperCase();
+      let finalShopType = null;
+      if (hasShopType) {
+        if (isAdmin(req.user) && SHOP_TYPES.includes(requestedType)) {
+          finalShopType = requestedType;
+        } else if (!isAdmin(req.user)) {
+          finalShopType = "VENDOR";
+        }
+      }
 
       const finalCountryCode = await normalizeCountryCode(
         pool,
@@ -458,26 +514,23 @@ router.post(
           ? description.trim()
           : null;
 
+      const insertCols = [
+        "owner_id", "name", "slug", "description", "category_id", "address", "city", "country",
+        "country_code", "lat", "lng", "logo", "cover",
+      ];
+      const insertVals = [
+        owner_id, finalName, slug, finalDescription, category_id || null, address || null,
+        city || null, country || "Maroc", finalCountryCode, lat || null, lng || null, logoUrl, coverUrl,
+      ];
+
+      if (hasShopType) {
+        insertCols.push("shop_type");
+        insertVals.push(finalShopType);
+      }
+
       const [r] = await pool.query(
-        `INSERT INTO shops (
-           owner_id, name, slug, description, category_id, address, city, country,
-           country_code, lat, lng, logo, cover
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          owner_id,
-          finalName,
-          slug,
-          finalDescription,
-          category_id || null,
-          address || null,
-          city || null,
-          country || "Maroc",
-          finalCountryCode,
-          lat || null,
-          lng || null,
-          logoUrl,
-          coverUrl,
-        ]
+        `INSERT INTO shops (${insertCols.join(", ")}) VALUES (${insertCols.map(() => "?").join(",")})`,
+        insertVals
       );
 
       const newId = r.insertId;
@@ -541,6 +594,7 @@ router.put(
         lng,
         logo: logoText,
         cover: coverText,
+        shop_type,
       } = req.body || {};
 
       const newName =
@@ -584,26 +638,37 @@ router.put(
           ? await normalizeCountryCode(pool, country_code || country, existing.country_code || "MA")
           : existing.country_code || "MA";
 
+      const setClauses = [
+        "name=?", "slug=?", "description=?", "category_id=?", "address=?", "city=?", "country=?",
+        "country_code=?", "lat=?", "lng=?", "logo=?", "cover=?",
+      ];
+      const setVals = [
+        newName, newSlug, finalDescription,
+        category_id != null ? category_id : existing.category_id,
+        address != null ? address : existing.address,
+        city != null ? city : existing.city,
+        country || existing.country || "Maroc",
+        newCountryCode,
+        lat != null ? lat : existing.lat,
+        lng != null ? lng : existing.lng,
+        logoUrl,
+        coverUrl,
+      ];
+
+      // ✅ Seul l'admin peut changer le type d'une boutique existante.
+      if (shop_type !== undefined && isAdmin(req.user) && (await shopsHasShopType(pool))) {
+        const requestedType = String(shop_type || "").toUpperCase();
+        if (SHOP_TYPES.includes(requestedType)) {
+          setClauses.push("shop_type=?");
+          setVals.push(requestedType);
+        }
+      }
+
+      setVals.push(id);
+
       await pool.query(
-        `UPDATE shops
-         SET name=?, slug=?, description=?, category_id=?, address=?, city=?, country=?,
-             country_code=?, lat=?, lng=?, logo=?, cover=?
-         WHERE id=?`,
-        [
-          newName,
-          newSlug,
-          finalDescription,
-          category_id != null ? category_id : existing.category_id,
-          address != null ? address : existing.address,
-          city != null ? city : existing.city,
-          country || existing.country || "Maroc",
-          newCountryCode,
-          lat != null ? lat : existing.lat,
-          lng != null ? lng : existing.lng,
-          logoUrl,
-          coverUrl,
-          id,
-        ]
+        `UPDATE shops SET ${setClauses.join(", ")} WHERE id=?`,
+        setVals
       );
 
       const [rows] = await pool.query(
