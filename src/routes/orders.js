@@ -26,6 +26,7 @@ const {
   pushAffiliateOrderColumns,
   finalizeAffiliateOrder,
 } = require("../services/affiliates");
+const { recordStockMovement } = require("../lib/stockLedger");
 const router = Router();
 
 /* =========================
@@ -36,7 +37,7 @@ const DUUMINI_COMMISSION_RATE = 0.09;
 /* =========================
  * CONFIG WHATSAPP ADMIN
  * =======================*/
-const ADMIN_WHATSAPP_HARDCODED_RAW = "+212623677884";
+const ADMIN_WHATSAPP_HARDCODED_RAW = "+212656568827";
 const ADMIN_WHATSAPP = String(ADMIN_WHATSAPP_HARDCODED_RAW || "")
   .trim()
   .startsWith("whatsapp:")
@@ -3213,6 +3214,16 @@ router.post("/admin", authRequired, async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -3650,6 +3661,16 @@ router.post("/", authRequired, async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -4066,6 +4087,16 @@ router.post("/guest", async (req, res) => {
           it.product_id,
         ]);
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "OUT_SALE",
+        qty: it.qty,
+        referenceType: "ORDER",
+        referenceId: orderId,
+        performedBy: req.user?.id || null,
+      });
     }
 
     await conn.commit();
@@ -5349,6 +5380,17 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
           [qty, it.product_id],
         );
       }
+
+      await recordStockMovement(conn, {
+        productId: it.product_id,
+        variantId: it.variant_id || null,
+        type: "IN_RETURN_CANCEL",
+        qty,
+        referenceType: "ORDER",
+        referenceId: id,
+        performedBy: req.user?.id || null,
+        note: "Annulation commande",
+      });
     }
 
     await conn.query(

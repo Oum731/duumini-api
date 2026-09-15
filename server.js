@@ -90,6 +90,14 @@ try {
   console.warn("[supplier_orders] route missing:", e?.message || e);
 }
 
+// ✅ NEW: Warehouses / stock management
+let warehouses = null;
+try {
+  warehouses = require("./src/routes/warehouses");
+} catch (e) {
+  console.warn("[warehouses] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Admin validation/publish for AI content (SEO-only)
 let adminContentAiRoutes = null;
 try {
@@ -415,6 +423,10 @@ if (supplierProducts) {
 
 if (supplierOrders) {
   app.use("/api/supplier-orders", supplierOrders);
+}
+
+if (warehouses) {
+  app.use("/api/warehouses", warehouses);
 }
 
 /* =========================

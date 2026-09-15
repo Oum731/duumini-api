@@ -179,4 +179,86 @@ router.post("/sales/backfill-all", authRequired, async (req, res) => {
   }
 });
 
+/* =========================
+ * ✅ NEW: Créances clients ("qui doit combien")
+ * S'appuie sur orders.payment_status / paid_amount (déjà utilisés ailleurs,
+ * ex. orders.js payCols) — vérifiés dynamiquement au cas où la migration
+ * n'a pas encore été jouée sur cet environnement. Même logique de
+ * regroupement client (compte ou invité via orders.contact) que le
+ * portefeuille commercial (commercialProfiles.js /:userId/portfolio), pour
+ * rester cohérent entre les deux vues.
+ * =======================*/
+async function detectOrdersPaymentCols(pool) {
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'
+        AND COLUMN_NAME IN ('payment_status', 'paid_amount')
+    `
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return {
+    payment_status: found.has("payment_status"),
+    paid_amount: found.has("paid_amount"),
+  };
+}
+
+router.get("/debts", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const pool = getPool();
+    const payCols = await detectOrdersPaymentCols(pool);
+
+    if (!payCols.payment_status || !payCols.paid_amount) {
+      return res.status(409).json({
+        error:
+          "Colonnes orders.payment_status/paid_amount absentes sur cet environnement. Ajoute la migration puis réessaie.",
+      });
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        MAX(o.user_id) AS client_user_id,
+        COALESCE(MAX(u.first_name), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.first_name'))), 'null')) AS first_name,
+        COALESCE(MAX(u.last_name), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.last_name'))), 'null')) AS last_name,
+        COALESCE(MAX(u.phone), NULLIF(MAX(JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone'))), 'null')) AS phone,
+        COUNT(*) AS orders_count,
+        SUM(o.total) AS total_amount,
+        SUM(COALESCE(o.paid_amount, 0)) AS paid_amount,
+        SUM(o.total - COALESCE(o.paid_amount, 0)) AS amount_due,
+        MAX(o.created_at) AS last_order_at
+      FROM orders o
+      LEFT JOIN users u ON u.id = o.user_id
+      WHERE o.status <> 'CANCELLED'
+        AND COALESCE(o.payment_status, 'UNPAID') <> 'PAID'
+      GROUP BY COALESCE(o.user_id, JSON_UNQUOTE(JSON_EXTRACT(o.contact, '$.phone')))
+      HAVING amount_due > 0
+      ORDER BY amount_due DESC
+      LIMIT 500
+      `
+    );
+
+    const items = (rows || []).map((r) => ({
+      ...r,
+      orders_count: Number(r.orders_count),
+      total_amount: Number(r.total_amount),
+      paid_amount: Number(r.paid_amount),
+      amount_due: Number(r.amount_due),
+    }));
+
+    return res.json({
+      items,
+      total_amount_due: items.reduce((acc, r) => acc + r.amount_due, 0),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
