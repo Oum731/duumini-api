@@ -2501,7 +2501,11 @@ router.put("/:id/admin-discount", authRequired, async (req, res) => {
     return res.status(400).json({ error: "invalid id" });
   }
 
-  if (!isAdmin(req.user)) {
+  // ✅ Ouvert aux ADMIN et aux comptes COMMERCIAL — cohérent avec la
+  // création de commande (POST /admin), où un commercial peut déjà
+  // appliquer une réduction ; ça permet aussi de corriger une commande
+  // déjà créée sans avoir besoin d'un admin.
+  if (!isAdmin(req.user) && !isCommercial(req.user)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
@@ -5470,6 +5474,219 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
     try {
       await conn.rollback();
     } catch {}
+
+    return res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
+/* =========================
+ * ✅ NEW: édition d'une commande existante (client, produits, montant)
+ * sans passer par annulation + recréation. Réservé à ADMIN/COMMERCIAL,
+ * bloqué sur une commande DONE/CANCELLED. Les deux blocs (contact, items)
+ * sont indépendants : on peut n'envoyer que celui qu'on veut modifier.
+ * =======================*/
+router.put("/:id/edit", authRequired, async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+
+  if (!isAdmin(req.user) && !isCommercial(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const pool = getPool();
+  const conn = await pool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [[order]] = await conn.query(
+      `SELECT * FROM orders WHERE id = ? FOR UPDATE`,
+      [id],
+    );
+
+    if (!order) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    if (["DONE", "CANCELLED"].includes(order.status || "")) {
+      await conn.rollback();
+      return res.status(409).json({
+        error: "Cannot edit a completed or cancelled order",
+      });
+    }
+
+    let itemsChanged = false;
+    let newTotal = Number(order.total || 0);
+
+    // --- Client (contact) ---
+    if (req.body?.contact && typeof req.body.contact === "object") {
+      const contactObj = buildContactFromPayload(req.body.contact);
+      await conn.query(`UPDATE orders SET contact = ? WHERE id = ?`, [
+        JSON.stringify(contactObj),
+        id,
+      ]);
+    }
+
+    // --- Produits / quantités (remplace tout l'assortiment) ---
+    if (Array.isArray(req.body?.items)) {
+      if (!req.body.items.length) {
+        await conn.rollback();
+        return res.status(400).json({ error: "items cannot be empty" });
+      }
+
+      const [oldItems] = await conn.query(
+        `SELECT product_id, variant_id, qty, unit_price FROM order_items WHERE order_id = ?`,
+        [id],
+      );
+
+      const oldItemsAmount = oldItems.reduce(
+        (acc, it) => acc + Number(it.unit_price || 0) * Number(it.qty || 0),
+        0,
+      );
+      const deliveryFee = Number(order.total || 0) - oldItemsAmount;
+
+      // Restitue le stock des anciens articles avant de reconstruire.
+      for (const it of oldItems) {
+        const qty = Number(it.qty || 0);
+        if (!qty) continue;
+
+        if (it.variant_id) {
+          await conn.query(
+            `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
+            [qty, it.variant_id],
+          );
+        } else {
+          await conn.query(
+            `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
+            [qty, it.product_id],
+          );
+        }
+
+        await recordStockMovement(conn, {
+          productId: it.product_id,
+          variantId: it.variant_id || null,
+          type: "IN_RETURN_CANCEL",
+          qty,
+          referenceType: "ORDER",
+          referenceId: id,
+          performedBy: req.user.id,
+          note: "Modification commande — retrait ancien article",
+        });
+      }
+
+      await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [id]);
+
+      // Même validation/tarification qu'à la création (stock verrouillé,
+      // prix courant, promo courante, coût courant pour la marge).
+      const { cleanItems, itemsAmount } = await buildCleanItemsWithPromo({
+        conn,
+        items: req.body.items,
+      });
+
+      for (const it of cleanItems) {
+        const currentStock = Number(it.current_stock ?? 0);
+
+        if (it.current_stock !== null && it.current_stock !== undefined && currentStock < it.qty) {
+          const err = new Error("STOCK_INSUFFICIENT");
+          err.statusCode = 400;
+          err.payload = {
+            code: "STOCK_INSUFFICIENT",
+            message: "La quantité demandée n'est plus disponible pour un des produits.",
+            product_id: it.product_id,
+            variant_id: it.variant_id || null,
+            requested: it.qty,
+            available: currentStock,
+          };
+          throw err;
+        }
+
+        await conn.query(
+          `INSERT INTO order_items (order_id, product_id, variant_id, qty, unit_price)
+           VALUES (?, ?, ?, ?, ?)`,
+          [id, it.product_id, it.variant_id, it.qty, it.unit_price],
+        );
+
+        if (it.variant_id) {
+          await conn.query(
+            `UPDATE product_variants SET stock = COALESCE(stock,0) - ? WHERE id = ?`,
+            [it.qty, it.variant_id],
+          );
+        } else {
+          await conn.query(
+            `UPDATE products SET stock = COALESCE(stock,0) - ? WHERE id = ?`,
+            [it.qty, it.product_id],
+          );
+        }
+
+        await recordStockMovement(conn, {
+          productId: it.product_id,
+          variantId: it.variant_id || null,
+          type: "OUT_SALE",
+          qty: it.qty,
+          referenceType: "ORDER",
+          referenceId: id,
+          performedBy: req.user.id,
+          note: "Modification commande — nouvel article",
+        });
+      }
+
+      const orderMarginAmount = sumOrderMargin(cleanItems);
+      const totalCommission = computeDuuminiCommission(orderMarginAmount);
+      newTotal = deliveryFee + itemsAmount;
+
+      await conn.query(
+        `UPDATE orders SET total = ?, commission_duumini = ? WHERE id = ?`,
+        [+newTotal.toFixed(2), totalCommission, id],
+      );
+
+      // Commission commerciale : uniquement si encore PENDING (pas déjà
+      // validée/réglée) — une commission approuvée/payée n'est jamais
+      // recalculée automatiquement.
+      if (order.commercial_id && order.commercial_commission_status === "PENDING") {
+        const commissionAmount = +(
+          orderMarginAmount * Number(order.commercial_commission_rate || 0)
+        ).toFixed(2);
+
+        await conn.query(
+          `UPDATE orders SET commercial_commission_amount = ? WHERE id = ?`,
+          [commissionAmount, id],
+        );
+      }
+
+      itemsChanged = true;
+    }
+
+    await conn.commit();
+
+    try {
+      if (order.user_id) {
+        const displayCode = buildDisplayCode(id);
+        const { notifyUser } = require("../services/notify");
+        await notifyUser(order.user_id, "ORDER_STATUS", {
+          title: `Commande ${displayCode} modifiée`,
+          body: `Votre commande ${displayCode} a été mise à jour.`,
+          order_id: id,
+          display_code: displayCode,
+          status: order.status,
+        });
+      }
+    } catch {}
+
+    return res.json({ ok: true, items_changed: itemsChanged, total: newTotal });
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+
+    if (e.statusCode) {
+      return res.status(e.statusCode).json(e.payload || { error: e.message });
+    }
 
     return res.status(500).json({ error: e.message });
   } finally {
