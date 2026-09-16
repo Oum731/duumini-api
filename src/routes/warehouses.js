@@ -178,6 +178,15 @@ router.get("/:id/stock", authRequired, requireWarehouseAccess, async (req, res) 
       params,
     );
 
+    // Indépendant de q/lowOnly/pagination : le vrai total sous le seuil
+    // d'alerte pour tout l'entrepôt, pour un KPI exact même filtré/paginé.
+    const [[{ lowCount }]] = await pool.query(
+      `SELECT COUNT(*) AS lowCount
+       FROM warehouse_stock ws
+       WHERE ws.warehouse_id = ? AND ws.quantity <= ws.min_threshold`,
+      [req.warehouseId],
+    );
+
     const [rows] = await pool.query(
       `SELECT ws.id, ws.warehouse_id, ws.product_id, ws.variant_id, ws.quantity,
               ws.min_threshold, ws.updated_at,
@@ -192,7 +201,11 @@ router.get("/:id/stock", authRequired, requireWarehouseAccess, async (req, res) 
       [...params, limit, offset],
     );
 
-    return res.json({ items: rows || [], pageInfo: buildPageInfo(total, page, pageSize) });
+    return res.json({
+      items: rows || [],
+      pageInfo: buildPageInfo(total, page, pageSize),
+      low_count: Number(lowCount || 0),
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

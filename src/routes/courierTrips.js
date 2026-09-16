@@ -331,6 +331,54 @@ router.get("/mine", authRequired, async (req, res) => {
   }
 });
 
+/* ========= GET /summary ========= */
+/* Totaux (courses livrées, commissions dues/réglées) sur l'ensemble des
+   courses correspondant aux filtres — indépendant de la pagination de la
+   liste (GET /), pour que les KPI restent exacts même quand la liste
+   n'affiche qu'une page. Déclarée avant GET /:id pour ne pas être
+   interceptée par le paramètre :id. */
+router.get("/summary", authRequired, requireRole("ADMIN"), async (req, res) => {
+  try {
+    const pool = getPool();
+    const { status, country_code } = req.query;
+
+    const where = [];
+    const params = [];
+    if (status) {
+      where.push("status = ?");
+      params.push(String(status).toUpperCase());
+    }
+    if (country_code) {
+      where.push("country_code = ?");
+      params.push(String(country_code).toUpperCase());
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [[row]] = await pool.query(
+      `
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN status = 'DELIVERED' THEN 1 ELSE 0 END) AS delivered_count,
+        COALESCE(SUM(CASE WHEN status = 'DELIVERED' AND commission_status = 'PENDING' THEN commission_amount ELSE 0 END), 0) AS commission_pending,
+        COALESCE(SUM(CASE WHEN status = 'DELIVERED' AND commission_status = 'PAID' THEN commission_amount ELSE 0 END), 0) AS commission_paid
+      FROM courier_trips
+      ${whereSql}
+      `,
+      params
+    );
+
+    res.json({
+      total_count: Number(row.total_count || 0),
+      delivered_count: Number(row.delivered_count || 0),
+      commission_pending: Number(row.commission_pending || 0),
+      commission_paid: Number(row.commission_paid || 0),
+    });
+  } catch (e) {
+    console.error("GET /api/courier-trips/summary error:", e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 /* ========= GET /:id ========= */
 /* Détail d'une course — demandeur, livreur assigné, ou admin. Alimente la
    page de suivi client (position live du livreur incluse). */
