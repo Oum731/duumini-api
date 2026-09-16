@@ -8,13 +8,30 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin, isSupplier } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { recordStockMovement } = require("../lib/stockLedger");
+const { recordStockMovement, getProductUnitsPerCarton } = require("../lib/stockLedger");
 
 const router = Router();
 
 function toPosInt(v) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
+// ✅ unit/base_qty (voir src/scripts/addSupplierDeliveryItemUnit.js) —
+// détection paresseuse + cache, même esprit que le reste de l'API.
+let _deliveryItemsHasUnitCache = null;
+
+async function deliveryItemsHasUnit(pool) {
+  if (_deliveryItemsHasUnitCache != null) return _deliveryItemsHasUnitCache;
+  const [rows] = await pool.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'supplier_delivery_items'
+        AND COLUMN_NAME = 'unit'`,
+  );
+  _deliveryItemsHasUnitCache = rows.length > 0;
+  return _deliveryItemsHasUnitCache;
 }
 
 async function resolveOwnSupplierShopId(pool, userId) {
@@ -144,9 +161,11 @@ router.get("/:id", authRequired, async (req, res) => {
       }
     }
 
+    const hasUnitCol = await deliveryItemsHasUnit(pool);
     const [items] = await pool.query(
       `
-      SELECT sdi.id, sdi.product_id, sdi.variant_id, sdi.qty, sdi.unit_cost,
+      SELECT sdi.id, sdi.product_id, sdi.variant_id, sdi.qty, sdi.unit_cost
+             ${hasUnitCol ? ", sdi.unit, sdi.base_qty" : ", 'PIECE' AS unit, sdi.qty AS base_qty"},
              p.name AS product_name,
              v.size AS variant_size, v.color AS variant_color, v.sku AS variant_sku
       FROM supplier_delivery_items sdi
@@ -167,7 +186,11 @@ router.get("/:id", authRequired, async (req, res) => {
 /* =========================
  * POST /api/supplier-deliveries
  * Body: { supplier_shop_id (admin only, sinon déduit), warehouse_id,
- *         reference?, note?, items: [{ product_id, variant_id?, qty, unit_cost }] }
+ *         reference?, note?,
+ *         items: [{ product_id, variant_id?, qty, unit_cost, unit? }] }
+ * unit: "PIECE" (défaut) ou "CARTON" — qty/unit_cost restent tels que
+ * saisis (fidèles au bon de livraison), convertis en pièces en interne
+ * via products.units_per_carton pour le stock/ledger/marge.
  * Visible: ADMIN, FOURNISSEUR (sa propre boutique), gestionnaire d'entrepôt
  * ======================= */
 router.post("/", authRequired, async (req, res) => {
@@ -201,6 +224,7 @@ router.post("/", authRequired, async (req, res) => {
       const variantId = it?.variant_id ? toPosInt(it.variant_id) : null;
       const qty = Number(it?.qty);
       const unitCost = Number(it?.unit_cost);
+      const unit = String(it?.unit || "PIECE").toUpperCase() === "CARTON" ? "CARTON" : "PIECE";
 
       if (!productId || !Number.isFinite(qty) || qty <= 0) {
         return res.status(400).json({ error: "Each item needs a valid product_id and qty" });
@@ -209,13 +233,15 @@ router.post("/", authRequired, async (req, res) => {
         return res.status(400).json({ error: "Each item needs a valid unit_cost" });
       }
 
-      cleanItems.push({ productId, variantId, qty: Math.trunc(qty), unitCost });
+      cleanItems.push({ productId, variantId, qty: Math.trunc(qty), unitCost, unit });
     }
 
     const conn = await pool.getConnection();
 
     try {
       await conn.beginTransaction();
+
+      const hasUnitCol = await deliveryItemsHasUnit(pool);
 
       const [r] = await conn.query(
         `INSERT INTO supplier_deliveries
@@ -227,19 +253,35 @@ router.post("/", authRequired, async (req, res) => {
       const deliveryId = r.insertId;
 
       for (const it of cleanItems) {
-        await conn.query(
-          `INSERT INTO supplier_delivery_items (delivery_id, product_id, variant_id, qty, unit_cost)
-           VALUES (?, ?, ?, ?, ?)`,
-          [deliveryId, it.productId, it.variantId, it.qty, it.unitCost],
-        );
+        // Le carton reste l'unité de facturation (qty/unit_cost saisis
+        // fidèles au bon de livraison), mais le stock/ledger/marge
+        // travaillent toujours en pièces (unité canonique, voir
+        // stockLedger.js) — d'où la conversion via units_per_carton.
+        const unitsPerCarton = it.unit === "CARTON" ? await getProductUnitsPerCarton(conn, it.productId) : 1;
+        const baseQty = it.qty * unitsPerCarton;
+        const baseUnitCost = it.unitCost / unitsPerCarton;
+
+        if (hasUnitCol) {
+          await conn.query(
+            `INSERT INTO supplier_delivery_items (delivery_id, product_id, variant_id, qty, unit, base_qty, unit_cost)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [deliveryId, it.productId, it.variantId, it.qty, it.unit, baseQty, it.unitCost],
+          );
+        } else {
+          await conn.query(
+            `INSERT INTO supplier_delivery_items (delivery_id, product_id, variant_id, qty, unit_cost)
+             VALUES (?, ?, ?, ?, ?)`,
+            [deliveryId, it.productId, it.variantId, baseQty, it.unitCost],
+          );
+        }
 
         await recordStockMovement(conn, {
           warehouseId,
           productId: it.productId,
           variantId: it.variantId,
           type: "IN_PURCHASE",
-          qty: it.qty,
-          unitCost: it.unitCost,
+          qty: baseQty,
+          unitCost: baseUnitCost,
           referenceType: "SUPPLIER_DELIVERY",
           referenceId: deliveryId,
           performedBy: req.user.id,
@@ -251,14 +293,22 @@ router.post("/", authRequired, async (req, res) => {
         if (it.variantId) {
           await conn.query(
             `UPDATE product_variants SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
-            [it.qty, it.variantId],
+            [baseQty, it.variantId],
           );
         } else {
           await conn.query(
             `UPDATE products SET stock = COALESCE(stock,0) + ? WHERE id = ?`,
-            [it.qty, it.productId],
+            [baseQty, it.productId],
           );
         }
+
+        // Prix d'achat = dernière livraison reçue (utilisé pour la marge,
+        // voir src/lib/pricing.js) — toujours ramené au prix par pièce
+        // pour rester cohérent avec order_items.unit_cost_snapshot.
+        await conn.query(`UPDATE products SET supplier_price_ht = ? WHERE id = ?`, [
+          +baseUnitCost.toFixed(2),
+          it.productId,
+        ]);
       }
 
       await conn.commit();

@@ -24,7 +24,7 @@ const MOVEMENT_TYPES = [
 
 const OUTBOUND_TYPES = new Set(["OUT_SALE", "OUT_ADJUSTMENT", "TRANSFER_OUT"]);
 
-const MISSING_TABLE_CODES = new Set(["ER_NO_SUCH_TABLE"]);
+const MISSING_TABLE_CODES = new Set(["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"]);
 
 let cachedDefaultWarehouseId = null;
 
@@ -160,9 +160,98 @@ async function recordStockMovement(
   }
 }
 
+/**
+ * Détermine l'entrepôt à utiliser pour un produit : sa propre surcharge
+ * (products.warehouse_id) en premier, sinon l'entrepôt par défaut de sa
+ * boutique (shops.default_warehouse_id), sinon le premier entrepôt actif.
+ * Tant qu'un seul entrepôt existe, les trois se résolvent au même endroit.
+ */
+async function resolveWarehouseId(runner, { warehouseId = null, shopId = null } = {}) {
+  if (warehouseId) return Number(warehouseId);
+
+  if (shopId) {
+    try {
+      const r = runner || getPool();
+      const [[row]] = await r.query(
+        `SELECT default_warehouse_id FROM shops WHERE id = ? LIMIT 1`,
+        [shopId],
+      );
+      if (row?.default_warehouse_id) return Number(row.default_warehouse_id);
+    } catch (e) {
+      if (!isMissingTableError(e)) {
+        console.warn("[stockLedger] resolveWarehouseId shop lookup failed:", e?.message || e);
+      }
+    }
+  }
+
+  return getDefaultWarehouseId(runner);
+}
+
+/**
+ * Retrouve dans le ledger l'entrepôt exact d'où une vente a été
+ * décomptée, pour qu'une annulation/modification restitue le stock au
+ * même endroit — même si l'entrepôt par défaut du produit/boutique a
+ * changé depuis la vente.
+ */
+async function findOrderItemWarehouseId(runner, { orderId, productId, variantId = null }) {
+  try {
+    const r = runner || getPool();
+    const [[row]] = await r.query(
+      `SELECT warehouse_id FROM stock_movements
+       WHERE reference_type = 'ORDER' AND reference_id = ? AND product_id = ?
+         AND (variant_id <=> ?) AND type = 'OUT_SALE'
+       ORDER BY id DESC LIMIT 1`,
+      [orderId, productId, variantId],
+    );
+    return row?.warehouse_id ? Number(row.warehouse_id) : null;
+  } catch (e) {
+    if (!isMissingTableError(e)) {
+      console.warn("[stockLedger] findOrderItemWarehouseId failed:", e?.message || e);
+    }
+    return null;
+  }
+}
+
+/**
+ * Nombre de pièces par carton pour un produit (1 = pas de conditionnement
+ * carton connu). Best-effort : renvoie 1 si la colonne n'est pas encore
+ * migrée ou si le produit n'a pas de valeur définie.
+ */
+async function getProductUnitsPerCarton(runner, productId) {
+  try {
+    const r = runner || getPool();
+    const [[row]] = await r.query(`SELECT units_per_carton FROM products WHERE id = ? LIMIT 1`, [
+      productId,
+    ]);
+    const n = Number(row?.units_per_carton);
+    return n > 0 ? n : 1;
+  } catch (e) {
+    if (!isMissingTableError(e)) {
+      console.warn("[stockLedger] getProductUnitsPerCarton failed:", e?.message || e);
+    }
+    return 1;
+  }
+}
+
+/**
+ * Convertit une quantité saisie en cartons vers des pièces (unité
+ * canonique du stock). `unit` absent/"PIECE" laisse la quantité inchangée.
+ */
+function toBaseQty(qty, unit, unitsPerCarton) {
+  const n = Number(qty) || 0;
+  if (String(unit).toUpperCase() === "CARTON") {
+    return n * (Number(unitsPerCarton) > 0 ? Number(unitsPerCarton) : 1);
+  }
+  return n;
+}
+
 module.exports = {
   MOVEMENT_TYPES,
   getDefaultWarehouseId,
   upsertWarehouseStock,
   recordStockMovement,
+  resolveWarehouseId,
+  findOrderItemWarehouseId,
+  getProductUnitsPerCarton,
+  toBaseQty,
 };

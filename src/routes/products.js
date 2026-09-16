@@ -425,6 +425,35 @@ async function detectCitiesColumn(conn) {
   return candidates.find((c) => found.has(c)) || null;
 }
 
+let _productStockCols = null;
+let _productStockColsLoaded = false;
+
+async function detectProductStockCols(conn) {
+  const candidates = ["warehouse_id", "units_per_carton"];
+  const [rows] = await conn.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'products'
+        AND COLUMN_NAME IN (${candidates.map(() => "?").join(",")})`,
+    candidates
+  );
+  const found = new Set((rows || []).map((r) => r.COLUMN_NAME));
+  return { warehouse_id: found.has("warehouse_id"), units_per_carton: found.has("units_per_carton") };
+}
+
+async function getProductStockColsCached(pool) {
+  if (_productStockColsLoaded) return _productStockCols;
+  const conn = await pool.getConnection();
+  try {
+    _productStockCols = await detectProductStockCols(conn);
+    _productStockColsLoaded = true;
+    return _productStockCols;
+  } finally {
+    conn.release();
+  }
+}
+
 function allowTrimList(arr) {
   const out = [];
   const seen = new Set();
@@ -867,6 +896,12 @@ function mapProductRow(r) {
   const min_price =
     r.min_price == null || r.min_price === "" ? null : Number(r.min_price ?? 0);
 
+  const unitsPerCarton =
+    r.units_per_carton == null || Number(r.units_per_carton) < 2
+      ? null
+      : Number(r.units_per_carton);
+  const stockPieces = r.stock == null ? null : Number(r.stock);
+
   const merged = {
     ...base,
     has_variants: variants_count > 0,
@@ -878,6 +913,15 @@ function mapProductRow(r) {
     supplier_stock: r.supplier_stock == null ? null : Number(r.supplier_stock),
     supplier_cost: r.supplier_cost == null ? null : Number(r.supplier_cost),
     supplier_last_supply_at: r.supplier_last_supply_at ?? null,
+
+    // Stock affiché en cartons + pièces restantes quand le produit suit un
+    // conditionnement en carton (units_per_carton) — `stock` reste la
+    // quantité canonique en pièces, inchangée.
+    units_per_carton: unitsPerCarton,
+    stock_cartons:
+      unitsPerCarton && stockPieces != null ? Math.floor(stockPieces / unitsPerCarton) : null,
+    stock_pieces_remainder:
+      unitsPerCarton && stockPieces != null ? stockPieces % unitsPerCarton : null,
   };
 
   return withPromoComputed(merged);
@@ -2049,6 +2093,8 @@ router.post(
       description,
       conditionnement,
       stock,
+      units_per_carton,
+      warehouse_id,
       is_featured,
       promo_eligible,
       promo_discount_type,
@@ -2066,6 +2112,14 @@ router.post(
     const conn = await pool.getConnection();
     try {
       const citiesCol = await getCitiesColCached(pool);
+      const stockCols = await getProductStockColsCached(pool);
+
+      if (stockCols.warehouse_id && warehouse_id != null && warehouse_id !== "") {
+        const wid = Number(warehouse_id) || 0;
+        if (!wid) return res.status(400).json({ error: "warehouse_id invalide" });
+        const [[wh]] = await conn.query(`SELECT id FROM warehouses WHERE id = ? LIMIT 1`, [wid]);
+        if (!wh) return res.status(400).json({ error: "warehouse_id invalide" });
+      }
 
       let finalShopId = null;
       let finalCountryCode = "MA";
@@ -2233,6 +2287,19 @@ router.post(
         insertVals.push(citiesJson);
       }
 
+      if (stockCols.warehouse_id && warehouse_id != null && warehouse_id !== "") {
+        insertSql += `, warehouse_id`;
+        insertVals.push(Number(warehouse_id));
+      }
+
+      if (stockCols.units_per_carton && units_per_carton != null && units_per_carton !== "") {
+        const upc = Number(units_per_carton);
+        if (upc >= 2) {
+          insertSql += `, units_per_carton`;
+          insertVals.push(Math.trunc(upc));
+        }
+      }
+
       insertSql += `) VALUES (${insertVals.map(() => "?").join(",")})`;
 
       const [r] = await conn.query(insertSql, insertVals);
@@ -2347,6 +2414,8 @@ router.put(
       description,
       conditionnement,
       stock,
+      units_per_carton,
+      warehouse_id,
       is_featured,
       promo_eligible,
       promo_discount_type,
@@ -2365,6 +2434,14 @@ router.put(
     try {
       const citiesCol = await getCitiesColCached(pool);
       const drinkCatId = await getDrinkCategoryIdCached(pool);
+      const stockCols = await getProductStockColsCached(pool);
+
+      if (stockCols.warehouse_id && warehouse_id != null && warehouse_id !== "" && Number(warehouse_id) > 0) {
+        const [[wh]] = await conn.query(`SELECT id FROM warehouses WHERE id = ? LIMIT 1`, [
+          Number(warehouse_id),
+        ]);
+        if (!wh) return res.status(400).json({ error: "warehouse_id invalide" });
+      }
 
       const [[prod]] = await conn.query(
         `SELECT p.*, s.owner_id
@@ -2545,6 +2622,21 @@ router.put(
         const cities = allowTrimList(incomingCities || []);
         await conn.query(`UPDATE products SET ${citiesCol}=? WHERE id=?`, [
           JSON.stringify(cities),
+          id,
+        ]);
+      }
+
+      // warehouse_id/units_per_carton acceptent explicitement une valeur
+      // vide ("" ou 0) pour effacer la surcharge — pas de COALESCE ici.
+      if (stockCols.warehouse_id && warehouse_id !== undefined) {
+        const wid = Number(warehouse_id) || 0;
+        await conn.query(`UPDATE products SET warehouse_id=? WHERE id=?`, [wid > 0 ? wid : null, id]);
+      }
+
+      if (stockCols.units_per_carton && units_per_carton !== undefined) {
+        const upc = Number(units_per_carton) || 0;
+        await conn.query(`UPDATE products SET units_per_carton=? WHERE id=?`, [
+          upc >= 2 ? Math.trunc(upc) : null,
           id,
         ]);
       }
