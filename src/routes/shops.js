@@ -105,6 +105,28 @@ async function shopsHasShopType(pool) {
 
 const SHOP_TYPES = ["VENDOR", "SUPPLIER", "RESTAURANT"];
 
+// ✅ default_warehouse_id (voir src/scripts/addShopDefaultWarehouse.js) —
+// même détection paresseuse que shop_type, pour rester compatible avec un
+// environnement où la migration n'a pas encore été jouée.
+let _shopsHasDefaultWarehouseCache = null;
+
+async function shopsHasDefaultWarehouse(pool) {
+  if (_shopsHasDefaultWarehouseCache != null) return _shopsHasDefaultWarehouseCache;
+
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'shops'
+        AND COLUMN_NAME = 'default_warehouse_id'
+    `
+  );
+
+  _shopsHasDefaultWarehouseCache = rows.length > 0;
+  return _shopsHasDefaultWarehouseCache;
+}
+
 /* ============================================================================
  * GET /api/shops
  * Liste paginée des boutiques (publique), avec recherche q optionnelle.
@@ -595,6 +617,7 @@ router.put(
         logo: logoText,
         cover: coverText,
         shop_type,
+        default_warehouse_id,
       } = req.body || {};
 
       const newName =
@@ -662,6 +685,23 @@ router.put(
           setClauses.push("shop_type=?");
           setVals.push(requestedType);
         }
+      }
+
+      // ✅ Entrepôt par défaut de la boutique — décide où les commandes de
+      // ses produits décrémentent le stock (sauf surcharge produit). Seul
+      // l'admin l'assigne, comme pour shop_type. "" ou 0 efface la valeur.
+      if (
+        default_warehouse_id !== undefined &&
+        isAdmin(req.user) &&
+        (await shopsHasDefaultWarehouse(pool))
+      ) {
+        const wid = Number(default_warehouse_id) || 0;
+        if (wid > 0) {
+          const [[wh]] = await pool.query(`SELECT id FROM warehouses WHERE id = ? LIMIT 1`, [wid]);
+          if (!wh) return res.status(400).json({ error: "default_warehouse_id invalide" });
+        }
+        setClauses.push("default_warehouse_id=?");
+        setVals.push(wid > 0 ? wid : null);
       }
 
       setVals.push(id);

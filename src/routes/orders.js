@@ -26,7 +26,11 @@ const {
   pushAffiliateOrderColumns,
   finalizeAffiliateOrder,
 } = require("../services/affiliates");
-const { recordStockMovement } = require("../lib/stockLedger");
+const {
+  recordStockMovement,
+  resolveWarehouseId,
+  findOrderItemWarehouseId,
+} = require("../lib/stockLedger");
 const { sumOrderMargin } = require("../lib/pricing");
 const router = Router();
 
@@ -1703,7 +1707,23 @@ function normalizePaymentForRow(row, orderTotal, currency, payCols) {
   };
 }
 
+let _productsHasWarehouseIdCache = null;
+async function productsHasWarehouseId(conn) {
+  if (_productsHasWarehouseIdCache !== null) return _productsHasWarehouseIdCache;
+  try {
+    const [rows] = await conn.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'warehouse_id'`,
+    );
+    _productsHasWarehouseIdCache = rows.length > 0;
+  } catch {
+    _productsHasWarehouseIdCache = false;
+  }
+  return _productsHasWarehouseIdCache;
+}
+
 async function lockProductForItem(conn, productId) {
+  const hasWarehouseId = await productsHasWarehouseId(conn);
   const [[p]] = await conn.query(
     `
       SELECT
@@ -1711,6 +1731,7 @@ async function lockProductForItem(conn, productId) {
         p.price,
         p.stock,
         p.shop_id,
+        ${hasWarehouseId ? "p.warehouse_id," : "NULL AS warehouse_id,"}
         p.country_code,
         p.promo_eligible,
         p.promo_discount_type,
@@ -2303,6 +2324,11 @@ async function buildCleanItemsWithPromo({ conn, items }) {
 
     const unit_price = promoPack.unit_price;
 
+    const warehouse_id = await resolveWarehouseId(conn, {
+      warehouseId: p.warehouse_id,
+      shopId: p.shop_id,
+    });
+
     cleanItems.push({
       product_id: p.id,
       qty,
@@ -2316,6 +2342,7 @@ async function buildCleanItemsWithPromo({ conn, items }) {
       current_stock,
       variant_id: variant_id || null,
       variant_meta,
+      warehouse_id,
     });
 
     // ✅ Le pays de la commande suit le premier article du panier — en
@@ -3242,6 +3269,7 @@ router.post("/admin", authRequired, async (req, res) => {
       }
 
       await recordStockMovement(conn, {
+        warehouseId: it.warehouse_id,
         productId: it.product_id,
         variantId: it.variant_id || null,
         type: "OUT_SALE",
@@ -3699,6 +3727,7 @@ router.post("/", authRequired, async (req, res) => {
       }
 
       await recordStockMovement(conn, {
+        warehouseId: it.warehouse_id,
         productId: it.product_id,
         variantId: it.variant_id || null,
         type: "OUT_SALE",
@@ -4135,6 +4164,7 @@ router.post("/guest", async (req, res) => {
       }
 
       await recordStockMovement(conn, {
+        warehouseId: it.warehouse_id,
         productId: it.product_id,
         variantId: it.variant_id || null,
         type: "OUT_SALE",
@@ -5406,8 +5436,14 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
       return res.status(409).json({ error: "Cannot cancel at this stage" });
     }
 
+    const hasWarehouseIdCol = await productsHasWarehouseId(conn);
     const [items] = await conn.query(
-      `SELECT product_id, variant_id, qty FROM order_items WHERE order_id = ? ORDER BY id ASC`,
+      `SELECT oi.product_id, oi.variant_id, oi.qty, p.shop_id
+              ${hasWarehouseIdCol ? ", p.warehouse_id" : ", NULL AS warehouse_id"}
+       FROM order_items oi
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = ?
+       ORDER BY oi.id ASC`,
       [id],
     );
 
@@ -5427,7 +5463,19 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
         );
       }
 
+      // Restitue au même entrepôt que la vente d'origine (ledger) ; à
+      // défaut (commande antérieure au module stock), retombe sur
+      // l'entrepôt courant du produit/boutique.
+      const warehouseId =
+        (await findOrderItemWarehouseId(conn, {
+          orderId: id,
+          productId: it.product_id,
+          variantId: it.variant_id || null,
+        })) ||
+        (await resolveWarehouseId(conn, { warehouseId: it.warehouse_id, shopId: it.shop_id }));
+
       await recordStockMovement(conn, {
+        warehouseId,
         productId: it.product_id,
         variantId: it.variant_id || null,
         type: "IN_RETURN_CANCEL",
@@ -5540,8 +5588,13 @@ router.put("/:id/edit", authRequired, async (req, res) => {
         return res.status(400).json({ error: "items cannot be empty" });
       }
 
+      const hasWarehouseIdColEdit = await productsHasWarehouseId(conn);
       const [oldItems] = await conn.query(
-        `SELECT product_id, variant_id, qty, unit_price FROM order_items WHERE order_id = ?`,
+        `SELECT oi.product_id, oi.variant_id, oi.qty, oi.unit_price, p.shop_id
+                ${hasWarehouseIdColEdit ? ", p.warehouse_id" : ", NULL AS warehouse_id"}
+         FROM order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+         WHERE oi.order_id = ?`,
         [id],
       );
 
@@ -5568,7 +5621,16 @@ router.put("/:id/edit", authRequired, async (req, res) => {
           );
         }
 
+        const warehouseId =
+          (await findOrderItemWarehouseId(conn, {
+            orderId: id,
+            productId: it.product_id,
+            variantId: it.variant_id || null,
+          })) ||
+          (await resolveWarehouseId(conn, { warehouseId: it.warehouse_id, shopId: it.shop_id }));
+
         await recordStockMovement(conn, {
+          warehouseId,
           productId: it.product_id,
           variantId: it.variant_id || null,
           type: "IN_RETURN_CANCEL",
@@ -5625,6 +5687,7 @@ router.put("/:id/edit", authRequired, async (req, res) => {
         }
 
         await recordStockMovement(conn, {
+          warehouseId: it.warehouse_id,
           productId: it.product_id,
           variantId: it.variant_id || null,
           type: "OUT_SALE",

@@ -9,7 +9,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { recordStockMovement } = require("../lib/stockLedger");
+const { recordStockMovement, getProductUnitsPerCarton } = require("../lib/stockLedger");
 
 const router = Router();
 
@@ -206,11 +206,12 @@ router.get("/:id/stock", authRequired, requireWarehouseAccess, async (req, res) 
 router.post("/:id/stock/adjust", authRequired, requireWarehouseAccess, async (req, res) => {
   const productId = toPosInt(req.body?.product_id);
   const variantId = req.body?.variant_id ? toPosInt(req.body.variant_id) : null;
-  const deltaQty = Number(req.body?.delta_qty);
+  const rawDeltaQty = Number(req.body?.delta_qty);
+  const unit = String(req.body?.unit || "PIECE").toUpperCase() === "CARTON" ? "CARTON" : "PIECE";
   const reason = req.body?.reason ? String(req.body.reason).trim() : "";
 
   if (!productId) return res.status(400).json({ error: "product_id is required" });
-  if (!Number.isFinite(deltaQty) || deltaQty === 0) {
+  if (!Number.isFinite(rawDeltaQty) || rawDeltaQty === 0) {
     return res.status(400).json({ error: "delta_qty must be a non-zero number" });
   }
   if (!reason) return res.status(400).json({ error: "reason is required" });
@@ -221,6 +222,16 @@ router.post("/:id/stock/adjust", authRequired, requireWarehouseAccess, async (re
   try {
     await conn.beginTransaction();
 
+    // Une saisie en cartons est convertie en pièces (unité canonique du
+    // stock) via products.units_per_carton ; en pièces, aucune conversion.
+    let deltaQty = rawDeltaQty;
+    let noteSuffix = "";
+    if (unit === "CARTON") {
+      const unitsPerCarton = await getProductUnitsPerCarton(conn, productId);
+      deltaQty = rawDeltaQty * unitsPerCarton;
+      noteSuffix = ` (${Math.abs(rawDeltaQty)} carton(s) × ${unitsPerCarton})`;
+    }
+
     const wid = await recordStockMovement(conn, {
       warehouseId: req.warehouseId,
       productId,
@@ -229,7 +240,7 @@ router.post("/:id/stock/adjust", authRequired, requireWarehouseAccess, async (re
       qty: Math.abs(deltaQty),
       referenceType: "MANUAL",
       performedBy: req.user.id,
-      note: reason,
+      note: reason + noteSuffix,
     });
 
     if (!wid) {
