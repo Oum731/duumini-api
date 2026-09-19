@@ -187,11 +187,37 @@ router.get("/:id/stock", authRequired, requireWarehouseAccess, async (req, res) 
       [req.warehouseId],
     );
 
+    // Valeur totale du stock (quantité × CMP), même esprit que la
+    // colonne "Valeur stock (DH)" du classeur — indépendante de la page.
+    const [[{ totalValue }]] = await pool.query(
+      `SELECT COALESCE(SUM(ws.quantity * p.supplier_price_ht), 0) AS totalValue
+       FROM warehouse_stock ws
+       INNER JOIN products p ON p.id = ws.product_id
+       WHERE ws.warehouse_id = ?`,
+      [req.warehouseId],
+    );
+
+    // Entrées/Sorties cumulées (tout l'historique du ledger pour ce
+    // produit/variante dans cet entrepôt) + CMP/conditionnement du produit
+    // — mêmes colonnes que le classeur de gestion existant (onglet Stock),
+    // pour que la page affiche la même chose que ce que le client suivait
+    // à la main.
     const [rows] = await pool.query(
       `SELECT ws.id, ws.warehouse_id, ws.product_id, ws.variant_id, ws.quantity,
               ws.min_threshold, ws.updated_at,
               p.name AS product_name, p.brand AS product_brand,
-              v.size AS variant_size, v.color AS variant_color, v.sku AS variant_sku
+              p.supplier_price_ht AS cmp, p.units_per_carton,
+              v.size AS variant_size, v.color AS variant_color, v.sku AS variant_sku,
+              (SELECT COALESCE(SUM(sm.qty), 0) FROM stock_movements sm
+                WHERE sm.warehouse_id = ws.warehouse_id AND sm.product_id = ws.product_id
+                  AND (sm.variant_id <=> ws.variant_id)
+                  AND sm.type IN ('IN_PURCHASE','IN_RETURN_CANCEL','IN_ADJUSTMENT','TRANSFER_IN')
+              ) AS entries_total,
+              (SELECT COALESCE(SUM(sm.qty), 0) FROM stock_movements sm
+                WHERE sm.warehouse_id = ws.warehouse_id AND sm.product_id = ws.product_id
+                  AND (sm.variant_id <=> ws.variant_id)
+                  AND sm.type IN ('OUT_SALE','OUT_ADJUSTMENT','TRANSFER_OUT')
+              ) AS exits_total
        FROM warehouse_stock ws
        INNER JOIN products p ON p.id = ws.product_id
        LEFT JOIN product_variants v ON v.id = ws.variant_id
@@ -201,10 +227,29 @@ router.get("/:id/stock", authRequired, requireWarehouseAccess, async (req, res) 
       [...params, limit, offset],
     );
 
+    const items = (rows || []).map((r) => {
+      const quantity = Number(r.quantity || 0);
+      const cmp = r.cmp == null ? null : Number(r.cmp);
+      const unitsPerCarton = Number(r.units_per_carton) >= 2 ? Number(r.units_per_carton) : null;
+
+      return {
+        ...r,
+        entries_total: Number(r.entries_total || 0),
+        exits_total: Number(r.exits_total || 0),
+        cmp,
+        units_per_carton: unitsPerCarton,
+        stock_cartons: unitsPerCarton ? Math.floor(quantity / unitsPerCarton) : null,
+        stock_pieces_remainder: unitsPerCarton ? quantity % unitsPerCarton : null,
+        value: cmp != null ? +(quantity * cmp).toFixed(2) : null,
+        status: quantity <= Number(r.min_threshold || 0) ? "ALERTE" : "OK",
+      };
+    });
+
     return res.json({
-      items: rows || [],
+      items,
       pageInfo: buildPageInfo(total, page, pageSize),
       low_count: Number(lowCount || 0),
+      total_value: +Number(totalValue || 0).toFixed(2),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
