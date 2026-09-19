@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin } = require("../middlewares/auth");
+const { getPagination, buildPageInfo } = require("../utils/pagination");
 const {
   upsertReport,
   backfillSalesReports,
@@ -368,29 +369,40 @@ router.get("/clients-by-zone", authRequired, async (req, res) => {
   }
 });
 
+const REPORT_PERIODS = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
+
 /* =========================
- * ✅ Phase D : Compte-rendu hebdomadaire — consolide en un seul appel ce
- * que le client remplissait à la main chaque vendredi dans son classeur
- * (onglet "CR Hebdo") : ventes, dépenses, créances, stock bas, actions en
- * retard. `anchorDate` (optionnel, YYYY-MM-DD) permet de consulter une
- * semaine passée ; par défaut la semaine en cours.
+ * ✅ Phase D : Compte-rendu (par jour/semaine/mois/année) — consolide en
+ * un seul appel ce que le client remplissait à la main chaque vendredi
+ * dans son classeur (onglet "CR Hebdo") : ventes, dépenses, créances,
+ * stock bas, actions en retard, produit le plus vendu, état de chaque
+ * produit. `period_type` (DAILY/WEEKLY/MONTHLY/YEARLY, défaut WEEKLY) et
+ * `anchorDate` (optionnel, YYYY-MM-DD) permettent de consulter une autre
+ * période ; `page`/`pageSize` paginent la liste des produits.
  * =======================*/
 router.get("/weekly", authRequired, async (req, res) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
+  const periodType = REPORT_PERIODS.includes(String(req.query.period_type || "").toUpperCase())
+    ? String(req.query.period_type).toUpperCase()
+    : "WEEKLY";
+
   try {
     const pool = getPool();
     const anchorDate = req.query.anchorDate ? new Date(req.query.anchorDate) : new Date();
-    const { start, end } = getRangeForPeriod("WEEKLY", anchorDate);
+    const { start, end } = getRangeForPeriod(periodType, anchorDate);
+    const { page, pageSize, offset, limit } = getPagination(req, { page: 1, pageSize: 20, maxPageSize: 100 });
 
-    // Recalcule/rafraîchit le rapport de vente de cette semaine (WEEKLY,
-    // même mécanisme que le reste du module rapports).
-    const salesReport = await upsertReport({ period_type: "WEEKLY", anchorDate });
+    // Recalcule/rafraîchit le rapport de vente de cette période (même
+    // mécanisme que le reste du module rapports).
+    const salesReport = await upsertReport({ period_type: periodType, anchorDate });
 
     const startSql = start.toISOString().slice(0, 10);
     const endSql = end.toISOString().slice(0, 10);
+    const startDateTime = `${startSql} 00:00:00`;
+    const endDateTime = `${endSql} 23:59:59`;
 
     const [[expensesRow]] = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) AS total
@@ -447,8 +459,84 @@ router.get("/weekly", authRequired, async (req, res) => {
       // Module Operations pas encore migré.
     }
 
+    // Produit le plus vendu sur la période (quantité).
+    let topProduct = null;
+    try {
+      const [[topRow]] = await pool.query(
+        `SELECT oi.product_id, p.name, SUM(oi.qty) AS total_qty, SUM(oi.qty * oi.unit_price) AS total_amount
+         FROM order_items oi
+         INNER JOIN orders o ON o.id = oi.order_id
+         INNER JOIN products p ON p.id = oi.product_id
+         WHERE o.status <> 'CANCELLED' AND o.created_at BETWEEN ? AND ?
+         GROUP BY oi.product_id, p.name
+         ORDER BY total_qty DESC
+         LIMIT 1`,
+        [startDateTime, endDateTime],
+      );
+      if (topRow) {
+        topProduct = {
+          product_id: Number(topRow.product_id),
+          name: topRow.name,
+          total_qty: Number(topRow.total_qty || 0),
+          total_amount: Number(topRow.total_amount || 0),
+        };
+      }
+    } catch {
+      // Aucune commande sur la période ou colonnes manquantes.
+    }
+
+    // État de chaque produit (entrées/sorties sur la période, stock,
+    // valeur, CMP, statut) — même logique que GET /warehouses/:id/stock
+    // (Phase B), mais tous entrepôts confondus et paginé sur `products`.
+    let products = { items: [], pageInfo: buildPageInfo(0, page, pageSize) };
+    try {
+      const [[{ productsTotal }]] = await pool.query(`SELECT COUNT(*) AS productsTotal FROM products`);
+
+      const [productRows] = await pool.query(
+        `
+        SELECT
+          p.id AS product_id, p.name, p.supplier_price_ht AS cmp, p.units_per_carton,
+          (SELECT COALESCE(SUM(quantity), 0) FROM warehouse_stock WHERE product_id = p.id) AS stock_qty,
+          (SELECT MIN(min_threshold) FROM warehouse_stock WHERE product_id = p.id) AS min_threshold,
+          (SELECT COALESCE(SUM(qty), 0) FROM stock_movements
+             WHERE product_id = p.id AND type IN ('IN_PURCHASE','IN_RETURN_CANCEL','IN_ADJUSTMENT','TRANSFER_IN')
+               AND created_at BETWEEN ? AND ?) AS entries,
+          (SELECT COALESCE(SUM(qty), 0) FROM stock_movements
+             WHERE product_id = p.id AND type IN ('OUT_SALE','OUT_ADJUSTMENT','TRANSFER_OUT')
+               AND created_at BETWEEN ? AND ?) AS exits
+        FROM products p
+        ORDER BY p.name ASC
+        LIMIT ? OFFSET ?
+        `,
+        [startDateTime, endDateTime, startDateTime, endDateTime, limit, offset],
+      );
+
+      const items = (productRows || []).map((r) => {
+        const stockQty = Number(r.stock_qty || 0);
+        const cmp = r.cmp == null ? null : Number(r.cmp);
+        const minThreshold = Number(r.min_threshold || 0);
+        const unitsPerCarton = Number(r.units_per_carton) >= 2 ? Number(r.units_per_carton) : null;
+
+        return {
+          product_id: r.product_id,
+          name: r.name,
+          entries: Number(r.entries || 0),
+          exits: Number(r.exits || 0),
+          stock_qty: stockQty,
+          stock_cartons: unitsPerCarton ? Math.floor(stockQty / unitsPerCarton) : null,
+          cmp,
+          value: cmp != null ? +(stockQty * cmp).toFixed(2) : null,
+          status: stockQty <= minThreshold ? "ALERTE" : "OK",
+        };
+      });
+
+      products = { items, pageInfo: buildPageInfo(productsTotal, page, pageSize) };
+    } catch {
+      // Module stock pas encore migré.
+    }
+
     return res.json({
-      period: { start: startSql, end: endSql },
+      period: { type: periodType, start: startSql, end: endSql },
       sales: {
         orders_count: Number(salesReport.orders_count || 0),
         items_amount: Number(salesReport.items_amount || 0),
@@ -459,6 +547,8 @@ router.get("/weekly", authRequired, async (req, res) => {
       debts: { total_due: debtsTotal },
       stock,
       operations,
+      top_product: topProduct,
+      products,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
