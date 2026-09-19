@@ -114,6 +114,14 @@ try {
   console.warn("[subscriptions] route missing:", e?.message || e);
 }
 
+// ✅ NEW: Suivi d'actions/tâches (module Operations, Phase C pilotage)
+let operations = null;
+try {
+  operations = require("./src/routes/operations");
+} catch (e) {
+  console.warn("[operations] route missing:", e?.message || e);
+}
+
 // ✅ NEW: Admin validation/publish for AI content (SEO-only)
 let adminContentAiRoutes = null;
 try {
@@ -451,6 +459,10 @@ if (supplierDeliveries) {
 
 if (subscriptions) {
   app.use("/api/subscriptions", subscriptions);
+}
+
+if (operations) {
+  app.use("/api/operations", operations);
 }
 
 /* =========================
