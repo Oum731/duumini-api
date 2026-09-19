@@ -8,7 +8,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const { authRequired, isAdmin, isSupplier } = require("../middlewares/auth");
 const { getPagination, buildPageInfo } = require("../utils/pagination");
-const { recordStockMovement, getProductUnitsPerCarton } = require("../lib/stockLedger");
+const { recordStockMovement, getProductUnitsPerCarton, recomputeAndApplyCmp } = require("../lib/stockLedger");
 
 const router = Router();
 
@@ -302,13 +302,11 @@ router.post("/", authRequired, async (req, res) => {
           );
         }
 
-        // Prix d'achat = dernière livraison reçue (utilisé pour la marge,
-        // voir src/lib/pricing.js) — toujours ramené au prix par pièce
-        // pour rester cohérent avec order_items.unit_cost_snapshot.
-        await conn.query(`UPDATE products SET supplier_price_ht = ? WHERE id = ?`, [
-          +baseUnitCost.toFixed(2),
-          it.productId,
-        ]);
+        // Prix d'achat = CMP (coût moyen pondéré) sur tout l'historique des
+        // réceptions de ce produit, pas juste la dernière livraison — même
+        // méthode que le classeur de gestion existant. Alimente le calcul
+        // de marge (src/lib/pricing.js) et la valeur du stock affichée.
+        await recomputeAndApplyCmp(conn, it.productId);
       }
 
       await conn.commit();

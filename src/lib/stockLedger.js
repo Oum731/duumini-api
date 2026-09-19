@@ -245,6 +245,43 @@ function toBaseQty(qty, unit, unitsPerCarton) {
   return n;
 }
 
+/**
+ * CMP (coût moyen pondéré) : moyenne des coûts d'achat (stock_movements de
+ * type IN_PURCHASE, unit_cost déjà ramené au prix par pièce) pondérée par
+ * les quantités reçues. Recalculée sur tout l'historique à chaque nouvelle
+ * réception, pas juste "le dernier prix payé" — méthode alignée sur le
+ * classeur de gestion existant (colonne CMP de l'onglet Stock).
+ *
+ * Écrit le résultat dans products.supplier_price_ht, qui alimente déjà le
+ * calcul de marge (order_items.unit_cost_snapshot, voir orders.js) et la
+ * valeur du stock affichée. Best-effort comme le reste du ledger.
+ */
+async function recomputeAndApplyCmp(conn, productId) {
+  try {
+    const [[row]] = await conn.query(
+      `SELECT SUM(qty * unit_cost) AS total_cost, SUM(qty) AS total_qty
+       FROM stock_movements
+       WHERE product_id = ? AND type = 'IN_PURCHASE' AND unit_cost IS NOT NULL`,
+      [productId],
+    );
+
+    const totalQty = Number(row?.total_qty || 0);
+    if (!totalQty) return null;
+
+    const cmp = Number(row.total_cost || 0) / totalQty;
+    await conn.query(`UPDATE products SET supplier_price_ht = ? WHERE id = ?`, [
+      +cmp.toFixed(2),
+      productId,
+    ]);
+    return cmp;
+  } catch (e) {
+    if (!isMissingTableError(e)) {
+      console.warn("[stockLedger] recomputeAndApplyCmp failed:", e?.message || e);
+    }
+    return null;
+  }
+}
+
 module.exports = {
   MOVEMENT_TYPES,
   getDefaultWarehouseId,
@@ -254,4 +291,5 @@ module.exports = {
   findOrderItemWarehouseId,
   getProductUnitsPerCarton,
   toBaseQty,
+  recomputeAndApplyCmp,
 };
