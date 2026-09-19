@@ -4,6 +4,7 @@ const { authRequired, isAdmin } = require("../middlewares/auth");
 const {
   upsertReport,
   backfillSalesReports,
+  getRangeForPeriod,
   PERIODS,
 } = require("../services/salesReports");
 
@@ -362,6 +363,103 @@ router.get("/clients-by-zone", authRequired, async (req, res) => {
       .slice(0, 100);
 
     return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
+ * ✅ Phase D : Compte-rendu hebdomadaire — consolide en un seul appel ce
+ * que le client remplissait à la main chaque vendredi dans son classeur
+ * (onglet "CR Hebdo") : ventes, dépenses, créances, stock bas, actions en
+ * retard. `anchorDate` (optionnel, YYYY-MM-DD) permet de consulter une
+ * semaine passée ; par défaut la semaine en cours.
+ * =======================*/
+router.get("/weekly", authRequired, async (req, res) => {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const pool = getPool();
+    const anchorDate = req.query.anchorDate ? new Date(req.query.anchorDate) : new Date();
+    const { start, end } = getRangeForPeriod("WEEKLY", anchorDate);
+
+    // Recalcule/rafraîchit le rapport de vente de cette semaine (WEEKLY,
+    // même mécanisme que le reste du module rapports).
+    const salesReport = await upsertReport({ period_type: "WEEKLY", anchorDate });
+
+    const startSql = start.toISOString().slice(0, 10);
+    const endSql = end.toISOString().slice(0, 10);
+
+    const [[expensesRow]] = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM expenses
+       WHERE expense_date BETWEEN ? AND ?`,
+      [startSql, endSql],
+    );
+
+    let debtsTotal = 0;
+    try {
+      const payCols = await detectOrdersPaymentCols(pool);
+      if (payCols.payment_status && payCols.paid_amount) {
+        const [[debtsRow]] = await pool.query(
+          `SELECT COALESCE(SUM(o.total - COALESCE(o.paid_amount, 0)), 0) AS total_due
+           FROM orders o
+           WHERE o.status <> 'CANCELLED' AND COALESCE(o.payment_status, 'UNPAID') <> 'PAID'`,
+        );
+        debtsTotal = Number(debtsRow.total_due || 0);
+      }
+    } catch {
+      // Colonnes pas encore migrées : créances non disponibles, on renvoie 0.
+    }
+
+    let stock = { low_count: 0, total_value: 0 };
+    try {
+      const [[stockRow]] = await pool.query(
+        `SELECT
+           COUNT(CASE WHEN ws.quantity <= ws.min_threshold THEN 1 END) AS low_count,
+           COALESCE(SUM(ws.quantity * p.supplier_price_ht), 0) AS total_value
+         FROM warehouse_stock ws
+         INNER JOIN products p ON p.id = ws.product_id`,
+      );
+      stock = {
+        low_count: Number(stockRow.low_count || 0),
+        total_value: +Number(stockRow.total_value || 0).toFixed(2),
+      };
+    } catch {
+      // Module stock pas encore migré.
+    }
+
+    let operations = { open_count: 0, late_count: 0 };
+    try {
+      const [[opsRow]] = await pool.query(
+        `SELECT
+           COUNT(CASE WHEN status <> 'DONE' THEN 1 END) AS open_count,
+           COUNT(CASE WHEN status <> 'DONE' AND due_date IS NOT NULL AND due_date < CURDATE() THEN 1 END) AS late_count
+         FROM operations`,
+      );
+      operations = {
+        open_count: Number(opsRow.open_count || 0),
+        late_count: Number(opsRow.late_count || 0),
+      };
+    } catch {
+      // Module Operations pas encore migré.
+    }
+
+    return res.json({
+      period: { start: startSql, end: endSql },
+      sales: {
+        orders_count: Number(salesReport.orders_count || 0),
+        items_amount: Number(salesReport.items_amount || 0),
+        total_amount: Number(salesReport.total_amount || 0),
+        duumini_commission: Number(salesReport.duumini_commission || 0),
+      },
+      expenses: { total: Number(expensesRow.total || 0) },
+      debts: { total_due: debtsTotal },
+      stock,
+      operations,
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
