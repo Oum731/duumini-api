@@ -27,6 +27,7 @@ const Message = sequelize.define(
     editedAt: { type: DataTypes.DATE, allowNull: true }, // message texte modifié après envoi (< 5 min)
     deletedAt: { type: DataTypes.DATE, allowNull: true }, // supprimé par l'expéditeur (contenu effacé, trace gardée)
     reactions: { type: DataTypes.JSON, allowNull: true }, // { [userId]: "❤️" } — une réaction par personne
+    encrypted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // média chiffré côté client (content = JSON d'URLs de morceaux)
   },
   { tableName: "messages", timestamps: true }
 );

@@ -2,12 +2,14 @@ const { Router } = require("express");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const { Transform } = require("stream");
+const { Transform, Readable } = require("stream");
+const crypto = require("crypto");
 const { Message, User } = require("../models");
 const { requireAuth } = require("../middleware/auth");
 const { notifyOthers } = require("../lib/push");
 const { isPartnerOnline } = require("../lib/presence");
 const { ROOM } = require("../config/constants");
+const { env } = require("../config/env");
 const { isCloudinaryConfigured, uploadFromStream, transformedUrl, warmUrl } = require("../lib/cloudinary");
 
 const uploadsDir = path.join(__dirname, "..", "uploads");
@@ -84,6 +86,32 @@ class StreamingStorage {
   _removeFile(_req, _file, cb) {
     cb(null);
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// Médias chiffrés : le navigateur chiffre (AES-256-GCM) et découpe le fichier
+// en morceaux de 8 Mo avant envoi. Cloudinary ne reçoit que du binaire opaque
+// stocké en "raw" — il ne peut ni l'analyser ni le classer.
+// ---------------------------------------------------------------------------
+const PIECE_MAX = 9 * 1024 * 1024; // 8 Mo + IV + tag, sous la limite raw de 10 Mo
+
+function getMediaKey() {
+  const raw = env.mediaKey;
+  if (raw) return raw;
+  return crypto.createHash("sha256").update(`${env.jwtSecret}:duoline-media`).digest("base64");
+}
+
+const pieceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: PIECE_MAX } });
+
+async function storePiece(buffer) {
+  if (!isCloudinaryConfigured) {
+    const filename = `enc-${Date.now()}-${Math.round(Math.random() * 1e9)}.bin`;
+    await fs.promises.writeFile(path.join(uploadsDir, filename), buffer);
+    return `/uploads/${filename}`;
+  }
+  const result = await uploadFromStream(Readable.from(buffer), { resource_type: "raw" });
+  return result.secure_url;
 }
 
 const upload = multer({ storage: new StreamingStorage(), limits: { fileSize: MAX_FILE_SIZE } });

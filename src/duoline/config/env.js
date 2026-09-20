@@ -28,6 +28,10 @@ const env = {
     subject: process.env.VAPID_SUBJECT || "mailto:traoresouro7826@gmail.com",
   },
 
+  // Clé AES-256 (base64, 32 octets) des médias chiffrés — remise aux comptes
+  // connectés. À défaut, dérivée du secret JWT (dev uniquement).
+  mediaKey: process.env.DUOLINE_MEDIA_KEY || "",
+
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
     apiKey: process.env.CLOUDINARY_API_KEY || "",
