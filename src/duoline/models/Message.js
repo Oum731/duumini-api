@@ -26,7 +26,24 @@ const Message = sequelize.define(
     readAt: { type: DataTypes.DATE, allowNull: true },
     editedAt: { type: DataTypes.DATE, allowNull: true }, // message texte modifié après envoi (< 5 min)
     deletedAt: { type: DataTypes.DATE, allowNull: true }, // supprimé par l'expéditeur (contenu effacé, trace gardée)
-    reactions: { type: DataTypes.JSON, allowNull: true }, // { [userId]: "❤️" } — une réaction par personne
+    // { [userId]: "❤️" } — une réaction par personne. MariaDB renvoie une colonne
+    // JSON sous forme de texte (pas d'objet) : sans ce getter, "{...current}"
+    // étalait la chaîne caractère par caractère au 2e like et abîmait la donnée.
+    reactions: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      get() {
+        let value = this.getDataValue("reactions");
+        for (let i = 0; i < 2 && typeof value === "string"; i++) {
+          try {
+            value = JSON.parse(value);
+          } catch {
+            return null;
+          }
+        }
+        return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+      },
+    },
     replyToId: { type: DataTypes.INTEGER, allowNull: true }, // message auquel celui-ci répond
     encrypted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // média chiffré côté client (content = JSON d'URLs de morceaux)
   },
