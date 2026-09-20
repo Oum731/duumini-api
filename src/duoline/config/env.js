@@ -32,6 +32,17 @@ const env = {
   // connectés. À défaut, dérivée du secret JWT (dev uniquement).
   mediaKey: process.env.DUOLINE_MEDIA_KEY || "",
 
+  // Stockage objet compatible S3 (Cloudflare R2, Backblaze B2...) pour les
+  // médias chiffrés. Si non configuré, repli sur Cloudinary.
+  storage: {
+    endpoint: process.env.DUOLINE_STORAGE_ENDPOINT || "",
+    bucket: process.env.DUOLINE_STORAGE_BUCKET || "",
+    accessKeyId: process.env.DUOLINE_STORAGE_ACCESS_KEY_ID || "",
+    secretAccessKey: process.env.DUOLINE_STORAGE_SECRET_ACCESS_KEY || "",
+    region: process.env.DUOLINE_STORAGE_REGION || "auto",
+    publicUrl: process.env.DUOLINE_STORAGE_PUBLIC_URL || "",
+  },
+
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
     apiKey: process.env.CLOUDINARY_API_KEY || "",

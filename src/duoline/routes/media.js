@@ -10,6 +10,7 @@ const { notifyOthers } = require("../lib/push");
 const { isPartnerOnline } = require("../lib/presence");
 const { ROOM } = require("../config/constants");
 const { env } = require("../config/env");
+const { isS3Configured, putObject } = require("../lib/storage");
 const { isCloudinaryConfigured, uploadFromStream, transformedUrl, warmUrl } = require("../lib/cloudinary");
 
 const uploadsDir = path.join(__dirname, "..", "uploads");
@@ -105,6 +106,9 @@ function getMediaKey() {
 const pieceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: PIECE_MAX } });
 
 async function storePiece(buffer) {
+  if (isS3Configured) {
+    return putObject(`duoline/${crypto.randomBytes(16).toString("hex")}`, buffer);
+  }
   if (!isCloudinaryConfigured) {
     const filename = `enc-${Date.now()}-${Math.round(Math.random() * 1e9)}.bin`;
     await fs.promises.writeFile(path.join(uploadsDir, filename), buffer);
