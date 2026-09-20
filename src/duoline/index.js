@@ -5,6 +5,7 @@ const { Router } = require("express");
 const express = require("express");
 
 const { initDb } = require("./models");
+const { startBackups } = require("./lib/backup");
 const { authRouter } = require("./routes/auth");
 const { messagesRouter } = require("./routes/messages");
 const { createMediaRouter } = require("./routes/media");
@@ -23,7 +24,10 @@ function createDuolineModule(io) {
   registerSockets(nsp);
 
   initDb().then(
-    () => console.log("[duoline] DB connectée"),
+    () => {
+      console.log("[duoline] DB connectée");
+      startBackups();
+    },
     (err) => console.error("[duoline] échec connexion DB:", err.message)
   );
 

@@ -1,19 +1,22 @@
 const { Router } = require("express");
 const { Op } = require("sequelize");
-const { Message, User } = require("../models");
+const { Message, User, messageInclude, resolveReplyId } = require("../models");
 const { requireAuth } = require("../middleware/auth");
 
 const messagesRouter = Router();
 
 // Historique paginé (le plus récent en dernier), conversation unique à 2.
 messagesRouter.get("/", requireAuth, async (req, res) => {
-  const before = req.query.before ? new Date(req.query.before) : null;
-  const limit = Math.min(Number(req.query.limit) || 30, 100);
+  // Pagination par id (croissant avec le temps, sans ambiguïté même si deux
+  // messages partagent la même milliseconde) : les N messages juste avant
+  // beforeId, ou les N plus récents si absent.
+  const beforeId = Number(req.query.beforeId) || null;
+  const limit = Math.min(Number(req.query.limit) || 40, 100);
 
   const messages = await Message.findAll({
-    where: before ? { createdAt: { [Op.lt]: before } } : {},
-    include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
-    order: [["createdAt", "DESC"]],
+    where: beforeId ? { id: { [Op.lt]: beforeId } } : {},
+    include: messageInclude(),
+    order: [["id", "DESC"]],
     limit,
   });
 
@@ -29,7 +32,7 @@ messagesRouter.get("/search", requireAuth, async (req, res) => {
 
   const messages = await Message.findAll({
     where: { type: "text", content: { [Op.like]: `%${q}%` } },
-    include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+    include: messageInclude(),
     order: [["createdAt", "DESC"]],
     limit: 50,
   });

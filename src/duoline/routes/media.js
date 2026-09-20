@@ -4,7 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const { Transform, Readable } = require("stream");
 const crypto = require("crypto");
-const { Message, User } = require("../models");
+const { Message, User, messageInclude, resolveReplyId } = require("../models");
 const { requireAuth } = require("../middleware/auth");
 const { notifyOthers } = require("../lib/push");
 const { isPartnerOnline } = require("../lib/presence");
@@ -78,6 +78,11 @@ class StreamingStorage {
         if (kind === "video") {
           url = transformedUrl(result.public_id, { resource_type: "video", format: "mp4" });
           warmUrl(url); // lance la conversion tout de suite plutôt que d'attendre un 1er viewer
+        }
+        if (kind === "audio") {
+          // Les vocaux enregistrés en webm ne se lisent pas sur iPhone :
+          // on les sert en mp3 (conversion à la demande), préchauffée ici.
+          warmUrl(url.replace(/\.[a-z0-9]+$/i, ".mp3"));
         }
         cb(null, { path: url, size, kind });
       })
@@ -158,11 +163,12 @@ function createMediaRouter(io) {
         fileSize: req.file.size,
         mimeType: req.file.mimetype,
         duration: Number.isFinite(duration) ? duration : null,
+        replyToId: await resolveReplyId(req.body?.replyToId),
         deliveredAt: isPartnerOnline(io, ROOM, req.user.id) ? new Date() : null,
       });
 
       const full = await Message.findByPk(message.id, {
-        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+        include: messageInclude(),
       });
 
       io.to(ROOM).emit("message:new", full);
@@ -221,11 +227,12 @@ function createMediaRouter(io) {
       fileSize: Number.isFinite(Number(fileSize)) ? Number(fileSize) : null,
       mimeType: typeof mimeType === "string" ? mimeType.slice(0, 100) : null,
       duration: Number.isFinite(seconds) ? seconds : null,
+      replyToId: await resolveReplyId(req.body?.replyToId),
       deliveredAt: isPartnerOnline(io, ROOM, req.user.id) ? new Date() : null,
     });
 
     const full = await Message.findByPk(message.id, {
-      include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+      include: messageInclude(),
     });
     io.to(ROOM).emit("message:new", full);
 
@@ -242,4 +249,4 @@ function createMediaRouter(io) {
   return router;
 }
 
-module.exports = { createMediaRouter, uploadsDir };
+module.exports = { createMediaRouter, uploadsDir, getMediaKey };

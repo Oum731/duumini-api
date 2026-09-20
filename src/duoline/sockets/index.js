@@ -1,7 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { Op } = require("sequelize");
 const { env } = require("../config/env");
-const { Message, User } = require("../models");
+const { Message, User, messageInclude, resolveReplyId } = require("../models");
 const { notifyOthers } = require("../lib/push");
 const { isPartnerOnline } = require("../lib/presence");
 const { ROOM } = require("../config/constants");
@@ -58,7 +58,7 @@ function registerSockets(io) {
       duration,
     });
     const full = await Message.findByPk(message.id, {
-      include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+      include: messageInclude(),
     });
     io.to(ROOM).emit("message:new", full);
   }
@@ -87,7 +87,7 @@ function registerSockets(io) {
       io.to(ROOM).emit("message:delivered", { ids, deliveredAt });
     }
 
-    socket.on("message:send", async ({ content }, ack) => {
+    socket.on("message:send", async ({ content, replyToId }, ack) => {
       if (!content || !content.trim()) return;
 
       const partnerOnline = isPartnerOnline(io, ROOM, socket.user.id);
@@ -95,10 +95,11 @@ function registerSockets(io) {
         senderId: socket.user.id,
         type: "text",
         content: content.trim(),
+        replyToId: await resolveReplyId(replyToId),
         deliveredAt: partnerOnline ? new Date() : null,
       });
       const full = await Message.findByPk(message.id, {
-        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+        include: messageInclude(),
       });
 
       io.to(ROOM).emit("message:new", full);
@@ -132,7 +133,7 @@ function registerSockets(io) {
       await message.save();
 
       const full = await Message.findByPk(message.id, {
-        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+        include: messageInclude(),
       });
       io.to(ROOM).emit("message:edited", full);
       ack?.({ ok: true });
@@ -155,7 +156,7 @@ function registerSockets(io) {
       await message.save();
 
       const full = await Message.findByPk(message.id, {
-        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+        include: messageInclude(),
       });
       io.to(ROOM).emit("message:deleted", full);
       ack?.({ ok: true });
@@ -176,7 +177,7 @@ function registerSockets(io) {
       await message.save();
 
       const full = await Message.findByPk(message.id, {
-        include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+        include: messageInclude(),
       });
       io.to(ROOM).emit("message:reacted", full);
       ack?.({ ok: true });
