@@ -175,6 +175,66 @@ function createMediaRouter(io) {
     }
   );
 
+  router.get("/key", requireAuth, (_req, res) => {
+    res.json({ key: getMediaKey() });
+  });
+
+  router.post(
+    "/piece",
+    requireAuth,
+    (req, res, next) => {
+      pieceUpload.single("file")(req, res, (err) => {
+        if (err) return res.status(err.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({ error: "Morceau refusé" });
+        next();
+      });
+    },
+    async (req, res) => {
+      if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
+      try {
+        res.status(201).json({ url: await storePiece(req.file.buffer) });
+      } catch (err) {
+        console.error("Erreur upload morceau chiffré:", err.message);
+        res.status(502).json({ error: "Échec de l'upload" });
+      }
+    }
+  );
+
+  // Crée le message une fois tous les morceaux envoyés.
+  router.post("/encrypted", requireAuth, async (req, res) => {
+    const { urls, type, mimeType, fileName, fileSize, duration } = req.body || {};
+    if (!Array.isArray(urls) || urls.length === 0 || urls.length > 16 || !urls.every((u) => typeof u === "string")) {
+      return res.status(400).json({ error: "Morceaux invalides" });
+    }
+    if (type !== "image" && type !== "video") return res.status(400).json({ error: "Type invalide" });
+
+    const seconds = duration ? Math.round(Number(duration)) : null;
+    const message = await Message.create({
+      senderId: req.user.id,
+      type,
+      content: JSON.stringify(urls),
+      encrypted: true,
+      fileName: typeof fileName === "string" ? fileName.slice(0, 250) : null,
+      fileSize: Number.isFinite(Number(fileSize)) ? Number(fileSize) : null,
+      mimeType: typeof mimeType === "string" ? mimeType.slice(0, 100) : null,
+      duration: Number.isFinite(seconds) ? seconds : null,
+      deliveredAt: isPartnerOnline(io, ROOM, req.user.id) ? new Date() : null,
+    });
+
+    const full = await Message.findByPk(message.id, {
+      include: [{ model: User, as: "sender", attributes: ["id", "name", "avatarUrl"] }],
+    });
+    io.to(ROOM).emit("message:new", full);
+
+    notifyOthers(req.user.id, {
+      title: req.user.name,
+      body: type === "video" ? "a envoyé une vidéo 🎬" : "a envoyé une photo 📷",
+      tag: "message",
+      url: "/chat",
+    });
+
+    res.status(201).json(full);
+  });
+
   return router;
 }
 
