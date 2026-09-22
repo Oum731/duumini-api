@@ -130,6 +130,14 @@ try {
   console.warn("[adminContentAi] route missing:", e?.message || e);
 }
 
+// ✅ NEW: Point d'accès public du contenu IA publié (pages ville SEO)
+let publicContentRoutes = null;
+try {
+  publicContentRoutes = require("./src/routes/content");
+} catch (e) {
+  console.warn("[content] route missing:", e?.message || e);
+}
+
 // ✅ AI ads (campaign build/publish) — SAFE mode always forces PAUSED ads,
 // see DUUMINI_AI_MODE handling inside each route file.
 let metaCampaign = null;
@@ -509,6 +517,9 @@ app.use("/api/geo", require("./src/routes/geo"));
 app.use("/api/admin", require("./src/routes/adminSite"));
 if (adminContentAiRoutes) {
   app.use("/api/admin", adminContentAiRoutes);
+}
+if (publicContentRoutes) {
+  app.use("/api/content", publicContentRoutes);
 }
 const affiliateMeRoutes = require("./src/routes/affiliate_me");
 
