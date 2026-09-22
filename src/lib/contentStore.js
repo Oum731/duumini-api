@@ -233,24 +233,90 @@ async function rollbackToVersion(contentId, versionId, by = "admin") {
 
 /**
  * Public content fetcher (front should use this):
- * get published content by type/slug/lang
+ * get published content by slug/lang, optionally scoped to a type.
+ * `type` is optional so a single public route can serve any content
+ * type (city_page, blog_post, ...) by slug alone.
  */
 async function getPublishedBySlug({ type, slug, lang = "fr" }) {
   const pool = getPool();
   const conn = await pool.getConnection();
   try {
+    const where = ["slug=?", "lang=?", "status='published'"];
+    const args = [String(slug), String(lang)];
+    if (type) {
+      where.unshift("type=?");
+      args.unshift(String(type));
+    }
+
     const [rows] = await conn.query(
       `SELECT id, type, slug, lang, status, score, data_json, updated_at, published_at
        FROM content_items
-       WHERE type=? AND slug=? AND lang=? AND status='published'
+       WHERE ${where.join(" AND ")}
        LIMIT 1`,
-      [String(type), String(slug), String(lang)]
+      args
     );
     if (!rows.length) return null;
     const r = rows[0];
     r.data = json(r.data_json);
     delete r.data_json;
     return r;
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * Public listing of published content for a given type (e.g. blog_post
+ * index page). Paginated, newest published first.
+ */
+async function listPublished({ type, lang = "fr", limit = 20, offset = 0 } = {}) {
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    const where = ["status='published'"];
+    const args = [];
+    if (type) {
+      where.push("type=?");
+      args.push(String(type));
+    }
+    if (lang) {
+      where.push("lang=?");
+      args.push(String(lang));
+    }
+    const sqlWhere = `WHERE ${where.join(" AND ")}`;
+
+    const [rows] = await conn.query(
+      `SELECT id, type, slug, lang, score, data_json, published_at, updated_at
+       FROM content_items
+       ${sqlWhere}
+       ORDER BY published_at DESC
+       LIMIT ? OFFSET ?`,
+      [...args, Number(limit) || 20, Number(offset) || 0]
+    );
+
+    const [[{ total }]] = await conn.query(
+      `SELECT COUNT(*) AS total FROM content_items ${sqlWhere}`,
+      args
+    );
+
+    return {
+      total: Number(total || 0),
+      items: rows.map((r) => {
+        const data = json(r.data_json) || {};
+        return {
+          id: r.id,
+          type: r.type,
+          slug: r.slug,
+          lang: r.lang,
+          score: r.score,
+          published_at: r.published_at,
+          updated_at: r.updated_at,
+          h1: data.h1 || null,
+          excerpt: data.excerpt || data.meta?.description || null,
+          meta: data.meta || null,
+        };
+      }),
+    };
   } finally {
     conn.release();
   }
@@ -265,4 +331,5 @@ module.exports = {
   listVersions,
   rollbackToVersion,
   getPublishedBySlug,
+  listPublished,
 };

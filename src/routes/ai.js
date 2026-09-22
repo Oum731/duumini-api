@@ -123,6 +123,52 @@ router.post("/seo/generate-city-page", authRequired, requireRole("ADMIN"), async
 });
 
 /**
+ * POST /api/ai/seo/generate-blog-post (ADMIN)
+ * body: { topic, slug?, lang?, keywords? }
+ */
+router.post("/seo/generate-blog-post", authRequired, requireRole("ADMIN"), async (req, res) => {
+  if (!ensureAiOn(res)) return;
+
+  const { topic, slug, lang = "fr", keywords = [] } = req.body || {};
+  if (!topic && !slug) return res.status(400).json({ error: "topic ou slug requis" });
+
+  try {
+    const ai = await runDuuminiAgent("seo_generate_blog_post", { topic, slug, lang, keywords });
+
+    const finalSlug =
+      slug ||
+      `blog/${String(topic || "article")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")}`;
+
+    const saved = await upsertDraft({
+      type: "blog_post",
+      slug: finalSlug,
+      lang,
+      data: ai,
+      score: ai?.score ?? null,
+      created_by: "agent",
+    });
+
+    return res.json({
+      ok: true,
+      mode: env.DUUMINI_AI_MODE || "SAFE",
+      draft: saved,
+      preview: ai,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "seo_generate_blog_post_error",
+      details: err?.message || String(err),
+    });
+  }
+});
+
+/**
  * POST /api/ai/seo/audit (ADMIN)
  * body: { urls?: [] }
  */
