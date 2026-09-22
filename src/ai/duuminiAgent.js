@@ -27,6 +27,8 @@ function pickMaxTokens(taskType) {
       return 1600;
     case "seo_generate_city_page":
       return 1700;
+    case "seo_generate_blog_post":
+      return 1600;
     case "seo_audit":
       return 1200;
     case "ads_meta":
@@ -190,6 +192,7 @@ function buildWebSiteJsonLd(brandName, siteUrl) {
  * taskType:
  *  - "seo_optimize_page"
  *  - "seo_generate_city_page"
+ *  - "seo_generate_blog_post"
  *  - "seo_audit"
  *
  * payload:
@@ -250,6 +253,7 @@ Format JSON attendu:
     { "h2": "....", "body": "..." }
   ],
   "body": "texte complet (optionnel, mais recommandé)",
+  "excerpt": "résumé court (1-2 phrases, ~150-200 caractères, pour une liste d'articles)",
   "faq": [ { "q": "...", "a": "..." } ],
   "meta": { "title": "...", "description": "...", "keywords": ["..."] },
   "internal_links": [ { "label": "...", "href": "..." } ],
@@ -321,6 +325,43 @@ Contraintes:
 - FAQ: 4 à 7 questions
 - Mentionner paiement à la livraison (sans inventer délais)
 - Proposer 6-10 liens internes (catégories, pages du site, etc.) sans inventer des URLs inexistantes (utiliser des chemins plausibles)
+
+${baseJsonSpec}
+`.trim();
+  } else if (taskType === "seo_generate_blog_post") {
+    const topic = cleanText(payload.topic || payload.sujet || "");
+    if (!topic) throw new Error("seo_generate_blog_post: topic requis");
+
+    const pageSlug =
+      slug ||
+      `blog/${topic
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")}`;
+
+    const targetKeywords = arr(payload.keywords).map(cleanText).filter(Boolean).slice(0, 15);
+
+    userPrompt = `
+Tâche: rédiger un article de blog SEO pour ${brand}.
+Sujet: ${topic}
+Slug: ${pageSlug}
+Lang: ${lang}
+Site: ${siteUrl}
+
+Objectif:
+- se positionner sur des recherches longue traîne liées aux produits subsahariens/africains au Maroc
+- contenu unique, informatif, utile (pas promotionnel à l'excès)
+
+Mots-clés cibles (si fournis):
+${targetKeywords.length ? JSON.stringify(targetKeywords) : "[]"}
+
+Contraintes:
+- 600 à 1000 mots (approx)
+- FAQ: 3 à 5 questions
+- Proposer 4 à 8 liens internes (catégories, pages du site) sans inventer des URLs inexistantes
+- Toujours inclure un "excerpt" (1-2 phrases, ~150-200 caractères) pour l'affichage en liste d'articles
 
 ${baseJsonSpec}
 `.trim();
@@ -604,6 +645,8 @@ Réponds STRICTEMENT en JSON (exactement 7 éléments, un par jour de la semaine
     .map((x) => ({ label: cleanText(x?.label || ""), href: cleanText(x?.href || "") }))
     .filter((x) => x.label && x.href)
     .slice(0, 20);
+
+  parsed.excerpt = trimToMaxChars(parsed.excerpt || parsed.meta.description || parsed.body || "", 220);
 
   // Add schema JSON-LD computed backend-side (stable)
   const faqJsonLd = buildFaqJsonLd(parsed.faq);
