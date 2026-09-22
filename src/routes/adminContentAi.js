@@ -8,6 +8,7 @@ const {
   unpublishContent,
   listVersions,
   rollbackToVersion,
+  upsertDraft,
 } = require("../lib/contentStore");
 
 const router = Router();
@@ -26,6 +27,26 @@ router.get("/content-ai", authRequired, requireRole("ADMIN"), async (req, res) =
     offset: Number(offset) || 0,
   });
   return res.json({ ok: true, items: rows });
+});
+
+/**
+ * POST /api/admin/content-ai/manual
+ * body: { type, slug, lang?, data }
+ * Crée/maj un draft directement depuis un JSON fourni par l'admin (contenu
+ * rédigé à la main), sans passer par l'IA — indépendant des crédits
+ * OpenAI/Anthropic, utile pour le SEO naturel (articles écrits soi-même).
+ */
+router.post("/content-ai/manual", authRequired, requireRole("ADMIN"), async (req, res) => {
+  const { type, slug, lang = "fr", data } = req.body || {};
+  if (!type || !slug) return res.status(400).json({ error: "type et slug requis" });
+  if (!data || typeof data !== "object") return res.status(400).json({ error: "data (JSON) requis" });
+
+  try {
+    const saved = await upsertDraft({ type, slug, lang, data, score: null, created_by: "admin" });
+    return res.json({ ok: true, draft: saved });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 /**
