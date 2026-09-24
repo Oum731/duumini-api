@@ -29,15 +29,12 @@ const FK_REFS = [
   ["orders", "affiliate_id"],
   ["affiliates", "user_id"],
   ["commercial_profiles", "user_id"],
-  ["livreur_profiles", "user_id"],
   ["company_members", "user_id"],
   ["companies", "owner_id"],
   ["expenses", "user_id"],
   ["notification_queue", "user_id"],
   ["product_ratings", "user_id"],
   ["user_devices", "user_id"],
-  ["courier_trips", "livreur_user_id"],
-  ["courier_trips", "requester_user_id"],
   ["shops", "owner_id"],
   ["shops", "owner_user_id"],
   ["supplier_orders", "created_by_user_id"],
@@ -48,7 +45,7 @@ const FK_REFS = [
 // en possède une ligne, il l'emporte toujours comme canonique, quel que
 // soit le nombre de commandes de l'autre (ex: Divine COMMERCIAL/affilié
 // vs un vieux compte client homonyme).
-const ROLE_TABLES = ["affiliates", "commercial_profiles", "livreur_profiles"];
+const ROLE_TABLES = ["affiliates", "commercial_profiles"];
 
 async function countRefs(pool, userId) {
   const refs = {};
@@ -75,8 +72,7 @@ async function countRefs(pool, userId) {
 }
 
 function pickCanonical(members) {
-  // 1) un compte avec un rôle fort (affilié/commercial/livreur) gagne
-  //    toujours ;
+  // 1) un compte avec un rôle fort (affilié/commercial) gagne toujours ;
   // 2) sinon, le plus de références (commandes...) gagne ;
   // 3) sinon, le plus ancien (created_at) gagne.
   const sorted = [...members].sort((a, b) => {
