@@ -41,8 +41,8 @@ function toPosInt(x) {
 }
 
 /**
- * ✅ Accès double rôle (ex. un livreur qui devient aussi commercial) :
- * l'accès aux espaces livreur/commercial ne se base plus uniquement sur
+ * ✅ Accès double rôle (ex. un commercial qui devient aussi gestionnaire) :
+ * l'accès aux espaces commercial/gestionnaire ne se base plus uniquement sur
  * `users.role` (une seule valeur) mais aussi sur la présence d'une ligne
  * de profil dans la table dédiée — les deux peuvent coexister pour un
  * même user_id, `users.role` reste juste le "rôle principal" affiché.
@@ -50,19 +50,15 @@ function toPosInt(x) {
  * le login (pour renvoyer les flags dès la connexion).
  */
 async function getProfileFlags(pool, userId) {
-  const [[lp]] = await pool.query(
-    "SELECT 1 x FROM livreur_profiles WHERE user_id=? LIMIT 1",
-    [userId]
-  );
   const [[cp]] = await pool.query(
     "SELECT 1 x FROM commercial_profiles WHERE user_id=? LIMIT 1",
     [userId]
   );
 
-  // ✅ Gestionnaire d'entrepôt : même principe que livreur/commercial,
-  // sauf que la table warehouse_managers (module Stock, Phase 1) peut ne
-  // pas encore exister sur un environnement pas à jour — on avale l'erreur
-  // plutôt que de casser le login/attachUser pour tout le monde.
+  // ✅ Gestionnaire d'entrepôt : même principe que commercial, sauf que la
+  // table warehouse_managers (module Stock, Phase 1) peut ne pas encore
+  // exister sur un environnement pas à jour — on avale l'erreur plutôt
+  // que de casser le login/attachUser pour tout le monde.
   let wp = null;
   try {
     const [[row]] = await pool.query(
@@ -75,7 +71,6 @@ async function getProfileFlags(pool, userId) {
   }
 
   return {
-    has_livreur_profile: !!lp,
     has_commercial_profile: !!cp,
     has_warehouse_manager_profile: !!wp,
   };
@@ -287,17 +282,13 @@ const isSupplier = (u) => {
 const isRestaurant = (u) => getActingRole(u) === "RESTAURANT";
 
 // ✅ Accès double rôle : vrai si rôle principal correspond OU si l'utilisateur
-// a une ligne de profil dans la table dédiée (voir getProfileFlags) — un
-// livreur qui devient aussi commercial garde role='LIVREUR' mais passe ces
-// deux checks.
-const isLivreur = (u) => getActingRole(u) === "LIVREUR" || !!u?.has_livreur_profile;
-
+// a une ligne de profil dans la table dédiée (voir getProfileFlags).
 const isCommercial = (u) =>
   getActingRole(u) === "COMMERCIAL" || !!u?.has_commercial_profile;
 
 const isWarehouseManager = (u) => !!u?.has_warehouse_manager_profile;
 
-// ✅ Garde générique basée sur une fonction de capacité (isLivreur/isCommercial/...)
+// ✅ Garde générique basée sur une fonction de capacité (isCommercial/...)
 // plutôt que sur un match de rôle strict — même forme que requireRole pour
 // rester un remplacement direct sur les routes en libre-service.
 function requireCapability(checkFn, label) {
@@ -328,7 +319,6 @@ module.exports = {
   isVendor,
   isSupplier,
   isRestaurant,
-  isLivreur,
   isCommercial,
   isWarehouseManager,
 };

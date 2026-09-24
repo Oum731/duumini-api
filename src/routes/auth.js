@@ -154,7 +154,7 @@ router.post("/login", async (req, res) => {
     // doit jamais quitter le serveur).
     delete user.password;
 
-    // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
+    // ✅ Accès double rôle — voir getProfileFlags
     const profileFlags = await getProfileFlags(pool, user.id);
 
     return res.json({

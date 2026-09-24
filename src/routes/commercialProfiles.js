@@ -1,9 +1,7 @@
 // src/routes/commercialProfiles.js
 // Profils commercial : taux de commission individuel, solde dû, CA
 // généré et portefeuille client — dérivés directement des commandes
-// (orders.commercial_id), posées via POST /api/orders/admin. Patron
-// direct de livreurProfiles.js (même logique solde dû / règlement),
-// adapté aux commandes plutôt qu'aux courses.
+// (orders.commercial_id), posées via POST /api/orders/admin.
 
 const { Router } = require("express");
 
@@ -229,9 +227,7 @@ router.patch("/:userId/rate", authRequired, requireRole("ADMIN"), async (req, re
 /* ========= PATCH /:userId/settle ========= */
 /* Admin : confirme le versement en une fois de toute la commission due
    PAR DUUMINI à ce commercial (pourcentage de ses ventes, comme pour un
-   affilié — direction inverse de livreurProfiles.js où c'est le livreur
-   qui doit une commission à DUUMINI sur les courses encaissées en cash ;
-   même mécanique de flag PENDING -> PAID, sens différent). */
+   affilié). */
 router.patch("/:userId/settle", authRequired, requireRole("ADMIN"), async (req, res) => {
   try {
     const userId = Number(req.params.userId) || 0;

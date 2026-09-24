@@ -32,7 +32,6 @@ function normalizeRole(role) {
     "VENDEUR",
     "FOURNISSEUR",
     "RESTAURANT",
-    "LIVREUR",
     "COMMERCIAL",
     "ADMIN",
   ];
@@ -117,8 +116,7 @@ router.get("/me", authRequired, async (req, res) => {
       affiliate_id: affiliate?.id || null,
       affiliate_code: affiliate?.affiliate_code || null,
       affiliate_status: affiliate?.status || null,
-      // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
-      has_livreur_profile: !!req.user.has_livreur_profile,
+      // ✅ Accès double rôle — voir getProfileFlags
       has_commercial_profile: !!req.user.has_commercial_profile,
       has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
       impersonation: impersonate_shop_id
@@ -256,8 +254,7 @@ router.put("/me", authRequired, async (req, res) => {
       affiliate_id: affiliate?.id || null,
       affiliate_code: affiliate?.affiliate_code || null,
       affiliate_status: affiliate?.status || null,
-      // ✅ Accès double rôle (ex. livreur + commercial) — voir getProfileFlags
-      has_livreur_profile: !!req.user.has_livreur_profile,
+      // ✅ Accès double rôle — voir getProfileFlags
       has_commercial_profile: !!req.user.has_commercial_profile,
       has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
       impersonation: impersonate_shop_id
@@ -430,10 +427,10 @@ router.post("/", authRequired, adminRequired, async (req, res) => {
       [cleanPhone, hash, _role, first_name || null, last_name || null]
     );
 
-    // ✅ Pas de flux de candidature pour COMMERCIAL (contrairement à
-    // LIVREUR) : l'admin crée le compte directement ici, donc c'est ici
-    // qu'on pose la ligne commercial_profiles (taux par défaut,
-    // ajustable ensuite depuis CommercialsAdminPage).
+    // ✅ Pas de flux de candidature pour COMMERCIAL : l'admin crée le
+    // compte directement ici, donc c'est ici qu'on pose la ligne
+    // commercial_profiles (taux par défaut, ajustable ensuite depuis
+    // CommercialsAdminPage).
     if (_role === "COMMERCIAL") {
       await pool.query(
         `INSERT INTO commercial_profiles (user_id) VALUES (?)`,
