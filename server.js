@@ -20,8 +20,6 @@ const shops = require("./src/routes/shops");
 const companies = require("./src/routes/companies");
 const countries = require("./src/routes/countries");
 const vendorApplications = require("./src/routes/vendorApplications");
-const courierTrips = require("./src/routes/courierTrips");
-const livreurProfiles = require("./src/routes/livreurProfiles");
 const commercialProfiles = require("./src/routes/commercialProfiles");
 const categories = require("./src/routes/categories");
 const shopCategories = require("./src/routes/shopCategories");
@@ -416,8 +414,6 @@ app.use("/api/shops", shops);
 app.use("/api/companies", companies);
 app.use("/api/countries", countries);
 app.use("/api/vendor-applications", vendorApplications);
-app.use("/api/courier-trips", courierTrips);
-app.use("/api/livreur-profiles", livreurProfiles);
 app.use("/api/commercial-profiles", commercialProfiles);
 app.use("/api/categories", categories);
 app.use("/api/shop-categories", shopCategories);
@@ -552,13 +548,6 @@ if (RUN_CRON === "1") {
     console.warn("[cron] salesReportsCron failed to start:", e?.message || e);
   }
 
-  try {
-    const { startLivreurSettlementCron } = require("./src/jobs/livreurSettlementCron");
-    startLivreurSettlementCron();
-    console.log("[cron] livreurSettlementCron started");
-  } catch (e) {
-    console.warn("[cron] livreurSettlementCron failed to start:", e?.message || e);
-  }
 } else {
   console.log("[cron] disabled");
 }

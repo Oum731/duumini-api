@@ -10,8 +10,6 @@ const { getPagination, buildPageInfo } = require("../utils/pagination");
 const { normalizeCountryCode } = require("../utils/country");
 const { normPhone } = require("../utils/phone");
 const { env } = require("../lib/env");
-const { sendWhatsAppMessage } = require("../services/twilio");
-const { findZoneForPoint } = require("../utils/zones");
 
 const router = Router();
 
@@ -26,42 +24,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
 });
 
-const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE", "LIVREUR"];
-
-const ID_DOCUMENT_LABELS = {
-  CNI: "carte d'identité nationale",
-  CARTE_SEJOUR: "carte de séjour",
-  PASSPORT: "passeport",
-};
-
-/**
- * ✅ Message envoyé automatiquement au livreur dès que sa candidature est
- * approuvée — lui demande de passer à l'agence DUUMINI avec ses documents
- * originaux pour valider définitivement son inscription (le compte est créé
- * mais `verification_status` reste PENDING_VISIT jusqu'à ce passage).
- */
-function buildLivreurApprovalWhatsAppMessage({ legalName, password, idDocumentType }) {
-  const docLabel = ID_DOCUMENT_LABELS[idDocumentType] || "pièce d'identité";
-  const lines = [
-    `🛵 *Candidature DUUMINI approuvée*`,
-    ``,
-    `Bonjour ${legalName || ""},`.trim(),
-    ``,
-    `Votre candidature en tant que livreur DUUMINI a été approuvée. Votre compte a été créé.`,
-    ``,
-    `Pour finaliser votre inscription, merci de vous présenter à l'agence DUUMINI avec :`,
-    `• Votre ${docLabel} originale`,
-    `• Une pièce d'identité si différente du document déjà transmis`,
-    ``,
-    `📍 Agence DUUMINI : 5 rue Ennoussour RDC, Casablanca`,
-    ``,
-    `Vous pourrez alors accepter des courses depuis votre espace livreur.`,
-  ];
-  if (password) {
-    lines.push(``, `Mot de passe temporaire pour vous connecter : *${password}*`);
-  }
-  return lines.join("\n");
-}
+const APPLICANT_TYPES = ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE"];
 
 function uploadBufferToCloudinary(file, folder = "vendor-applications") {
   if (!file || !file.buffer) return Promise.resolve(null);
@@ -170,9 +133,9 @@ router.post(
         ? String(id_document_type).toUpperCase()
         : null;
 
-      // ✅ Position optionnelle (surtout utile pour LIVREUR) — dégradation
-      // gracieuse si absente ou invalide, le candidat n'est jamais bloqué
-      // par un refus de géolocalisation.
+      // ✅ Position optionnelle — dégradation gracieuse si absente ou
+      // invalide, le candidat n'est jamais bloqué par un refus de
+      // géolocalisation.
       const cleanLat = Number(lat);
       const cleanLng = Number(lng);
       const hasValidCoords =
@@ -224,7 +187,7 @@ router.get("/", authRequired, requireRole("ADMIN"), async (req, res) => {
     const applicantTypes = String(req.query.applicant_type || "")
       .split(",")
       .map((t) => t.trim().toUpperCase())
-      .filter((t) => ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE", "LIVREUR"].includes(t));
+      .filter((t) => ["VENDEUR", "FOURNISSEUR", "RESTAURANT", "PARTENAIRE"].includes(t));
 
     const conditions = [];
     const params = [];
@@ -338,64 +301,21 @@ router.patch(
       );
       const newUserId = userResult.insertId;
 
-      if (application.applicant_type === "LIVREUR") {
-        // Un livreur n'a pas de boutique : on crée son profil livreur
-        // (pays/ville de rattachement + pièce d'identité/photo transmises
-        // depuis la candidature) au lieu d'une ligne `shops`. Le compte est
-        // créé mais `verification_status` reste à PENDING_VISIT (valeur par
-        // défaut) : il ne peut accepter des courses qu'après validation
-        // manuelle par un admin suite au passage physique à l'agence.
-        //
-        // ✅ Si une position a été capturée à la candidature, on la copie
-        // directement dans last_lat/last_lng (+ résolution de zone) — le
-        // livreur a une position exploitable dès l'approbation, sans
-        // attendre sa première connexion à son tableau de bord.
-        let zoneCode = null;
-        const hasCoords = application.lat != null && application.lng != null;
-        if (hasCoords) {
-          try {
-            const zone = await findZoneForPoint(pool, Number(application.lat), Number(application.lng));
-            zoneCode = zone?.code || null;
-          } catch {
-            // pas bloquant — le livreur mettra à jour sa position depuis son tableau de bord
-          }
-        }
-
-        await conn.query(
-          `INSERT INTO livreur_profiles
-             (user_id, country_code, city, id_document_url, id_document_type, photo_url,
-              last_lat, last_lng, last_location_at, zone_code)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            newUserId,
-            application.country_code,
-            application.city || null,
-            application.id_document_url || null,
-            application.id_document_type || null,
-            application.photo_url || null,
-            hasCoords ? application.lat : null,
-            hasCoords ? application.lng : null,
-            hasCoords ? new Date() : null,
-            zoneCode,
-          ]
-        );
-      } else {
-        const slug = await generateUniqueSlug(pool, slugify(application.legal_name));
-        await conn.query(
-          `INSERT INTO shops
-             (owner_id, name, slug, description, address, city, country, country_code)
-           VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
-          [
-            newUserId,
-            application.legal_name,
-            slug,
-            application.message || null,
-            application.city || null,
-            application.country_code === "CI" ? "Côte d'Ivoire" : "Maroc",
-            application.country_code,
-          ]
-        );
-      }
+      const slug = await generateUniqueSlug(pool, slugify(application.legal_name));
+      await conn.query(
+        `INSERT INTO shops
+           (owner_id, name, slug, description, address, city, country, country_code)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
+        [
+          newUserId,
+          application.legal_name,
+          slug,
+          application.message || null,
+          application.city || null,
+          application.country_code === "CI" ? "Côte d'Ivoire" : "Maroc",
+          application.country_code,
+        ]
+      );
 
       await conn.query(
         `UPDATE vendor_applications
@@ -406,29 +326,7 @@ router.patch(
 
       await conn.commit();
 
-      let whatsappSent = false;
-      if (application.applicant_type === "LIVREUR") {
-        // ✅ Non bloquant : le compte reste créé même si Twilio est
-        // indisponible — l'admin garde la main pour recontacter manuellement.
-        try {
-          await sendWhatsAppMessage(
-            application.contact_phone,
-            buildLivreurApprovalWhatsAppMessage({
-              legalName: application.legal_name,
-              password,
-              idDocumentType: application.id_document_type,
-            })
-          );
-          whatsappSent = true;
-        } catch (e) {
-          console.error(
-            "PATCH /api/vendor-applications/:id/approve — envoi WhatsApp échoué:",
-            e?.message || e
-          );
-        }
-      }
-
-      res.json({ ok: true, user_id: newUserId, whatsapp_sent: whatsappSent });
+      res.json({ ok: true, user_id: newUserId });
     } catch (e) {
       await conn.rollback();
       console.error("PATCH /api/vendor-applications/:id/approve error:", e);
