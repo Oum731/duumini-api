@@ -1,0 +1,16 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /vendeur
+Disallow: /ma-boutique
+Disallow: /entreprise
+Disallow: /affiliate
+Disallow: /affilie
+Disallow: /profile
+Disallow: /orders
+Disallow: /cart
+Disallow: /checkout
+Disallow: /verify
+Disallow: /r/
+
+Sitemap: https://duumini.com/sitemap.xml

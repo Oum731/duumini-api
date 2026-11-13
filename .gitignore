@@ -3,5 +3,4 @@
 .env.*
 dist/
 build/
-web-dist/
 npm-debug.log*

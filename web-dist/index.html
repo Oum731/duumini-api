@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>Duumini — Produits africains et subsahariens authentiques au Maroc</title>
+    <meta
+      name="description"
+      content="DUUMINI connecte producteurs, commerçants et consommateurs à travers l'Afrique. Achetez des produits subsahariens et africains authentiques (épicerie, attiéké, placali, mode, cosmétique) livrés au Maroc, entre le Maroc et la Côte d'Ivoire."
+    />
+    <link rel="canonical" href="https://duumini.com/" />
+
+    <!-- ✅ Refonte 2026 (phase 1 — fondation) : polices du nouveau design
+         system (voir theme.css, section "Refonte 2026"). Chargées ici mais
+         pas encore appliquées à une page — aucune page n'y fait référence
+         tant que sa refonte n'est pas faite (phases suivantes). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Duumini" />
+    <meta property="og:title" content="Duumini — Produits africains et subsahariens authentiques au Maroc" />
+    <meta
+      property="og:description"
+      content="DUUMINI connecte producteurs, commerçants et consommateurs à travers l'Afrique. Achetez des produits subsahariens et africains authentiques livrés au Maroc, entre le Maroc et la Côte d'Ivoire."
+    />
+    <meta property="og:image" content="https://duumini.com/hero-stats.webp" />
+    <meta property="og:url" content="https://duumini.com/" />
+    <meta property="og:locale" content="fr_MA" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Duumini — Produits africains et subsahariens authentiques au Maroc" />
+    <meta
+      name="twitter:description"
+      content="Produits subsahariens et africains authentiques livrés au Maroc."
+    />
+    <meta name="twitter:image" content="https://duumini.com/hero-stats.webp" />
+
+    <!-- ✅ SEO : données structurées Organization + WebSite (schema.org),
+         sitewide et statiques — aide Google à comprendre qui est Duumini
+         et à afficher un résultat enrichi (logo, liens de site). -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Duumini",
+        "url": "https://duumini.com/",
+        "logo": "https://duumini.com/logo.png",
+        "description": "DUUMINI connecte producteurs, commerçants et consommateurs à travers l'Afrique : produits subsahariens et africains authentiques livrés au Maroc.",
+        "areaServed": ["MA", "CI"],
+        "sameAs": []
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Duumini",
+        "url": "https://duumini.com/"
+      }
+    </script>
+
+    <meta name="theme-color" content="#fddc00" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/logo.jpeg" />
+
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Duumini" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
+    <meta name="msapplication-TileColor" content="#fddc00" />
+
+    <style>
+      /* ✅ Écran de chargement affiché instantanément (inline, sans dépendance
+         JS/CSS externe) le temps que le bundle React se charge et s'exécute
+         — évite l'écran blanc au lancement de l'app/PWA. Le contenu est à
+         l'intérieur de #root : React le remplace automatiquement dès son
+         premier rendu, sans script de nettoyage nécessaire. */
+      #root {
+        min-height: 100vh;
+      }
+      .duu-boot-loader {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #ffffff;
+        z-index: 9999;
+      }
+      .duu-boot-loader img {
+        width: 64px;
+        height: 64px;
+        border-radius: 14px;
+        animation: duu-boot-pulse 1.6s ease-in-out infinite;
+      }
+      .duu-boot-ring {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        border: 3px solid rgba(181, 83, 60, 0.18);
+        border-top-color: #b5533c;
+        animation: duu-boot-spin 0.8s linear infinite;
+      }
+      .duu-boot-label {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #6b6b6b;
+        letter-spacing: 0.02em;
+      }
+      @keyframes duu-boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes duu-boot-pulse {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 1;
+        }
+        50% {
+          transform: scale(0.94);
+          opacity: 0.85;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        .duu-boot-loader {
+          background: #111111;
+        }
+        .duu-boot-label {
+          color: #a3a3a3;
+        }
+      }
+    </style>
+
+    <script type="module" crossorigin src="/assets/index-KGU1czHf.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/react-Bzgz95E1.js">
+    <link rel="modulepreload" crossorigin href="/assets/router-CeO0rlEc.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-C-SsdJvs.css">
+  <script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
+
+  <body>
+    <!-- ✅ Google Tag Manager, Metricool et Meta Pixel ne se chargent plus ici :
+         ils démarrent désormais uniquement après consentement (bandeau
+         cookies), voir src/lib/gtm.ts, src/lib/metricool.ts et
+         src/lib/metaPixel.ts. -->
+
+    <div id="root">
+      <div class="duu-boot-loader">
+        <img src="/logo.jpeg" alt="Duumini" />
+        <div class="duu-boot-ring" role="status" aria-label="Chargement"></div>
+        <div class="duu-boot-label">Chargement…</div>
+      </div>
+    </div>
+  </body>
+</html>
