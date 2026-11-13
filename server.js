@@ -5,6 +5,7 @@ const cookieParser = require("cookie-parser");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
 
 if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
@@ -387,16 +388,6 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-/* =========================
- * Root
- * ========================= */
-app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "duumini-api" });
-});
-
-app.head("/", (_req, res) => {
-  res.status(200).end();
-});
 
 /* =========================
  * API routes
@@ -603,6 +594,53 @@ if (io) {
   }
 } else {
   console.warn("[duoline] skipped: socket.io not attached");
+}
+
+/* =========================
+ * Frontend (duumini-web) — API + site servis par une seule app Node
+ * (nécessaire sur un hébergement mutualisé type cPanel : 1 app Node par
+ * domaine). Dépose le build Vite de duumini-web (dossier dist/) dans
+ * ./web-dist avant déploiement, ou pointe WEB_DIST_DIR ailleurs.
+ * ========================= */
+const WEB_DIST_DIR = process.env.WEB_DIST_DIR || path.join(__dirname, "web-dist");
+const webIndexPath = path.join(WEB_DIST_DIR, "index.html");
+const hasWebBuild = fs.existsSync(webIndexPath);
+
+if (hasWebBuild) {
+  app.use(express.static(WEB_DIST_DIR, { index: false, maxAge: "1d" }));
+
+  // Express 5 / path-to-regexp n'accepte plus "*" comme route GET ->
+  // middleware sans path, qui laisse passer l'API/les fichiers statiques
+  // et renvoie index.html pour toute route front (React Router).
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+
+    const p = req.path;
+    if (
+      p.startsWith("/api") ||
+      p.startsWith("/uploads") ||
+      p.startsWith("/media") ||
+      p.startsWith("/duoline") ||
+      p.startsWith("/share") ||
+      p === "/health"
+    ) {
+      return next();
+    }
+
+    res.sendFile(webIndexPath);
+  });
+
+  console.log("[web] duumini-web build servie depuis", WEB_DIST_DIR);
+} else {
+  console.warn("[web] aucun build trouvé dans", WEB_DIST_DIR, "- API seule");
+
+  app.get("/", (_req, res) => {
+    res.json({ ok: true, service: "duumini-api" });
+  });
+
+  app.head("/", (_req, res) => {
+    res.status(200).end();
+  });
 }
 
 /* =========================
