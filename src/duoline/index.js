@@ -6,6 +6,7 @@ const express = require("express");
 
 const { initDb } = require("./models");
 const { startBackups } = require("./lib/backup");
+const { env } = require("./config/env");
 const { authRouter } = require("./routes/auth");
 const { messagesRouter } = require("./routes/messages");
 const { createMediaRouter } = require("./routes/media");
@@ -23,13 +24,19 @@ function createDuolineModule(io) {
   const nsp = io.of("/duoline");
   registerSockets(nsp);
 
-  initDb().then(
-    () => {
-      console.log("[duoline] DB connectée");
-      startBackups();
-    },
-    (err) => console.error("[duoline] échec connexion DB:", err.message)
-  );
+  if (env.duolineConfigured) {
+    initDb().then(
+      () => {
+        console.log("[duoline] DB connectée");
+        startBackups();
+      },
+      (err) => console.error("[duoline] échec connexion DB:", err.message)
+    );
+  } else {
+    console.log(
+      "[duoline] DUOLINE_DB_* absent - module monté mais DB non connectée (pas de tentative)"
+    );
+  }
 
   const router = Router();
   router.use("/uploads", express.static(uploadsDir));

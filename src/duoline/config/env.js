@@ -12,13 +12,21 @@ const env = {
   // en cas de déconnexion explicite ou de changement d'appareil.
   jwtExpiresIn: process.env.DUOLINE_JWT_EXPIRES_IN || "3650d",
 
+  // ⚠️ Pas de repli sur "root"/mot de passe vide : sur un hébergement
+  // mutualisé, ça ne fait que générer des tentatives de connexion ratées
+  // en boucle (et peut déclencher un verrouillage côté serveur MySQL qui
+  // retombe sur les autres connexions). Sans DUOLINE_DB_* explicite, le
+  // module reste désactivé (voir index.js) au lieu d'essayer à l'aveugle.
   db: {
     host: process.env.DUOLINE_DB_HOST || "127.0.0.1",
     port: num(process.env.DUOLINE_DB_PORT, 3306),
     name: process.env.DUOLINE_DB_NAME || "duoline",
-    user: process.env.DUOLINE_DB_USER || "root",
+    user: process.env.DUOLINE_DB_USER || "",
     password: process.env.DUOLINE_DB_PASSWORD || "",
   },
+  duolineConfigured: !!(
+    process.env.DUOLINE_DB_USER && process.env.DUOLINE_DB_NAME
+  ),
 
   // Ces vars-là sont volontairement partagées avec duumini-api (même compte
   // Cloudinary, même service Metered/VAPID) — pas besoin de les préfixer.
