@@ -7,9 +7,12 @@ const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
 
-if (process.env.NODE_ENV !== "production") {
-  require("dotenv").config();
-}
+// dotenv ne touche jamais une variable déjà présente dans process.env
+// (ex: injectée par cPanel/Passenger ou Render) - charger un .env en
+// production est donc sans danger, et permet d'uploader un seul fichier
+// .env sur un hébergement type cPanel au lieu de saisir chaque variable
+// une par une dans son interface.
+require("dotenv").config();
 
 const { env } = require("./src/lib/env");
 const { notFound, errorHandler } = require("./src/utils/errors");
