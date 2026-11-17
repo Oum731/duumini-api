@@ -29,6 +29,7 @@ const SCRIPTS = [
   "createExpensesTables.js",
   "createSupplierProductsTable.js",
   "createDeliveryZonesTable.js",
+  "ensureProductRatingsTable.js",
 
   "addCountryCodeColumns.js",
   "addProductBrandFields.js",
