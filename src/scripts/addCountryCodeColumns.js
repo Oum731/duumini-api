@@ -34,7 +34,7 @@ const ALTERS = [
   {
     table: "shops",
     sql: `ALTER TABLE shops
-            ADD COLUMN country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER country`,
+            ADD COLUMN country_code CHAR(2) NOT NULL DEFAULT 'MA'`,
   },
   {
     table: "products",
@@ -71,9 +71,13 @@ async function main() {
     console.log(`[addCountryCodeColumns] \`${table}\` OK`);
   }
 
-  console.log("[addCountryCodeColumns] backfill shops.country_code (CI heuristic)...");
-  const [result] = await pool.query(BACKFILL_SHOPS_CI);
-  console.log(`[addCountryCodeColumns] backfill OK (${result.affectedRows} row(s) updated)`);
+  if (await columnExists(pool, "shops", "country")) {
+    console.log("[addCountryCodeColumns] backfill shops.country_code (CI heuristic)...");
+    const [result] = await pool.query(BACKFILL_SHOPS_CI);
+    console.log(`[addCountryCodeColumns] backfill OK (${result.affectedRows} row(s) updated)`);
+  } else {
+    console.log("[addCountryCodeColumns] \`shops\`.country n'existe pas ici, backfill ignoré");
+  }
 
   await pool.end();
   console.log("[addCountryCodeColumns] done");
