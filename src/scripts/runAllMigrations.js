@@ -30,6 +30,7 @@ const SCRIPTS = [
   "createSupplierProductsTable.js",
   "createDeliveryZonesTable.js",
   "ensureProductRatingsTable.js",
+  "createOrderItemsTable.js",
 
   "addCountryCodeColumns.js",
   "addProductBrandFields.js",
@@ -42,6 +43,7 @@ const SCRIPTS = [
   "addShopLogoCoverFields.js",
   "addShopType.js",
   "addExpensesWarehouseId.js",
+  "addOrderItemsCostSnapshot.js",
 
   "renamePasswordHashColumn.js",
   "migrateUserProfileFields.js",
