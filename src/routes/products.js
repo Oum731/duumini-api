@@ -288,8 +288,8 @@ async function tableExists(conn, tableName) {
 }
 
 async function detectSupplierMeta(conn) {
-  const enabled = await tableExists(conn, "supplier_products");
-  if (!enabled) {
+  const tablePresent = await tableExists(conn, "supplier_products");
+  if (!tablePresent) {
     return {
       enabled: false,
       costCol: null,
@@ -306,6 +306,16 @@ async function detectSupplierMeta(conn) {
   );
 
   const names = new Set((cols || []).map((c) => String(c.COLUMN_NAME || "")));
+
+  // La table `supplier_products` (voir src/routes/supplier_products.js) est
+  // un catalogue indépendant par fournisseur (supplier_shop_id, title...),
+  // pas liée aux produits du catalogue principal. Cette agrégation
+  // supplier_stock/supplier_cost n'a de sens que si une colonne product_id
+  // existe réellement - sinon on la désactive proprement (comme avant que
+  // la table n'existe) plutôt que de planter sur "Unknown column product_id".
+  if (!names.has("product_id")) {
+    return { enabled: false, costCol: null, stockCol: null, updatedAtCol: null };
+  }
 
   const costCandidates = ["cost_price", "buy_price", "purchase_price", "unit_cost"];
   const stockCandidates = ["stock", "qty", "quantity", "qty_in_stock", "remaining_qty"];
