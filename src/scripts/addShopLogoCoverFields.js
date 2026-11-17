@@ -13,17 +13,20 @@
 require("dotenv").config();
 const { getPool } = require("../lib/db");
 
-const ALTER_SQL = `
-  ALTER TABLE shops
-    ADD COLUMN IF NOT EXISTS logo VARCHAR(512) NULL,
-    ADD COLUMN IF NOT EXISTS cover VARCHAR(512) NULL
-`;
+// Une colonne par ALTER : certaines versions de MariaDB n'acceptent pas
+// plusieurs clauses "ADD COLUMN IF NOT EXISTS" dans la même instruction.
+const ALTERS = [
+  `ALTER TABLE shops ADD COLUMN IF NOT EXISTS logo VARCHAR(512) NULL`,
+  `ALTER TABLE shops ADD COLUMN IF NOT EXISTS cover VARCHAR(512) NULL`,
+];
 
 async function main() {
   const pool = getPool();
 
   console.log("[addShopLogoCoverFields] altering `shops`...");
-  await pool.query(ALTER_SQL);
+  for (const sql of ALTERS) {
+    await pool.query(sql);
+  }
   console.log("[addShopLogoCoverFields] `shops` OK (logo, cover)");
 
   await pool.end();
