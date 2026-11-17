@@ -33,6 +33,7 @@ const SCRIPTS = [
   "createOrderItemsTable.js",
   "createAppSettingsTable.js",
   "createLocationSuggestionsTable.js",
+  "createAffiliatesTable.js",
 
   "addCountryCodeColumns.js",
   "addProductBrandFields.js",
