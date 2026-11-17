@@ -34,6 +34,8 @@ const SCRIPTS = [
   "createAppSettingsTable.js",
   "createLocationSuggestionsTable.js",
   "createAffiliatesTable.js",
+  "createAffiliateClicksTable.js",
+  "createShopCategoriesTable.js",
 
   "addCountryCodeColumns.js",
   "addProductBrandFields.js",
@@ -47,6 +49,7 @@ const SCRIPTS = [
   "addShopType.js",
   "addExpensesWarehouseId.js",
   "addOrderItemsCostSnapshot.js",
+  "addOrderCommercialFields.js",
 
   "renamePasswordHashColumn.js",
   "migrateUserProfileFields.js",
