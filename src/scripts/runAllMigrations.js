@@ -38,6 +38,7 @@ const SCRIPTS = [
   "addProductWarehouseAndUnits.js",
   "addProductIsActiveField.js",
   "addProductVerticalAndPromoFields.js",
+  "backfillProductVertical.js",
   "addShopLogoCoverFields.js",
   "addShopType.js",
   "addExpensesWarehouseId.js",
