@@ -12,18 +12,39 @@
 require("dotenv").config();
 const { getPool } = require("../lib/db");
 
-// Une colonne par ALTER : certaines versions de MariaDB n'acceptent pas
-// plusieurs clauses "ADD COLUMN IF NOT EXISTS" dans la même instruction.
+async function columnExists(pool, table, column) {
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+    `,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+// "ADD COLUMN IF NOT EXISTS" n'est pas supporté par ce serveur -> on
+// vérifie nous-mêmes avant d'altérer.
 const ALTERS = [
-  `ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(120) NULL AFTER name`,
-  `ALTER TABLE products ADD COLUMN IF NOT EXISTS conditionnement VARCHAR(120) NULL AFTER description`,
+  { column: "brand", sql: `ALTER TABLE products ADD COLUMN brand VARCHAR(120) NULL AFTER name` },
+  {
+    column: "conditionnement",
+    sql: `ALTER TABLE products ADD COLUMN conditionnement VARCHAR(120) NULL AFTER description`,
+  },
 ];
 
 async function main() {
   const pool = getPool();
 
   console.log("[addProductBrandFields] altering `products`...");
-  for (const sql of ALTERS) {
+  for (const { column, sql } of ALTERS) {
+    if (await columnExists(pool, "products", column)) {
+      console.log(`[addProductBrandFields] ${column} already exists, skipping`);
+      continue;
+    }
     await pool.query(sql);
   }
   console.log("[addProductBrandFields] `products` OK (brand, conditionnement)");

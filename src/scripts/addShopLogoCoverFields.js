@@ -13,18 +13,36 @@
 require("dotenv").config();
 const { getPool } = require("../lib/db");
 
-// Une colonne par ALTER : certaines versions de MariaDB n'acceptent pas
-// plusieurs clauses "ADD COLUMN IF NOT EXISTS" dans la même instruction.
+async function columnExists(pool, table, column) {
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+    `,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+// "ADD COLUMN IF NOT EXISTS" n'est pas supporté par ce serveur -> on
+// vérifie nous-mêmes avant d'altérer.
 const ALTERS = [
-  `ALTER TABLE shops ADD COLUMN IF NOT EXISTS logo VARCHAR(512) NULL`,
-  `ALTER TABLE shops ADD COLUMN IF NOT EXISTS cover VARCHAR(512) NULL`,
+  { column: "logo", sql: `ALTER TABLE shops ADD COLUMN logo VARCHAR(512) NULL` },
+  { column: "cover", sql: `ALTER TABLE shops ADD COLUMN cover VARCHAR(512) NULL` },
 ];
 
 async function main() {
   const pool = getPool();
 
   console.log("[addShopLogoCoverFields] altering `shops`...");
-  for (const sql of ALTERS) {
+  for (const { column, sql } of ALTERS) {
+    if (await columnExists(pool, "shops", column)) {
+      console.log(`[addShopLogoCoverFields] ${column} already exists, skipping`);
+      continue;
+    }
     await pool.query(sql);
   }
   console.log("[addShopLogoCoverFields] `shops` OK (logo, cover)");

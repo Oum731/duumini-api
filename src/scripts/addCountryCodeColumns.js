@@ -13,21 +13,38 @@
 require("dotenv").config();
 const { getPool } = require("../lib/db");
 
+async function columnExists(pool, table, column) {
+  const [rows] = await pool.query(
+    `
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+    `,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+// "ADD COLUMN IF NOT EXISTS" n'est pas supporté par ce serveur -> on
+// vérifie nous-mêmes avant d'altérer (même approche que
+// addProductWarehouseAndUnits.js).
 const ALTERS = [
   {
     table: "shops",
     sql: `ALTER TABLE shops
-            ADD COLUMN IF NOT EXISTS country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER country`,
+            ADD COLUMN country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER country`,
   },
   {
     table: "products",
     sql: `ALTER TABLE products
-            ADD COLUMN IF NOT EXISTS country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER shop_id`,
+            ADD COLUMN country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER shop_id`,
   },
   {
     table: "orders",
     sql: `ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER user_id`,
+            ADD COLUMN country_code CHAR(2) NOT NULL DEFAULT 'MA' AFTER user_id`,
   },
 ];
 
@@ -45,6 +62,10 @@ async function main() {
   const pool = getPool();
 
   for (const { table, sql } of ALTERS) {
+    if (await columnExists(pool, table, "country_code")) {
+      console.log(`[addCountryCodeColumns] \`${table}\`.country_code already exists, skipping`);
+      continue;
+    }
     console.log(`[addCountryCodeColumns] altering \`${table}\`...`);
     await pool.query(sql);
     console.log(`[addCountryCodeColumns] \`${table}\` OK`);
