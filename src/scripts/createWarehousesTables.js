@@ -41,8 +41,8 @@ const CREATE_WAREHOUSE_MANAGERS = `
   CREATE TABLE IF NOT EXISTS warehouse_managers (
     id INT AUTO_INCREMENT PRIMARY KEY,
     warehouse_id INT NOT NULL,
-    user_id INT NOT NULL,
-    assigned_by INT NULL,
+    user_id BIGINT NOT NULL,
+    assigned_by BIGINT NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
@@ -56,7 +56,7 @@ const CREATE_WAREHOUSE_STOCK = `
   CREATE TABLE IF NOT EXISTS warehouse_stock (
     id INT AUTO_INCREMENT PRIMARY KEY,
     warehouse_id INT NOT NULL,
-    product_id INT NOT NULL,
+    product_id BIGINT NOT NULL,
     variant_id INT NULL,
     quantity INT NOT NULL DEFAULT 0,
     min_threshold INT NOT NULL DEFAULT 0,
@@ -78,7 +78,7 @@ const CREATE_STOCK_MOVEMENTS = `
   CREATE TABLE IF NOT EXISTS stock_movements (
     id INT AUTO_INCREMENT PRIMARY KEY,
     warehouse_id INT NOT NULL,
-    product_id INT NULL,
+    product_id BIGINT NULL,
     variant_id INT NULL,
     type ENUM(
       'IN_PURCHASE','IN_RETURN_CANCEL','IN_ADJUSTMENT',
@@ -88,7 +88,7 @@ const CREATE_STOCK_MOVEMENTS = `
     unit_cost DECIMAL(10,2) NULL,
     reference_type ENUM('ORDER','SUPPLIER_DELIVERY','MANUAL','TRANSFER') NOT NULL DEFAULT 'MANUAL',
     reference_id INT NULL,
-    performed_by INT NULL,
+    performed_by BIGINT NULL,
     note VARCHAR(255) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),

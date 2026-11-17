@@ -16,11 +16,11 @@ const { getPool } = require("../lib/db");
 const CREATE_SUPPLIER_DELIVERIES = `
   CREATE TABLE IF NOT EXISTS supplier_deliveries (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    supplier_shop_id INT NOT NULL,
+    supplier_shop_id BIGINT NOT NULL,
     warehouse_id INT NOT NULL,
     reference VARCHAR(120) NULL,
     status ENUM('RECEIVED','CANCELLED') NOT NULL DEFAULT 'RECEIVED',
-    received_by INT NULL,
+    received_by BIGINT NULL,
     note VARCHAR(255) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (supplier_shop_id) REFERENCES shops(id),
@@ -35,7 +35,7 @@ const CREATE_SUPPLIER_DELIVERY_ITEMS = `
   CREATE TABLE IF NOT EXISTS supplier_delivery_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
     delivery_id INT NOT NULL,
-    product_id INT NOT NULL,
+    product_id BIGINT NOT NULL,
     variant_id INT NULL,
     qty INT NOT NULL,
     unit_cost DECIMAL(10,2) NOT NULL,

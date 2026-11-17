@@ -10,7 +10,7 @@ const { getPool } = require("../lib/db");
 
 const CREATE_SQL = `
   CREATE TABLE IF NOT EXISTS commercial_profiles (
-    user_id INT PRIMARY KEY,
+    user_id BIGINT PRIMARY KEY,
     commission_rate DECIMAL(5,4) NOT NULL DEFAULT 0.0500,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)

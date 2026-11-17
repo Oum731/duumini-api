@@ -10,7 +10,7 @@ const { getPool } = require("../lib/db");
 const CREATE_COMPANIES = `
 CREATE TABLE IF NOT EXISTS companies (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  owner_id INT NOT NULL,
+  owner_id BIGINT NOT NULL,
   legal_name VARCHAR(255) NOT NULL,
   slug VARCHAR(255) UNIQUE NOT NULL,
   description TEXT,
@@ -27,7 +27,7 @@ const CREATE_COMPANY_MEMBERS = `
 CREATE TABLE IF NOT EXISTS company_members (
   id INT AUTO_INCREMENT PRIMARY KEY,
   company_id INT NOT NULL,
-  user_id INT NOT NULL,
+  user_id BIGINT NOT NULL,
   internal_role ENUM('OWNER','MANAGER','SALES','WAREHOUSE','ACCOUNTANT','VIEWER') NOT NULL,
   status ENUM('ACTIVE','INVITED','REMOVED') NOT NULL DEFAULT 'ACTIVE',
   invited_by INT NULL,
