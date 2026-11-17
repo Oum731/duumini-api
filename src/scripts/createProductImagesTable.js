@@ -10,6 +10,7 @@
 
 require("dotenv").config();
 const { getPool } = require("../lib/db");
+const { tableExists, ensureColumns } = require("./_schemaUtils");
 
 const CREATE_PRODUCT_IMAGES = `
   CREATE TABLE IF NOT EXISTS product_images (
@@ -23,12 +24,28 @@ const CREATE_PRODUCT_IMAGES = `
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `;
 
+// CREATE TABLE IF NOT EXISTS ne fait rien si `product_images` existait déjà
+// (créée à la main sur l'ancienne base, parfois sans `product_id`) - on
+// vérifie et complète les colonnes après coup, comme pour product_ratings.
+const REQUIRED_COLUMNS = [
+  { name: "product_id", sql: "ALTER TABLE product_images ADD COLUMN product_id BIGINT NOT NULL" },
+  { name: "url", sql: "ALTER TABLE product_images ADD COLUMN url VARCHAR(1024) NOT NULL" },
+  { name: "sort_order", sql: "ALTER TABLE product_images ADD COLUMN sort_order INT NOT NULL DEFAULT 0" },
+  { name: "created_at", sql: "ALTER TABLE product_images ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" },
+];
+
 async function main() {
   const pool = getPool();
 
+  const existed = await tableExists(pool, "product_images");
   console.log("[createProductImagesTable] creating `product_images`...");
   await pool.query(CREATE_PRODUCT_IMAGES);
   console.log("[createProductImagesTable] `product_images` OK");
+
+  if (existed) {
+    console.log("[createProductImagesTable] table préexistante, vérification des colonnes...");
+    await ensureColumns(pool, "product_images", REQUIRED_COLUMNS, "[createProductImagesTable]");
+  }
 
   await pool.end();
   console.log("[createProductImagesTable] done");
