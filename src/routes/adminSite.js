@@ -32,10 +32,12 @@ async function setSetting(conn, key, value) {
   );
 }
 
+// Public en lecture : le Footer (src/components/Footer.tsx côté web)
+// l'appelle pour TOUS les visiteurs afin de savoir si le site est fermé,
+// pas seulement les admins. Seule la modification (PUT ci-dessous) reste
+// réservée aux admins.
 router.get(
   "/site-status",
-  authRequired,
-  requireRole("ADMIN"),
   async (req, res, next) => {
     const conn = await getPool().getConnection();
     try {
