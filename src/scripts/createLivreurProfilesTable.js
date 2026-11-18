@@ -11,7 +11,7 @@ const { getPool } = require("../lib/db");
 
 const CREATE_TABLE = `
   CREATE TABLE IF NOT EXISTS livreur_profiles (
-    user_id INT PRIMARY KEY,
+    user_id BIGINT PRIMARY KEY,
     country_code VARCHAR(4) NOT NULL,
     city VARCHAR(120) NULL,
     vehicle_type ENUM('MOTO','VOITURE','VELO','A_PIED') NULL,

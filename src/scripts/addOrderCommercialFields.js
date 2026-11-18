@@ -16,7 +16,7 @@ const { ensureColumns } = require("./_schemaUtils");
 // vérifie nous-mêmes avant d'altérer (même pattern que les autres scripts
 // add*.js de ce dossier).
 const REQUIRED_COLUMNS = [
-  { name: "commercial_id", sql: "ALTER TABLE orders ADD COLUMN commercial_id INT NULL" },
+  { name: "commercial_id", sql: "ALTER TABLE orders ADD COLUMN commercial_id BIGINT NULL" },
   { name: "commercial_commission_rate", sql: "ALTER TABLE orders ADD COLUMN commercial_commission_rate DECIMAL(5,4) NULL" },
   { name: "commercial_commission_amount", sql: "ALTER TABLE orders ADD COLUMN commercial_commission_amount DECIMAL(12,2) NULL" },
   { name: "commercial_commission_status", sql: "ALTER TABLE orders ADD COLUMN commercial_commission_status ENUM('PENDING','PAID') NULL" },

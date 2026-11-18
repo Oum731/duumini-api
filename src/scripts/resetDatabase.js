@@ -31,7 +31,7 @@ async function main() {
   const pool = getPool();
 
   const [tables] = await pool.query(
-    `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()`,
+    `SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()`,
   );
 
   if (!tables.length) {
@@ -40,19 +40,41 @@ async function main() {
     return;
   }
 
-  console.log(`[resetDatabase] ${tables.length} table(s) à supprimer : ${tables.map((t) => t.TABLE_NAME).join(", ")}`);
+  console.log(`[resetDatabase] ${tables.length} objet(s) à supprimer : ${tables.map((t) => t.TABLE_NAME).join(", ")}`);
 
   await pool.query("SET FOREIGN_KEY_CHECKS = 0");
-  for (const { TABLE_NAME } of tables) {
-    console.log(`[resetDatabase] DROP TABLE \`${TABLE_NAME}\`...`);
-    await pool.query(`DROP TABLE \`${TABLE_NAME}\``);
+  const failures = [];
+  // Les VIEW doivent être supprimées avec DROP VIEW (DROP TABLE échoue
+  // avec "Unknown table"), et une erreur isolée sur un objet ne doit pas
+  // arrêter le nettoyage des autres - le script reste idempotent/safe à
+  // relancer (IF EXISTS) même après un arrêt partiel précédent.
+  for (const { TABLE_NAME, TABLE_TYPE } of tables) {
+    const isView = TABLE_TYPE === "VIEW";
+    const stmt = isView
+      ? `DROP VIEW IF EXISTS \`${TABLE_NAME}\``
+      : `DROP TABLE IF EXISTS \`${TABLE_NAME}\``;
+    console.log(`[resetDatabase] ${isView ? "DROP VIEW" : "DROP TABLE"} \`${TABLE_NAME}\`...`);
+    try {
+      await pool.query(stmt);
+    } catch (e) {
+      console.error(`[resetDatabase] échec sur \`${TABLE_NAME}\`:`, e.message || e);
+      failures.push(TABLE_NAME);
+    }
   }
   await pool.query("SET FOREIGN_KEY_CHECKS = 1");
 
-  console.log(`[resetDatabase] ${tables.length} table(s) supprimée(s). Base vide.`);
+  if (failures.length) {
+    console.log(`[resetDatabase] ${failures.length} objet(s) n'ont pas pu être supprimés : ${failures.join(", ")}`);
+  }
+  console.log(`[resetDatabase] ${tables.length - failures.length}/${tables.length} objet(s) supprimé(s).`);
 
   await pool.end();
-  console.log("[resetDatabase] done");
+  if (failures.length) {
+    console.log("[resetDatabase] done (avec échecs - relance le script, DROP ... IF EXISTS est idempotent)");
+    process.exitCode = 1;
+  } else {
+    console.log("[resetDatabase] done");
+  }
 }
 
 main().catch((e) => {

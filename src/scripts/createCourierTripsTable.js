@@ -13,8 +13,8 @@ const { getPool } = require("../lib/db");
 const CREATE_TABLE = `
   CREATE TABLE IF NOT EXISTS courier_trips (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    requester_user_id INT NOT NULL,
-    livreur_user_id INT NULL,
+    requester_user_id BIGINT NOT NULL,
+    livreur_user_id BIGINT NULL,
     country_code VARCHAR(4) NOT NULL,
     pickup_address VARCHAR(255) NOT NULL,
     pickup_lat DECIMAL(10,7) NOT NULL,

@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS vendor_applications (
   rc_url VARCHAR(500) NULL,
   status ENUM('PENDING','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING',
   admin_notes TEXT NULL,
-  reviewed_by INT NULL,
+  reviewed_by BIGINT NULL,
   reviewed_at TIMESTAMP NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (reviewed_by) REFERENCES users(id)
