@@ -24,6 +24,7 @@ const CREATE_EXPENSE_CATEGORIES = `
     color VARCHAR(16) NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (shop_id) REFERENCES shops(id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `;
@@ -59,6 +60,11 @@ const REQUIRED_EXPENSE_CATEGORIES_COLUMNS = [
   { name: "color", sql: "ALTER TABLE expense_categories ADD COLUMN color VARCHAR(16) NULL" },
   { name: "is_active", sql: "ALTER TABLE expense_categories ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1" },
   { name: "created_at", sql: "ALTER TABLE expense_categories ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" },
+  // ✅ Manquait depuis toujours : src/routes/expense_categories.js (GET et
+  // POST) sélectionne `updated_at`, jamais défini ni dans le CREATE TABLE
+  // ni ici — en son absence, toute requête échouait avec "Unknown column
+  // 'updated_at'" (500 "Erreur serveur lors du chargement des catégories").
+  { name: "updated_at", sql: "ALTER TABLE expense_categories ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" },
 ];
 
 const REQUIRED_EXPENSES_COLUMNS = [
