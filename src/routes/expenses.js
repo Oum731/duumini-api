@@ -93,24 +93,26 @@ function canManageExpenses(req) {
   );
 }
 
-// ✅ req.user n'a jamais de `shop_id` réel (seulement `effective_shop_id`
-// en impersonation admin) : on résout la boutique du vendeur/fournisseur/
-// restaurant connecté via owner_id, comme le fait déjà shops.js (/mine).
-async function resolveOwnShopId(pool, userId) {
-  const uid = toNum(userId, 0) || null;
-  if (!uid) return null;
-  const [[row]] = await pool.query(
-    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
-    [uid]
-  );
-  return row?.id ? Number(row.id) : null;
+// ✅ Isolation par entreprise : req.user.vendor_shop_ids (résolu par
+// resolveCompanyScope dans middlewares/auth) couvre la propre boutique du
+// vendeur/fournisseur/restaurant ET, s'il appartient à une entreprise,
+// toutes les boutiques de cette entreprise — remplace l'ancienne résolution
+// via owner_id.
+function currentShopIds(req) {
+  if (isAdmin(req.user)) {
+    const explicit = toNum(req.query.shop_id || req.body?.shop_id, 0);
+    return explicit ? [explicit] : null; // null = admin non filtré (sauf shop_id explicite)
+  }
+  return req.user?.vendor_shop_ids || [];
 }
 
-async function requestShopId(req, pool) {
-  if (isAdmin(req.user)) {
-    return toNum(req.query.shop_id || req.body?.shop_id, 0) || null;
-  }
-  return resolveOwnShopId(pool, req.user?.id);
+// Pour créer une ressource rattachée à UNE boutique (shop_id singulier) :
+// la boutique explicitement choisie, sinon la première du périmètre.
+function currentDefaultShopId(req) {
+  const explicit = toNum(req.query.shop_id || req.body?.shop_id, 0);
+  if (explicit) return explicit;
+  const ids = req.user?.vendor_shop_ids || [];
+  return ids.length ? ids[0] : null;
 }
 
 // ✅ Une dépense d'entrepôt (loyer, personnel logistique...) n'est pas
@@ -122,20 +124,20 @@ function requestWarehouseId(req) {
   return toNum(req.query.warehouse_id || req.body?.warehouse_id, 0) || null;
 }
 
-async function forbiddenByRole(req, shopId, pool) {
+function forbiddenByRole(req, shopId) {
   if (isAdmin(req.user)) return false;
-  const myShopId = await resolveOwnShopId(pool, req.user?.id);
-  if (!myShopId || !shopId) return false;
-  return Number(myShopId) !== Number(shopId);
+  if (!shopId) return false;
+  const ids = req.user?.vendor_shop_ids || [];
+  return !ids.includes(Number(shopId));
 }
 
 async function buildExpenseWhere({ query = {}, user = null, pool }) {
   const where = [];
   const params = [];
 
-  const shopId = isAdmin(user)
-    ? toNum(query.shop_id, 0) || null
-    : await resolveOwnShopId(pool, user?.id);
+  const shopIds = isAdmin(user)
+    ? (toNum(query.shop_id, 0) ? [toNum(query.shop_id, 0)] : null)
+    : user?.vendor_shop_ids || [];
 
   const warehouseId =
     isAdmin(user) && (await expensesHasWarehouseId(pool))
@@ -150,9 +152,13 @@ async function buildExpenseWhere({ query = {}, user = null, pool }) {
   const from = normalizeDateOnly(query.from);
   const to = normalizeDateOnly(query.to);
 
-  if (shopId) {
-    where.push("e.shop_id = ?");
-    params.push(shopId);
+  if (shopIds) {
+    if (shopIds.length) {
+      where.push("e.shop_id IN (?)");
+      params.push(shopIds);
+    } else {
+      where.push("1=0");
+    }
   }
 
   if (warehouseId) {
@@ -429,17 +435,22 @@ router.get("/summary", authRequired, async (req, res) => {
       params
     );
 
-    // ✅ Total réellement non filtré (scope boutique uniquement, sans
+    // ✅ Total réellement non filtré (scope boutique(s) uniquement, sans
     // from/to/category/status/... ) — distinct de filtered_total qui reflète
     // les filtres actifs de l'UI. Sert la "vue globale depuis le début".
-    const allTimeShopId = await requestShopId(req, pool);
+    const allTimeShopIds = currentShopIds(req);
+    const allTimeWhere = allTimeShopIds
+      ? allTimeShopIds.length
+        ? "AND e.shop_id IN (?)"
+        : "AND 1=0"
+      : "";
     const [[allTimeRow]] = await pool.query(
       `
       SELECT COALESCE(SUM(e.amount), 0) AS all_time
       FROM expenses e
-      WHERE 1=1 ${allTimeShopId ? "AND e.shop_id = ?" : ""}
+      WHERE 1=1 ${allTimeWhere}
       `,
-      allTimeShopId ? [allTimeShopId] : []
+      allTimeShopIds && allTimeShopIds.length ? [allTimeShopIds] : []
     );
 
     return res.json({
@@ -664,7 +675,7 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = await requestShopId(req, pool);
+    const shopId = currentDefaultShopId(req);
     const warehouseId = requestWarehouseId(req);
     const userId = toNum(req.user?.id, 0) || null;
     const categoryId = toNum(req.body?.category_id, 0);
@@ -746,7 +757,7 @@ router.put("/:id", authRequired, async (req, res) => {
     );
 
     if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
-    if (await forbiddenByRole(req, existing.shop_id, pool)) {
+    if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
@@ -837,7 +848,7 @@ router.delete("/:id", authRequired, async (req, res) => {
     );
 
     if (!existing) return res.status(404).json({ error: "Dépense introuvable." });
-    if (await forbiddenByRole(req, existing.shop_id, pool)) {
+    if (forbiddenByRole(req, existing.shop_id)) {
       return res.status(403).json({ error: "Accès refusé." });
     }
 

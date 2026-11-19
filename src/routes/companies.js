@@ -418,4 +418,133 @@ membersRouter.delete(
 
 router.use("/:companyId/members", membersRouter);
 
+/* ========= /:companyId/shops ==========================================
+ * ✅ Écran d'allocation (Point 3) : rattacher/détacher une boutique
+ * (shops.company_id) à/de l'entreprise, pour que tous ses membres actifs
+ * la voient (voir vendor_shop_ids / resolveCompanyScope dans
+ * middlewares/auth) au lieu d'être limités à leur seule boutique owner_id.
+ * ======================================================================*/
+const shopsRouter = Router({ mergeParams: true });
+
+// GET /api/companies/:companyId/shops — boutiques déjà rattachées
+shopsRouter.get(
+  "/",
+  authRequired,
+  requireCompanyRole(),
+  async (req, res) => {
+    try {
+      const companyId = Number(req.params.companyId) || 0;
+      const pool = getPool();
+      const [rows] = await pool.query(
+        `SELECT id, name, slug, city, owner_id, shop_type
+           FROM shops
+          WHERE company_id = ?
+          ORDER BY id ASC`,
+        [companyId]
+      );
+      res.json({ items: rows });
+    } catch (e) {
+      console.error("GET /api/companies/:companyId/shops error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
+
+// GET /api/companies/:companyId/shops/available — boutiques possédées par
+// l'utilisateur agissant (owner_id) et pas encore rattachées à une
+// entreprise — candidates à l'attachement.
+shopsRouter.get(
+  "/available",
+  authRequired,
+  requireCompanyRole("OWNER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const actorId = actingUserId(req);
+      const pool = getPool();
+      const [rows] = await pool.query(
+        `SELECT id, name, slug, city, owner_id, shop_type
+           FROM shops
+          WHERE owner_id = ? AND company_id IS NULL
+          ORDER BY id ASC`,
+        [actorId]
+      );
+      res.json({ items: rows });
+    } catch (e) {
+      console.error("GET /api/companies/:companyId/shops/available error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
+
+// POST /api/companies/:companyId/shops — rattache une boutique (shop_id)
+shopsRouter.post(
+  "/",
+  authRequired,
+  requireCompanyRole("OWNER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const companyId = Number(req.params.companyId) || 0;
+      const shopId = Number(req.body?.shop_id) || 0;
+      if (!shopId) return res.status(400).json({ error: "shop_id required" });
+
+      const pool = getPool();
+      const [[shop]] = await pool.query(
+        `SELECT id, owner_id, company_id FROM shops WHERE id = ? LIMIT 1`,
+        [shopId]
+      );
+      if (!shop) return res.status(404).json({ error: "Shop not found" });
+
+      if (shop.company_id != null) {
+        return res.status(409).json({ error: "Cette boutique est déjà rattachée à une entreprise" });
+      }
+
+      // Seul l'ADMIN plateforme peut rattacher la boutique d'un tiers ;
+      // sinon il faut en être le owner_id.
+      if (!isAdmin(req.user) && Number(shop.owner_id) !== actingUserId(req)) {
+        return res.status(403).json({ error: "Forbidden: vous n'êtes pas le propriétaire de cette boutique" });
+      }
+
+      await pool.query(`UPDATE shops SET company_id = ? WHERE id = ?`, [companyId, shopId]);
+
+      res.status(201).json({ ok: true });
+    } catch (e) {
+      console.error("POST /api/companies/:companyId/shops error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
+
+// DELETE /api/companies/:companyId/shops/:shopId — détache une boutique
+shopsRouter.delete(
+  "/:shopId",
+  authRequired,
+  requireCompanyRole("OWNER", "MANAGER"),
+  async (req, res) => {
+    try {
+      const companyId = Number(req.params.companyId) || 0;
+      const shopId = Number(req.params.shopId) || 0;
+
+      const pool = getPool();
+      const [[shop]] = await pool.query(
+        `SELECT id, company_id FROM shops WHERE id = ? LIMIT 1`,
+        [shopId]
+      );
+      if (!shop) return res.status(404).json({ error: "Shop not found" });
+
+      if (Number(shop.company_id) !== companyId) {
+        return res.status(404).json({ error: "Cette boutique n'appartient pas à cette entreprise" });
+      }
+
+      await pool.query(`UPDATE shops SET company_id = NULL WHERE id = ?`, [shopId]);
+
+      res.json({ ok: true });
+    } catch (e) {
+      console.error("DELETE /api/companies/:companyId/shops/:shopId error:", e);
+      res.status(500).json({ error: "Erreur serveur" });
+    }
+  }
+);
+
+router.use("/:companyId/shops", shopsRouter);
+
 module.exports = router;

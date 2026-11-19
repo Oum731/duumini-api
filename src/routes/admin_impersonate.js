@@ -1,7 +1,7 @@
 // src/routes/admin_impersonate.js
 const { Router } = require("express");
 const { getPool } = require("../lib/db");
-const { authRequired, requireRole } = require("../middlewares/auth");
+const { authRequired, requireRole, resolveCompanyScope } = require("../middlewares/auth");
 const { signAccess } = require("../utils/jwt");
 
 const router = Router();
@@ -25,8 +25,17 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
         `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
         [vendor_user_id]
       );
-      if (!rows.length) return res.status(404).json({ error: "Vendor shop not found for this user" });
-      vendor_shop_id = Number(rows[0].id);
+      if (rows.length) {
+        vendor_shop_id = Number(rows[0].id);
+      } else {
+        // ✅ Pas de boutique en propre : simple membre d'entreprise
+        // (company_members) — on retombe sur son périmètre entreprise.
+        const scope = await resolveCompanyScope(pool, vendor_user_id);
+        if (!scope.vendor_shop_ids.length) {
+          return res.status(404).json({ error: "Vendor shop not found for this user" });
+        }
+        vendor_shop_id = scope.vendor_shop_ids[0];
+      }
     }
 
     if (!Number.isFinite(vendor_shop_id) || vendor_shop_id <= 0) {

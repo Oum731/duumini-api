@@ -77,6 +77,39 @@ async function getProfileFlags(pool, userId) {
 }
 
 /**
+ * ✅ Isolation par entreprise : une entreprise (companies/company_members)
+ * peut regrouper plusieurs boutiques (shops.company_id) - tous ses membres
+ * actifs voient alors les mêmes commandes/produits/dépenses, au lieu
+ * d'être limités à leur seule boutique (owner_id). Sans entreprise
+ * (company_id = null, cas historique), comportement inchangé : la seule
+ * boutique du user via owner_id.
+ *
+ * Avalé en try/catch comme warehouse_managers ci-dessus : company_id
+ * peut ne pas encore exister sur un environnement pas à jour, ça ne doit
+ * jamais casser le login pour tout le monde.
+ */
+async function resolveCompanyScope(pool, userId) {
+  try {
+    const [[membership]] = await pool.query(
+      "SELECT company_id FROM company_members WHERE user_id=? AND status='ACTIVE' LIMIT 1",
+      [userId],
+    );
+    const companyId = membership?.company_id != null ? Number(membership.company_id) : null;
+
+    const [rows] = companyId
+      ? await pool.query("SELECT id FROM shops WHERE company_id=?", [companyId])
+      : await pool.query("SELECT id FROM shops WHERE owner_id=?", [userId]);
+
+    return {
+      company_id: companyId,
+      vendor_shop_ids: rows.map((r) => Number(r.id)),
+    };
+  } catch {
+    return { company_id: null, vendor_shop_ids: [] };
+  }
+}
+
+/**
  * ✅ Impersonation support (robuste)
  * - payload peut contenir: actor_admin_id, impersonate_shop_id, impersonate_user_id
  * - DB = source de vérité pour role du "vrai" token owner (admin/user)
@@ -190,6 +223,7 @@ async function attachUserOrThrow(req) {
   }
 
   const profileFlags = await getProfileFlags(pool, effective_user_id);
+  const companyScope = await resolveCompanyScope(pool, effective_user_id);
 
   req.user = {
     // ✅ identité réelle (token owner)
@@ -208,6 +242,12 @@ async function attachUserOrThrow(req) {
     effective_user_id: Number(effective_user_id),
     effective_role: String(effective_role || role),
     effective_shop_id: effective_shop_id != null ? Number(effective_shop_id) : null,
+
+    // ✅ isolation par entreprise (voir resolveCompanyScope ci-dessus) -
+    // vendor_shop_ids remplace un simple "owner_id = req.user.id" partout
+    // où un vendeur/fournisseur ne doit voir que ses propres données.
+    company_id: companyScope.company_id,
+    vendor_shop_ids: companyScope.vendor_shop_ids,
 
     // ✅ accès double rôle (voir getProfileFlags)
     ...profileFlags,
@@ -315,6 +355,7 @@ module.exports = {
   requireRole,
   requireCapability,
   getProfileFlags,
+  resolveCompanyScope,
   isAdmin,
   isVendor,
   isSupplier,

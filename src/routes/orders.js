@@ -948,29 +948,32 @@ function buildAdminDiscountForRow(row, discountCols, itemsSubtotalFallback) {
 }
 
 /* =========================
- * ✅ vérifier si une commande ne contient QUE les produits d'un vendeur
+ * ✅ vérifier si une commande ne contient QUE des produits de boutiques du
+ * périmètre du vendeur connecté (sa propre boutique, ou — s'il appartient
+ * à une entreprise — toute boutique de cette entreprise ; voir
+ * vendor_shop_ids / resolveCompanyScope dans middlewares/auth).
  * =======================*/
-async function vendorOwnsWholeOrder(conn, orderId, vendorId) {
+async function vendorOwnsWholeOrder(conn, orderId, vendorShopIds) {
+  const ids = Array.isArray(vendorShopIds) ? vendorShopIds : [];
+  if (!ids.length) return false;
+
   const [[r]] = await conn.query(
     `
       SELECT
-        SUM(CASE WHEN s.owner_id = ? THEN 1 ELSE 0 END) AS mine_count,
-        COUNT(*) AS total_count,
-        COUNT(DISTINCT s.owner_id) AS vendors_count
+        SUM(CASE WHEN p.shop_id IN (?) THEN 1 ELSE 0 END) AS mine_count,
+        COUNT(*) AS total_count
       FROM order_items oi
       JOIN products p ON p.id = oi.product_id
-      JOIN shops s ON s.id = p.shop_id
       WHERE oi.order_id = ?
     `,
-    [vendorId, orderId],
+    [ids, orderId],
   );
 
   const mine = Number(r?.mine_count || 0);
   const total = Number(r?.total_count || 0);
-  const vendorsCount = Number(r?.vendors_count || 0);
 
   if (!total) return false;
-  return mine === total && vendorsCount === 1;
+  return mine === total;
 }
 
 async function getOrderWithPerm(conn, id, user) {
@@ -1021,16 +1024,18 @@ async function getOrderWithPerm(conn, id, user) {
 
   if (!isAdmin(user)) {
     if (isVendor(user)) {
+      const vendorShopIds = user.vendor_shop_ids || [];
+      if (!vendorShopIds.length) return { status: 403, error: "Forbidden" };
+
       const [[own]] = await conn.query(
         `
           SELECT 1
           FROM order_items oi
           JOIN products p ON p.id = oi.product_id
-          JOIN shops s ON s.id = p.shop_id
-          WHERE oi.order_id = ? AND s.owner_id = ?
+          WHERE oi.order_id = ? AND p.shop_id IN (?)
           LIMIT 1
         `,
-        [id, user.id],
+        [id, vendorShopIds],
       );
 
       if (!own) return { status: 403, error: "Forbidden" };
@@ -1094,11 +1099,12 @@ async function getOrderWithPerm(conn, id, user) {
   const params = [];
 
   if (isVendor(user) && !isAdmin(user)) {
-    itemsSql += `
-      LEFT JOIN shops s ON s.id = p.shop_id
-      WHERE oi.order_id = ? AND s.owner_id = ?
-    `;
-    params.push(id, user.id);
+    const vendorShopIds = user.vendor_shop_ids || [];
+    itemsSql += vendorShopIds.length
+      ? ` WHERE oi.order_id = ? AND p.shop_id IN (?) `
+      : ` WHERE oi.order_id = ? AND 1=0 `;
+    params.push(id);
+    if (vendorShopIds.length) params.push(vendorShopIds);
   } else {
     itemsSql += ` WHERE oi.order_id = ? `;
     params.push(id);
@@ -2107,8 +2113,12 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     if (isVendor(req.user)) {
-      let where = "s.owner_id = ?";
-      const params = [req.user.id];
+      // ✅ Isolation par entreprise : vendor_shop_ids couvre la propre
+      // boutique du vendeur ET, s'il appartient à une entreprise, toutes
+      // les boutiques de cette entreprise (voir resolveCompanyScope).
+      const vendorShopIds = req.user.vendor_shop_ids || [];
+      let where = vendorShopIds.length ? "p.shop_id IN (?)" : "1=0";
+      const params = vendorShopIds.length ? [vendorShopIds] : [];
 
       const st = buildStatusWhere(statuses);
       where += st.sql;
@@ -2130,11 +2140,12 @@ router.get("/", authRequired, async (req, res) => {
           FROM orders o
           JOIN order_items oi ON oi.order_id = o.id
           JOIN products p ON p.id = oi.product_id
-          JOIN shops s ON s.id = p.shop_id
           WHERE ${where}
         `,
         params,
       );
+
+      const mineParams = vendorShopIds.length ? [vendorShopIds, vendorShopIds] : [[0], [0]];
 
       const [rowsRaw] = await pool.query(
         `
@@ -2145,32 +2156,29 @@ router.get("/", authRequired, async (req, res) => {
               SELECT SUM(oi_mine.qty * oi_mine.unit_price)
               FROM order_items oi_mine
               JOIN products p_mine ON p_mine.id = oi_mine.product_id
-              JOIN shops s_mine ON s_mine.id = p_mine.shop_id
               WHERE oi_mine.order_id = o.id
-                AND s_mine.owner_id = ?
+                AND p_mine.shop_id IN (?)
             ) AS items_amount,
             (
               SELECT pi.url
               FROM order_items oi2
               JOIN products p2 ON p2.id = oi2.product_id
-              JOIN shops s2 ON s2.id = p2.shop_id
               JOIN product_images pi ON pi.product_id = p2.id
               WHERE oi2.order_id = o.id
-                AND s2.owner_id = ?
+                AND p2.shop_id IN (?)
               ORDER BY oi2.id ASC, pi.sort_order ASC, pi.id ASC
               LIMIT 1
             ) AS first_product_cover
           FROM orders o
           JOIN order_items oi ON oi.order_id = o.id
           JOIN products p ON p.id = oi.product_id
-          JOIN shops s ON s.id = p.shop_id
           LEFT JOIN users u ON u.id = o.user_id
           WHERE ${where}
           GROUP BY o.id
           ORDER BY o.created_at DESC
           LIMIT ? OFFSET ?
         `,
-        [req.user.id, req.user.id, ...params, limit, offset],
+        [...mineParams, ...params, limit, offset],
       );
 
       const items = rowsRaw.map((r) =>
@@ -4254,16 +4262,16 @@ router.post("/guest", async (req, res) => {
  * ✅ CA summary (aligné sur GET /expenses/summary : mêmes bornes de
  * période SQL — CURDATE()/YEARWEEK(...,1) — pour permettre un calcul de
  * solde net cohérent côté frontend. req.user n'a pas de `shop_id` réel
- * (voir expenses.js) : on résout la boutique du vendeur via owner_id.
+ * (voir expenses.js) : on résout le périmètre du vendeur via
+ * vendor_shop_ids (propre boutique, ou — s'il appartient à une
+ * entreprise — toutes les boutiques de cette entreprise).
  * =======================*/
-async function resolveOwnShopIdForOrders(pool, userId) {
-  const uid = Number(userId) || null;
-  if (!uid) return null;
-  const [[row]] = await pool.query(
-    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
-    [uid],
-  );
-  return row?.id ? Number(row.id) : null;
+function currentOrdersShopIds(req) {
+  if (isAdmin(req.user)) {
+    const explicit = Number(req.query.shop_id) || null;
+    return explicit ? [explicit] : null; // null = admin non filtré
+  }
+  return req.user?.vendor_shop_ids || [];
 }
 
 router.get("/summary", authRequired, async (req, res) => {
@@ -4279,28 +4287,27 @@ router.get("/summary", authRequired, async (req, res) => {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
-    const shopId = isAdmin(req.user)
-      ? Number(req.query.shop_id) || null
-      : await resolveOwnShopIdForOrders(pool, req.user?.id);
+    const shopIds = currentOrdersShopIds(req);
 
-    const joinItems = shopId
-      ? `
+    const joinItems =
+      shopIds == null
+        ? `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `
+        : `
         JOIN (
           SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
           FROM order_items oi
           JOIN products p ON p.id = oi.product_id
-          WHERE p.shop_id = ?
-          GROUP BY oi.order_id
-        ) oi_amt ON oi_amt.order_id = o.id
-      `
-      : `
-        JOIN (
-          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
-          FROM order_items oi
+          WHERE ${shopIds.length ? "p.shop_id IN (?)" : "1=0"}
           GROUP BY oi.order_id
         ) oi_amt ON oi_amt.order_id = o.id
       `;
-    const params = shopId ? [shopId] : [];
+    const params = shopIds && shopIds.length ? [shopIds] : [];
 
     const [[row]] = await pool.query(
       `
@@ -4353,30 +4360,29 @@ router.get("/top-customers", authRequired, async (req, res) => {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
-    const shopId = isAdmin(req.user)
-      ? Number(req.query.shop_id) || null
-      : await resolveOwnShopIdForOrders(pool, req.user?.id);
+    const shopIds = currentOrdersShopIds(req);
 
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
 
-    const joinItems = shopId
-      ? `
+    const joinItems =
+      shopIds == null
+        ? `
+        JOIN (
+          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
+          FROM order_items oi
+          GROUP BY oi.order_id
+        ) oi_amt ON oi_amt.order_id = o.id
+      `
+        : `
         JOIN (
           SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
           FROM order_items oi
           JOIN products p ON p.id = oi.product_id
-          WHERE p.shop_id = ?
-          GROUP BY oi.order_id
-        ) oi_amt ON oi_amt.order_id = o.id
-      `
-      : `
-        JOIN (
-          SELECT oi.order_id, SUM(oi.qty * oi.unit_price) AS amount
-          FROM order_items oi
+          WHERE ${shopIds.length ? "p.shop_id IN (?)" : "1=0"}
           GROUP BY oi.order_id
         ) oi_amt ON oi_amt.order_id = o.id
       `;
-    const params = shopId ? [shopId] : [];
+    const params = shopIds && shopIds.length ? [shopIds] : [];
 
     const [rows] = await pool.query(
       `
@@ -5353,7 +5359,7 @@ router.put("/:id/status", authRequired, async (req, res) => {
 
       const conn = await pool.getConnection();
       try {
-        const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
+        const ok = await vendorOwnsWholeOrder(conn, id, req.user.vendor_shop_ids);
         if (!ok) {
           return res
             .status(403)
@@ -5418,7 +5424,7 @@ router.post("/:id/cancel", authRequired, async (req, res) => {
     }
 
     if (!isAdmin(req.user) && isVendor(req.user)) {
-      const ok = await vendorOwnsWholeOrder(conn, id, req.user.id);
+      const ok = await vendorOwnsWholeOrder(conn, id, req.user.vendor_shop_ids);
 
       if (!ok) {
         await conn.rollback();

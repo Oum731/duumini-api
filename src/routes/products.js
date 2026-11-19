@@ -796,10 +796,9 @@ async function assertCanMutateProduct(conn, reqUser, productId) {
   );
   if (!prod) return { ok: false, status: 404, error: "Not found" };
 
-  const actingId = Number(reqUser?.effective_user_id || reqUser?.id || 0);
-
   if (isVendor(reqUser) || isRestaurant(reqUser)) {
-    if (String(prod.owner_id) !== String(actingId)) {
+    const vendorShopIds = reqUser?.vendor_shop_ids || [];
+    if (!vendorShopIds.includes(Number(prod.shop_id))) {
       return { ok: false, status: 403, error: "Forbidden" };
     }
   }
@@ -953,7 +952,7 @@ async function listProducts(pool, opts) {
     vertical,
     includeVariants,
     onlyWithVariants,
-    ownerId,
+    vendorShopIds,
     onlyDrinks,
     excludeDrinks,
     catalogueMode,
@@ -1009,10 +1008,15 @@ async function listProducts(pool, opts) {
     params.push(brandFilter);
   }
 
-  const oid = Number(ownerId) || 0;
-  if (oid) {
-    whereParts.push("s.owner_id = ?");
-    params.push(oid);
+  // ✅ Isolation par entreprise : vendorShopIds couvre la boutique du
+  // vendeur ET, s'il appartient à une entreprise, toutes les boutiques de
+  // cette entreprise (voir resolveCompanyScope dans middlewares/auth).
+  // null/undefined = pas de restriction (catalogue public) ; un tableau
+  // (même vide, vendeur sans boutique) doit filtrer, sinon un vendeur sans
+  // boutique verrait tout le catalogue au lieu de rien.
+  if (Array.isArray(vendorShopIds)) {
+    whereParts.push(vendorShopIds.length ? "p.shop_id IN (?)" : "1=0");
+    if (vendorShopIds.length) params.push(vendorShopIds);
   }
 
   const qq = String(q || "").trim().toLowerCase();
@@ -1156,7 +1160,7 @@ async function listHandler(req, res, next) {
       vertical,
       includeVariants: include,
       onlyWithVariants,
-      ownerId: null,
+      vendorShopIds: null,
       onlyDrinks,
       excludeDrinks,
       catalogueMode: "PUBLIC_CLIENT",
@@ -1201,7 +1205,7 @@ async function listFoodHandler(req, res, next) {
       vertical: null,
       includeVariants: false,
       onlyWithVariants: 0,
-      ownerId: null,
+      vendorShopIds: null,
       catalogueMode: "PUBLIC_CLIENT",
     });
 
@@ -1244,7 +1248,7 @@ async function listMarketHandler(req, res, next) {
       vertical: null,
       includeVariants: false,
       onlyWithVariants: 0,
-      ownerId: null,
+      vendorShopIds: null,
       catalogueMode: "PUBLIC_CLIENT",
     });
 
@@ -1293,7 +1297,7 @@ async function listShopDrinksHandler(req, res, next) {
       vertical: "FOOD",
       includeVariants: false,
       onlyWithVariants: 0,
-      ownerId: null,
+      vendorShopIds: null,
       catalogueMode: "PUBLIC_CLIENT",
     });
 
@@ -1350,7 +1354,7 @@ async function listSuppliersCatalogueHandler(req, res, next) {
       vertical,
       includeVariants: include,
       onlyWithVariants,
-      ownerId: null,
+      vendorShopIds: null,
       onlyDrinks,
       excludeDrinks,
       catalogueMode: "SUPPLIER_ONLY",
@@ -1396,8 +1400,9 @@ async function listManageHandler(req, res, next) {
     const v = normalizeVertical(vertical, null);
     const include = includeVariants === 1 ? true : v === "FASHION" ? true : false;
 
-    const actorId = actingUserId(req);
-    const ownerId = isActingVendorOrRestaurant(req) ? actorId : null;
+    const vendorShopIds = isActingVendorOrRestaurant(req)
+      ? req.user?.vendor_shop_ids || []
+      : null;
     const safeShopId = isActingVendorOrRestaurant(req) ? null : shopId;
 
     const { rows, total } = await listProducts(pool, {
@@ -1413,7 +1418,7 @@ async function listManageHandler(req, res, next) {
       vertical,
       includeVariants: include,
       onlyWithVariants,
-      ownerId,
+      vendorShopIds,
       onlyDrinks,
       excludeDrinks,
       catalogueMode: null,
@@ -1493,16 +1498,17 @@ async function getManageByIdHandler(req, res, next) {
   const conn = await pool.getConnection();
   try {
     const [[ownerRow]] = await conn.query(
-      `SELECT s.owner_id
+      `SELECT p.shop_id
          FROM products p
-         LEFT JOIN shops s ON s.id = p.shop_id
         WHERE p.id=? LIMIT 1`,
       [id]
     );
     if (!ownerRow) return res.status(404).json({ error: "Not found" });
 
-    const actorId = actingUserId(req);
-    if (isActingVendorOrRestaurant(req) && String(ownerRow.owner_id) !== String(actorId)) {
+    if (
+      isActingVendorOrRestaurant(req) &&
+      !(req.user?.vendor_shop_ids || []).includes(Number(ownerRow.shop_id))
+    ) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -1531,16 +1537,17 @@ async function getManageBySlugHandler(req, res, next) {
   const conn = await pool.getConnection();
   try {
     const [[row]] = await conn.query(
-      `SELECT s.owner_id
+      `SELECT p.shop_id
          FROM products p
-         LEFT JOIN shops s ON s.id = p.shop_id
         WHERE LOWER(TRIM(p.slug))=? LIMIT 1`,
       [slug]
     );
     if (!row) return res.status(404).json({ error: "Not found" });
 
-    const actorId = actingUserId(req);
-    if (isActingVendorOrRestaurant(req) && String(row.owner_id) !== String(actorId)) {
+    if (
+      isActingVendorOrRestaurant(req) &&
+      !(req.user?.vendor_shop_ids || []).includes(Number(row.shop_id))
+    ) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -1668,7 +1675,7 @@ async function promotionsHandler(req, res, next) {
           ? true
           : normalizeVertical(vertical, null) === "FASHION",
       onlyWithVariants: 0,
-      ownerId: null,
+      vendorShopIds: null,
       catalogueMode: "PUBLIC_CLIENT",
     });
 
@@ -1901,8 +1908,10 @@ router.put(
       );
       if (!v) return res.status(404).json({ error: "Not found" });
 
-      const actorId = actingUserId(req);
-      if (isActingVendorOrRestaurant(req) && String(v.owner_id) !== String(actorId)) {
+      if (
+        isActingVendorOrRestaurant(req) &&
+        !(req.user?.vendor_shop_ids || []).includes(Number(v.shop_id))
+      ) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1983,17 +1992,18 @@ router.delete(
     const conn = await pool.getConnection();
     try {
       const [[v]] = await conn.query(
-        `SELECT pv.id, pv.product_id, s.owner_id
+        `SELECT pv.id, pv.product_id, p.shop_id
            FROM product_variants pv
            JOIN products p ON p.id = pv.product_id
-           LEFT JOIN shops s ON s.id = p.shop_id
           WHERE pv.id=? LIMIT 1`,
         [variantId]
       );
       if (!v) return res.status(404).json({ error: "Not found" });
 
-      const actorId = actingUserId(req);
-      if (isActingVendorOrRestaurant(req) && String(v.owner_id) !== String(actorId)) {
+      if (
+        isActingVendorOrRestaurant(req) &&
+        !(req.user?.vendor_shop_ids || []).includes(Number(v.shop_id))
+      ) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2133,13 +2143,16 @@ router.post(
 
       let finalShopId = null;
       let finalCountryCode = "MA";
-      const actorId = actingUserId(req);
       const forcedShopId = actingShopId(req);
+      // ✅ Isolation par entreprise : couvre la boutique du vendeur ET,
+      // s'il appartient à une entreprise, toutes les boutiques de cette
+      // entreprise (voir resolveCompanyScope).
+      const vendorShopIds = req.user?.vendor_shop_ids || [];
 
       if (isActingVendorOrRestaurant(req)) {
         if (forcedShopId) {
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, country_code FROM shops WHERE id=? LIMIT 1`,
             [forcedShopId]
           );
           if (!shop) {
@@ -2147,7 +2160,7 @@ router.post(
               .status(400)
               .json({ error: "Boutique invalide (impersonate_shop_id)" });
           }
-          if (String(shop.owner_id) !== String(actorId)) {
+          if (!vendorShopIds.includes(Number(shop.id))) {
             return res.status(403).json({ error: "Forbidden" });
           }
           finalShopId = Number(shop.id);
@@ -2160,13 +2173,13 @@ router.post(
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, country_code FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
           if (!shop) {
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
-          if (String(shop.owner_id) !== String(actorId)) {
+          if (!vendorShopIds.includes(Number(shop.id))) {
             return res
               .status(403)
               .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
@@ -2174,10 +2187,12 @@ router.post(
           finalShopId = Number(shop.id);
           finalCountryCode = shop.country_code || "MA";
         } else {
-          const [[shop]] = await conn.query(
-            `SELECT id, country_code FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
-            [actorId]
-          );
+          const [[shop]] = vendorShopIds.length
+            ? await conn.query(
+                `SELECT id, country_code FROM shops WHERE id IN (?) ORDER BY id ASC LIMIT 1`,
+                [vendorShopIds]
+              )
+            : [[null]];
           if (!shop) {
             return res
               .status(400)
@@ -2462,8 +2477,8 @@ router.put(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      const actorId = actingUserId(req);
-      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
+      const vendorShopIds = req.user?.vendor_shop_ids || [];
+      if (isActingVendorOrRestaurant(req) && !vendorShopIds.includes(Number(prod.shop_id))) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2483,15 +2498,16 @@ router.put(
           newCountryCodeParam = shop.country_code || "MA";
         } else if (sid > 0 && isActingVendorOrRestaurant(req)) {
           // ✅ Le vendeur/restaurant peut changer la boutique d'un produit
-          // (multi-boutiques), à condition qu'elle lui appartienne.
+          // (multi-boutiques), à condition qu'elle lui appartienne (ou à
+          // son entreprise).
           const [[shop]] = await conn.query(
-            `SELECT id, owner_id, country_code FROM shops WHERE id=? LIMIT 1`,
+            `SELECT id, country_code FROM shops WHERE id=? LIMIT 1`,
             [sid]
           );
           if (!shop) {
             return res.status(400).json({ error: "Boutique invalide (shop_id)" });
           }
-          if (String(shop.owner_id) !== String(actorId)) {
+          if (!vendorShopIds.includes(Number(shop.id))) {
             return res
               .status(403)
               .json({ error: "Forbidden: cette boutique ne vous appartient pas" });
@@ -2725,8 +2741,10 @@ router.put(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      const actorId = actingUserId(req);
-      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
+      if (
+        isActingVendorOrRestaurant(req) &&
+        !(req.user?.vendor_shop_ids || []).includes(Number(prod.shop_id))
+      ) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2796,8 +2814,10 @@ router.delete(
       );
       if (!prod) return res.status(404).json({ error: "Not found" });
 
-      const actorId = actingUserId(req);
-      if (isActingVendorOrRestaurant(req) && String(prod.owner_id) !== String(actorId)) {
+      if (
+        isActingVendorOrRestaurant(req) &&
+        !(req.user?.vendor_shop_ids || []).includes(Number(prod.shop_id))
+      ) {
         return res.status(403).json({ error: "Forbidden" });
       }
 

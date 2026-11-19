@@ -192,13 +192,19 @@ router.get(
   async (req, res) => {
     const pool = getPool();
     try {
+      // ✅ Isolation par entreprise : si le user appartient à une
+      // entreprise, il voit toutes les boutiques de cette entreprise
+      // (vendor_shop_ids), pas seulement la sienne.
+      const shopIds = req.user.vendor_shop_ids;
+      if (!shopIds || !shopIds.length) return res.json([]);
+
       const [rows] = await pool.query(
         `SELECT s.*, sc.name AS category_name, sc.slug AS category_slug
          FROM shops s
          LEFT JOIN shop_categories sc ON sc.id = s.category_id
-         WHERE s.owner_id=?
+         WHERE s.id IN (?)
          ORDER BY s.created_at DESC`,
-        [req.user.id]
+        [shopIds]
       );
       res.json(rows);
     } catch (e) {
@@ -289,9 +295,10 @@ router.get(
 
       const shop = rowsShop[0];
 
-      // 🔐 Si VENDEUR → il doit être propriétaire de la boutique
+      // 🔐 Si VENDEUR → la boutique doit faire partie de son périmètre
+      // (sa propre boutique, ou une boutique de son entreprise)
       if (!isAdmin(req.user) && isVendor(req.user)) {
-        if (String(shop.owner_id) !== String(req.user.id)) {
+        if (!(req.user.vendor_shop_ids || []).includes(shop.id)) {
           return res.status(403).json({ error: "Forbidden" });
         }
       }
@@ -599,7 +606,7 @@ router.put(
 
       if (
         !isAdmin(req.user) &&
-        !(isVendor(req.user) && existing.owner_id === req.user.id)
+        !(isVendor(req.user) && (req.user.vendor_shop_ids || []).includes(Number(existing.id)))
       ) {
         return res.status(403).json({ error: "Forbidden" });
       }
@@ -751,7 +758,7 @@ router.delete(
 
       if (
         !isAdmin(req.user) &&
-        !(isVendor(req.user) && shop.owner_id === req.user.id)
+        !(isVendor(req.user) && (req.user.vendor_shop_ids || []).includes(id))
       ) {
         return res.status(403).json({ error: "Forbidden" });
       }

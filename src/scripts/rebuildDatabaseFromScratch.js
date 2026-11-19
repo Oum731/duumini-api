@@ -66,6 +66,7 @@ const SCRIPTS = [
 
   // --- Dépendent de users + shop_categories ---
   "createShopsTable.js",
+  "addShopCompanyId.js",
 
   // --- Dépendent de categories ---
   "createSubCategoriesTable.js",

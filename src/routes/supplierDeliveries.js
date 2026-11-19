@@ -34,12 +34,17 @@ async function deliveryItemsHasUnit(pool) {
   return _deliveryItemsHasUnitCache;
 }
 
-async function resolveOwnSupplierShopId(pool, userId) {
-  const [[row]] = await pool.query(
-    `SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1`,
-    [userId],
-  );
-  return row?.id ? Number(row.id) : null;
+// ✅ Isolation par entreprise : req.user.vendor_shop_ids (résolu par
+// resolveCompanyScope dans middlewares/auth) couvre la propre boutique
+// fournisseur ET, si elle appartient à une entreprise, toutes les boutiques
+// de cette entreprise — remplace l'ancienne résolution via owner_id.
+function supplierShopIds(req) {
+  return req.user?.vendor_shop_ids || [];
+}
+
+function supplierDefaultShopId(req) {
+  const ids = supplierShopIds(req);
+  return ids.length ? ids[0] : null;
 }
 
 async function isWarehouseManager(pool, warehouseId, userId) {
@@ -77,10 +82,10 @@ router.get("/", authRequired, async (req, res) => {
         params.push(warehouseId);
       }
     } else if (isSupplier(req.user)) {
-      const myShopId = await resolveOwnSupplierShopId(pool, req.user.id);
-      if (!myShopId) return res.status(403).json({ error: "No supplier shop linked to this user" });
-      where.push("sd.supplier_shop_id = ?");
-      params.push(myShopId);
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      where.push(`sd.supplier_shop_id IN (${myShopIds.map(() => "?").join(",")})`);
+      params.push(...myShopIds);
     } else {
       const [mine] = await pool.query(
         `SELECT warehouse_id FROM warehouse_managers WHERE user_id = ? AND is_active = 1`,
@@ -151,8 +156,8 @@ router.get("/:id", authRequired, async (req, res) => {
 
     if (!isAdmin(req.user)) {
       if (isSupplier(req.user)) {
-        const myShopId = await resolveOwnSupplierShopId(pool, req.user.id);
-        if (!myShopId || Number(myShopId) !== Number(delivery.supplier_shop_id)) {
+        const myShopIds = supplierShopIds(req);
+        if (!myShopIds.includes(Number(delivery.supplier_shop_id))) {
           return res.status(403).json({ error: "Forbidden" });
         }
       } else {
@@ -208,8 +213,15 @@ router.post("/", authRequired, async (req, res) => {
 
   try {
     if (isSupplier(req.user) && !isAdmin(req.user)) {
-      supplierShopId = await resolveOwnSupplierShopId(pool, req.user.id);
-      if (!supplierShopId) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      if (supplierShopId) {
+        if (!myShopIds.includes(supplierShopId)) {
+          return res.status(403).json({ error: "Forbidden: not your supplier shop" });
+        }
+      } else {
+        supplierShopId = supplierDefaultShopId(req);
+      }
     } else if (!isAdmin(req.user)) {
       const ok = await isWarehouseManager(pool, warehouseId, req.user.id);
       if (!ok) return res.status(403).json({ error: "Forbidden: not a manager of this warehouse" });

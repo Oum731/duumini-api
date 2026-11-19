@@ -16,6 +16,19 @@ function trimOrNull(v) {
   return s ? s : null;
 }
 
+// ✅ Isolation par entreprise : req.user.vendor_shop_ids (résolu par
+// resolveCompanyScope dans middlewares/auth) couvre la propre boutique
+// fournisseur ET, si elle appartient à une entreprise, toutes les boutiques
+// de cette entreprise — remplace l'ancienne résolution via owner_id.
+function supplierShopIds(req) {
+  return req.user?.vendor_shop_ids || [];
+}
+
+function supplierDefaultShopId(req) {
+  const ids = supplierShopIds(req);
+  return ids.length ? ids[0] : null;
+}
+
 /**
  * GET /api/supplier-products
  * Visible: VENDEUR, ADMIN, FOURNISSEUR
@@ -40,21 +53,26 @@ router.get("/", authRequired, requireRole("VENDEUR", "ADMIN", "FOURNISSEUR"), as
   let supplier_shop_id = req.query.supplier_shop_id != null ? Number(req.query.supplier_shop_id) : null;
 
   try {
-    // Si FOURNISSEUR: on force supplier_shop_id = shop du user (owner_id)
-    if (!isAdmin(req.user) && String(req.user.role || "").toUpperCase() === "FOURNISSEUR") {
-      const [shops] = await pool.query(
-        `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
-        [req.user.id]
-      );
-      const myShop = shops && shops[0];
-      if (!myShop) return res.status(403).json({ error: "No supplier shop linked to this user" });
-      supplier_shop_id = Number(myShop.id);
-    }
-
     const where = ["1=1"];
     const params = [];
 
-    if (supplier_shop_id != null) {
+    // Si FOURNISSEUR: restreint toujours aux boutiques de son périmètre
+    // (vendor_shop_ids), qu'un supplier_shop_id précis ait été demandé ou non.
+    if (!isAdmin(req.user) && String(req.user.role || "").toUpperCase() === "FOURNISSEUR") {
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+
+      if (supplier_shop_id != null) {
+        if (!myShopIds.includes(Number(supplier_shop_id))) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+        where.push("sp.supplier_shop_id=?");
+        params.push(Number(supplier_shop_id));
+      } else {
+        where.push(`sp.supplier_shop_id IN (${myShopIds.map(() => "?").join(",")})`);
+        params.push(...myShopIds);
+      }
+    } else if (supplier_shop_id != null) {
       if (!Number.isFinite(supplier_shop_id) || supplier_shop_id <= 0) return res.status(400).json({ error: "supplier_shop_id invalid" });
       where.push("sp.supplier_shop_id=?");
       params.push(supplier_shop_id);
@@ -111,14 +129,15 @@ router.post("/", authRequired, requireRole("ADMIN", "FOURNISSEUR"), async (req, 
     let supplier_shop_id = req.body?.supplier_shop_id != null ? Number(req.body.supplier_shop_id) : null;
 
     if (!isAdmin(req.user)) {
-      // fournisseur: on déduit son shop via owner_id
-      const [shops] = await pool.query(
-        `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
-        [req.user.id]
-      );
-      const myShop = shops && shops[0];
-      if (!myShop) return res.status(403).json({ error: "No supplier shop linked to this user" });
-      supplier_shop_id = Number(myShop.id);
+      // fournisseur: on déduit son shop via vendor_shop_ids (propre boutique
+      // ou, si membre d'une entreprise, celles de l'entreprise)
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      if (supplier_shop_id != null) {
+        if (!myShopIds.includes(supplier_shop_id)) return res.status(403).json({ error: "Forbidden" });
+      } else {
+        supplier_shop_id = supplierDefaultShopId(req);
+      }
     } else {
       if (!Number.isFinite(supplier_shop_id) || supplier_shop_id <= 0) {
         return res.status(400).json({ error: "supplier_shop_id required (admin)" });
@@ -163,13 +182,9 @@ router.put("/:id", authRequired, requireRole("ADMIN", "FOURNISSEUR"), async (req
     if (!existing) return res.status(404).json({ error: "Not found" });
 
     if (!isAdmin(req.user)) {
-      const [shops] = await pool.query(
-        `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
-        [req.user.id]
-      );
-      const myShop = shops && shops[0];
-      if (!myShop) return res.status(403).json({ error: "No supplier shop linked to this user" });
-      if (Number(existing.supplier_shop_id) !== Number(myShop.id)) return res.status(403).json({ error: "Forbidden" });
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      if (!myShopIds.includes(Number(existing.supplier_shop_id))) return res.status(403).json({ error: "Forbidden" });
     }
 
     const patch = {};
@@ -221,13 +236,9 @@ router.delete("/:id", authRequired, requireRole("ADMIN", "FOURNISSEUR"), async (
     if (!existing) return res.status(404).json({ error: "Not found" });
 
     if (!isAdmin(req.user)) {
-      const [shops] = await pool.query(
-        `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
-        [req.user.id]
-      );
-      const myShop = shops && shops[0];
-      if (!myShop) return res.status(403).json({ error: "No supplier shop linked to this user" });
-      if (Number(existing.supplier_shop_id) !== Number(myShop.id)) return res.status(403).json({ error: "Forbidden" });
+      const myShopIds = supplierShopIds(req);
+      if (!myShopIds.length) return res.status(403).json({ error: "No supplier shop linked to this user" });
+      if (!myShopIds.includes(Number(existing.supplier_shop_id))) return res.status(403).json({ error: "Forbidden" });
     }
 
     await pool.query("DELETE FROM supplier_products WHERE id=?", [id]);

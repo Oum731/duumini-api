@@ -31,23 +31,26 @@ function canManage(req) {
   );
 }
 
-// ✅ req.user n'a jamais de `shop_id` réel (voir expenses.js) : on résout
-// la boutique du vendeur/fournisseur/restaurant connecté via owner_id.
-async function resolveOwnShopId(pool, userId) {
-  const uid = toNum(userId, 0) || null;
-  if (!uid) return null;
-  const [[row]] = await pool.query(
-    "SELECT id FROM shops WHERE owner_id = ? ORDER BY id ASC LIMIT 1",
-    [uid]
-  );
-  return row?.id ? Number(row.id) : null;
+// ✅ req.user n'a jamais de `shop_id` réel : on résout la/les boutique(s)
+// du vendeur/fournisseur/restaurant connecté via vendor_shop_ids (déjà
+// calculé par resolveCompanyScope dans middlewares/auth - couvre sa
+// propre boutique ET, s'il appartient à une entreprise, toutes les
+// boutiques de cette entreprise).
+function currentShopIds(req) {
+  if (isAdmin(req.user)) {
+    const explicit = toNum(req.query.shop_id || req.body?.shop_id, 0);
+    return explicit ? [explicit] : null; // null = admin non filtré (sauf shop_id explicite)
+  }
+  return req.user?.vendor_shop_ids || [];
 }
 
-async function currentShopId(req, pool) {
-  if (isAdmin(req.user)) {
-    return toNum(req.query.shop_id || req.body?.shop_id, 0) || null;
-  }
-  return resolveOwnShopId(pool, req.user?.id);
+// Pour créer une ressource rattachée à UNE boutique (shop_id singulier) :
+// la boutique explicitement choisie, sinon la première du périmètre.
+function currentDefaultShopId(req) {
+  const explicit = toNum(req.query.shop_id || req.body?.shop_id, 0);
+  if (explicit) return explicit;
+  const ids = req.user?.vendor_shop_ids || [];
+  return ids.length ? ids[0] : null;
 }
 
 router.get("/", authRequired, async (req, res) => {
@@ -57,14 +60,16 @@ router.get("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = await currentShopId(req, pool);
+    const shopIds = currentShopIds(req);
 
     const params = [];
     let where = "WHERE is_active = 1";
 
-    if (shopId) {
-      where += " AND (shop_id IS NULL OR shop_id = ?)";
-      params.push(shopId);
+    if (shopIds) {
+      where += shopIds.length
+        ? " AND (shop_id IS NULL OR shop_id IN (?))"
+        : " AND shop_id IS NULL";
+      if (shopIds.length) params.push(shopIds);
     }
 
     const [rows] = await pool.query(
@@ -101,7 +106,7 @@ router.post("/", authRequired, async (req, res) => {
     }
 
     const pool = getPool();
-    const shopId = await currentShopId(req, pool);
+    const shopId = currentDefaultShopId(req);
     const name = cleanStr(req.body?.name, 100);
     const color = cleanStr(req.body?.color, 20);
 

@@ -2,7 +2,7 @@ const { Router } = require("express");
 const { getPool } = require("../lib/db");
 const bcrypt = require("bcryptjs");
 const { signAccess, signRefresh, verifyRefresh } = require("../utils/jwt");
-const { authRequired, requireRole, getProfileFlags } = require("../middlewares/auth");
+const { authRequired, requireRole, getProfileFlags, resolveCompanyScope } = require("../middlewares/auth");
 const { normPhone } = require("../utils/phone");
 
 const router = Router();
@@ -297,10 +297,19 @@ router.post("/impersonate", authRequired, requireRole("ADMIN"), async (req, res)
         `SELECT id FROM shops WHERE owner_id=? ORDER BY id ASC LIMIT 1`,
         [vendor_user_id]
       );
-      if (!shops.length) {
-        return res.status(404).json({ error: "Vendor shop not found for this user" });
+      if (shops.length) {
+        vendor_shop_id = Number(shops[0].id);
+      } else {
+        // ✅ Pas de boutique en propre (owner_id) : ce user peut être
+        // simple membre d'une entreprise (company_members) sans être
+        // owner — on retombe sur son périmètre entreprise pour choisir
+        // une boutique à impersonner.
+        const scope = await resolveCompanyScope(pool, vendor_user_id);
+        if (!scope.vendor_shop_ids.length) {
+          return res.status(404).json({ error: "Vendor shop not found for this user" });
+        }
+        vendor_shop_id = scope.vendor_shop_ids[0];
       }
-      vendor_shop_id = Number(shops[0].id);
     }
 
     if (!vendor_shop_id) {

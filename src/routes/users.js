@@ -38,23 +38,30 @@ function normalizeRole(role) {
   return ROLES.includes(r) ? r : "MEMBER";
 }
 
-async function getMyShops(pool, userId) {
+// ✅ Isolation par entreprise : liste les boutiques du périmètre du user
+// (shopIds = req.user.vendor_shop_ids, résolu par resolveCompanyScope dans
+// middlewares/auth — propre boutique, ou toutes celles de l'entreprise s'il
+// en est membre) au lieu de se limiter aux boutiques dont il est owner_id.
+async function getMyShops(pool, shopIds) {
+  const ids = Array.isArray(shopIds) ? shopIds : [];
+  if (!ids.length) return [];
+
   try {
     const [rows] = await pool.query(
       `SELECT id, name, slug, city, owner_id, shop_type
        FROM shops
-       WHERE owner_id=?
+       WHERE id IN (?)
        ORDER BY id ASC`,
-      [userId]
+      [ids]
     );
     return rows || [];
   } catch {
     const [rows] = await pool.query(
       `SELECT id, name, slug, city, owner_id
        FROM shops
-       WHERE owner_id=?
+       WHERE id IN (?)
        ORDER BY id ASC`,
-      [userId]
+      [ids]
     );
     return (rows || []).map((s) => ({ ...s, shop_type: null }));
   }
@@ -82,7 +89,7 @@ router.get("/me", authRequired, async (req, res) => {
     const me = rows[0] || null;
     if (!me) return res.json(null);
 
-    const shops = await getMyShops(pool, effectiveUserId);
+    const shops = await getMyShops(pool, req.user?.vendor_shop_ids);
 
     const [affRows] = await pool.query(
       `
@@ -119,6 +126,8 @@ router.get("/me", authRequired, async (req, res) => {
       // ✅ Accès double rôle — voir getProfileFlags
       has_commercial_profile: !!req.user.has_commercial_profile,
       has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
+      company_id: req.user.company_id ?? null,
+      vendor_shop_ids: req.user.vendor_shop_ids ?? [],
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,
@@ -220,7 +229,7 @@ router.put("/me", authRequired, async (req, res) => {
     );
 
     const me = rows[0] || null;
-    const shops = await getMyShops(pool, effectiveUserId);
+    const shops = await getMyShops(pool, req.user?.vendor_shop_ids);
 
     const [affRows] = await pool.query(
       `
@@ -257,6 +266,8 @@ router.put("/me", authRequired, async (req, res) => {
       // ✅ Accès double rôle — voir getProfileFlags
       has_commercial_profile: !!req.user.has_commercial_profile,
       has_warehouse_manager_profile: !!req.user.has_warehouse_manager_profile,
+      company_id: req.user.company_id ?? null,
+      vendor_shop_ids: req.user.vendor_shop_ids ?? [],
       impersonation: impersonate_shop_id
         ? { actor_admin_id, impersonate_shop_id, impersonate_user_id }
         : null,
