@@ -352,7 +352,7 @@ router.get(
             WHEN DATE(o.created_at) = CURDATE()
             THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
-                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  WHEN p.vertical = 'FOOD' THEN 0.18
                   ELSE 0.11
                 END
           END), 0) AS day_commission,
@@ -362,7 +362,7 @@ router.get(
               AND MONTH(o.created_at) = MONTH(CURDATE())
             THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
-                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  WHEN p.vertical = 'FOOD' THEN 0.18
                   ELSE 0.11
                 END
           END), 0) AS month_commission,
@@ -371,7 +371,7 @@ router.get(
             WHEN YEAR(o.created_at) = YEAR(CURDATE())
             THEN oi.qty * COALESCE(oi.unit_price, 0)
               * CASE
-                  WHEN LOWER(TRIM(COALESCE(p.sub_category, ''))) = 'food' THEN 0.18
+                  WHEN p.vertical = 'FOOD' THEN 0.18
                   ELSE 0.11
                 END
           END), 0) AS year_commission
