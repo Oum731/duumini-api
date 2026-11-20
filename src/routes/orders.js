@@ -91,6 +91,15 @@ function buildAddressObj(input = {}) {
         }
       : null;
 
+  // ✅ Pas de colonne dédiée pour le fournisseur de livraison d'une vente
+  // admin (Gratuite/Gazhala/Livreur) ni pour "qui paie le livreur" : on les
+  // range dans ce même blob JSON (comme gps ci-dessus), pour éviter une
+  // migration de schéma pour deux champs optionnels d'affichage/reporting.
+  const delivery_mode = input?.delivery_mode
+    ? String(input.delivery_mode).trim().toUpperCase()
+    : null;
+  const delivery_covered_by_duumini = !!input?.delivery_covered_by_duumini;
+
   return {
     city: ville,
     commune,
@@ -98,6 +107,8 @@ function buildAddressObj(input = {}) {
     address_line,
     landmark,
     gps,
+    delivery_mode,
+    delivery_covered_by_duumini,
   };
 }
 
@@ -1081,6 +1092,8 @@ async function getOrderWithPerm(conn, id, user) {
     SELECT
       oi.*,
       p.name AS product_name,
+      p.shop_id AS shop_id,
+      s.name AS shop_name,
       pv.size AS variant_size,
       pv.color AS variant_color,
       pv.sku AS variant_sku,
@@ -1093,6 +1106,7 @@ async function getOrderWithPerm(conn, id, user) {
       ) AS product_cover
     FROM order_items oi
     LEFT JOIN products p ON p.id = oi.product_id
+    LEFT JOIN shops s ON s.id = p.shop_id
     LEFT JOIN product_variants pv ON pv.id = oi.variant_id
   `;
 
@@ -1616,7 +1630,12 @@ function isBankTransferMethod(m) {
     v === "BANK_TRANSFER" ||
     v === "BANK" ||
     v === "TRANSFER" ||
-    v === "VIREMENT"
+    v === "VIREMENT" ||
+    // ✅ Virement à Duumini vs virement direct au vendeur (demande client,
+    // 2026-11-20) : deux choix distincts côté UI, mais toujours un virement
+    // pour le statut de paiement (PENDING tant que non confirmé).
+    v === "VIREMENT_DUUMINI" ||
+    v === "VIREMENT_VENDEUR"
   );
 }
 
@@ -2762,7 +2781,11 @@ router.post("/admin", authRequired, async (req, res) => {
 
     validateVendorContactOrThrow(contactObj);
 
-    const addressObj = buildAddressObj(address);
+    const addressObj = buildAddressObj({
+      ...address,
+      delivery_mode: delivery?.mode,
+      delivery_covered_by_duumini: delivery?.covered_by_duumini,
+    });
 
     if (isBlank(addressObj?.city)) {
       await conn.rollback();
