@@ -247,24 +247,35 @@ function computeDuuminiCommission(itemsAmount) {
 function isBlank(v) {
   return v === null || v === undefined || String(v).trim() === "";
 }
+// ✅ Un client "membre" peut aussi être un professionnel (demande client,
+// 2026-11-20) : Vendeur, Restaurant, ou Fournisseur agréé — les trois
+// exigent un nom commercial + ICE, comme VENDEUR seul auparavant.
+const PROFESSIONAL_CUSTOMER_ROLES = ["VENDEUR", "RESTAURANT", "FOURNISSEUR"];
+
+function isProfessionalCustomerRole(role) {
+  return PROFESSIONAL_CUSTOMER_ROLES.includes(
+    String(role || "").trim().toUpperCase(),
+  );
+}
+
 function normalizeCustomerRoleInput(value) {
   const r = String(value || "CLIENT")
     .trim()
     .toUpperCase();
-  return r === "VENDEUR" ? "VENDEUR" : "CLIENT";
+  return PROFESSIONAL_CUSTOMER_ROLES.includes(r) ? r : "CLIENT";
 }
 
 function validateVendorContactOrThrow(contactObj = {}) {
   const role = normalizeCustomerRoleInput(contactObj?.role);
 
-  if (role !== "VENDEUR") return;
+  if (!isProfessionalCustomerRole(role)) return;
 
   if (isBlank(contactObj?.commercial_name)) {
     const err = new Error("COMMERCIAL_NAME_REQUIRED");
     err.statusCode = 400;
     err.payload = {
       code: "COMMERCIAL_NAME_REQUIRED",
-      message: "Le nom commercial est obligatoire pour un client vendeur.",
+      message: "Le nom commercial est obligatoire pour un client professionnel (vendeur, restaurant, fournisseur).",
     };
     throw err;
   }
@@ -274,7 +285,7 @@ function validateVendorContactOrThrow(contactObj = {}) {
     err.statusCode = 400;
     err.payload = {
       code: "ICE_REQUIRED",
-      message: "L'ICE est obligatoire pour un client vendeur.",
+      message: "L'ICE est obligatoire pour un client professionnel (vendeur, restaurant, fournisseur).",
     };
     throw err;
   }
@@ -391,19 +402,19 @@ async function updateUserProfileFromAdminOrder(
     vals.push(phone);
   }
 
-  if (usersCols.role && role && ["CLIENT", "VENDEUR"].includes(role)) {
+  if (usersCols.role && role && ["CLIENT", ...PROFESSIONAL_CUSTOMER_ROLES].includes(role)) {
     sets.push("role = ?");
     vals.push(role);
   }
 
   if (usersCols.commercial_name) {
     sets.push("commercial_name = ?");
-    vals.push(role === "VENDEUR" ? commercialName : null);
+    vals.push(isProfessionalCustomerRole(role) ? commercialName : null);
   }
 
   if (usersCols.ice) {
     sets.push("ice = ?");
-    vals.push(role === "VENDEUR" ? ice : null);
+    vals.push(isProfessionalCustomerRole(role) ? ice : null);
   }
 
   if (usersCols.city && !isBlank(addressObj?.city)) {
@@ -674,13 +685,13 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
 
   if (usersCols.commercial_name) {
     insertCols.push("commercial_name");
-    insertVals.push(requestedRole === "VENDEUR" ? commercialName : null);
+    insertVals.push(isProfessionalCustomerRole(requestedRole) ? commercialName : null);
     insertQs.push("?");
   }
 
   if (usersCols.ice) {
     insertCols.push("ice");
-    insertVals.push(requestedRole === "VENDEUR" ? ice : null);
+    insertVals.push(isProfessionalCustomerRole(requestedRole) ? ice : null);
     insertQs.push("?");
   }
 
@@ -705,8 +716,8 @@ async function findOrCreateCustomerAccount(conn, contactObj, addressObj = {}) {
         district: addressObj?.district || null,
         address_line: addressObj?.address_line || null,
         landmark: addressObj?.landmark || null,
-        commercial_name: requestedRole === "VENDEUR" ? commercialName : null,
-        ice: requestedRole === "VENDEUR" ? ice : null,
+        commercial_name: isProfessionalCustomerRole(requestedRole) ? commercialName : null,
+        ice: isProfessionalCustomerRole(requestedRole) ? ice : null,
       },
       created: true,
       plainPassword,
@@ -4957,9 +4968,7 @@ router.get("/receipt/:token.pdf", async (req, res) => {
     );
 
     if (
-      normalizeCustomerRoleInput(
-        contact.role || o.customer_role || "CLIENT",
-      ) === "VENDEUR"
+      isProfessionalCustomerRole(contact.role || o.customer_role || "CLIENT")
     ) {
       doc.text(
         `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`,
@@ -5185,9 +5194,7 @@ router.get("/:id/receipt.pdf", authRequired, async (req, res) => {
     );
 
     if (
-      normalizeCustomerRoleInput(
-        contact.role || o.customer_role || "CLIENT",
-      ) === "VENDEUR"
+      isProfessionalCustomerRole(contact.role || o.customer_role || "CLIENT")
     ) {
       doc.text(
         `Nom commercial : ${contact.commercial_name || o.u_commercial_name || "—"}`,
