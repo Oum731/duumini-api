@@ -44,6 +44,9 @@ async function detectOrdersCols(conn) {
     commission_duumini: await tableHasColumn(conn, "orders", "commission_duumini"),
     total: await tableHasColumn(conn, "orders", "total"),
     status: await tableHasColumn(conn, "orders", "status"),
+    // ✅ CA = produit vendu après réduction admin, pas le sous-total brut
+    // des lignes (voir orders.js /summary, même correctif).
+    admin_discount_amount: await tableHasColumn(conn, "orders", "admin_discount_amount"),
   };
   return cols;
 }
@@ -63,8 +66,18 @@ function doneDateExpr(cols) {
  * sinon = somme order_items
  */
 function itemsAmountExpr(cols) {
-  if (cols.items_amount) return "COALESCE(o.items_amount, 0)";
-  return `COALESCE((SELECT SUM(oi.qty * oi.unit_price) FROM order_items oi WHERE oi.order_id = o.id), 0)`;
+  const discountSub = cols.admin_discount_amount
+    ? " - COALESCE(o.admin_discount_amount, 0)"
+    : "";
+  if (cols.items_amount) {
+    return discountSub
+      ? `GREATEST(0, COALESCE(o.items_amount, 0)${discountSub})`
+      : "COALESCE(o.items_amount, 0)";
+  }
+  const rawSum = `(SELECT SUM(oi.qty * oi.unit_price) FROM order_items oi WHERE oi.order_id = o.id)`;
+  return discountSub
+    ? `GREATEST(0, COALESCE(${rawSum}, 0)${discountSub})`
+    : `COALESCE(${rawSum}, 0)`;
 }
 
 /**

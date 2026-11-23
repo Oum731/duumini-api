@@ -4343,14 +4343,22 @@ router.get("/summary", authRequired, async (req, res) => {
       `;
     const params = shopIds && shopIds.length ? [shopIds] : [];
 
+    // ✅ CA = produit réellement vendu (après réduction admin), pas le
+    // sous-total brut des lignes — oi_amt.amount ne reflète jamais la
+    // réduction appliquée au niveau de la commande (admin_discount_amount).
+    const discountCols = await getOrdersDiscountColsCached(pool);
+    const netAmountExpr = discountCols?.admin_discount_amount
+      ? "GREATEST(0, oi_amt.amount - COALESCE(o.admin_discount_amount, 0))"
+      : "oi_amt.amount";
+
     const [[row]] = await pool.query(
       `
       SELECT
-        COALESCE(SUM(CASE WHEN DATE(o.updated_at) = CURDATE() THEN oi_amt.amount ELSE 0 END), 0) AS today,
-        COALESCE(SUM(CASE WHEN YEARWEEK(o.updated_at, 1) = YEARWEEK(CURDATE(), 1) THEN oi_amt.amount ELSE 0 END), 0) AS week,
-        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) AND MONTH(o.updated_at) = MONTH(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS month,
-        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) THEN oi_amt.amount ELSE 0 END), 0) AS year,
-        COALESCE(SUM(oi_amt.amount), 0) AS all_time,
+        COALESCE(SUM(CASE WHEN DATE(o.updated_at) = CURDATE() THEN ${netAmountExpr} ELSE 0 END), 0) AS today,
+        COALESCE(SUM(CASE WHEN YEARWEEK(o.updated_at, 1) = YEARWEEK(CURDATE(), 1) THEN ${netAmountExpr} ELSE 0 END), 0) AS week,
+        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) AND MONTH(o.updated_at) = MONTH(CURDATE()) THEN ${netAmountExpr} ELSE 0 END), 0) AS month,
+        COALESCE(SUM(CASE WHEN YEAR(o.updated_at) = YEAR(CURDATE()) THEN ${netAmountExpr} ELSE 0 END), 0) AS year,
+        COALESCE(SUM(${netAmountExpr}), 0) AS all_time,
         COUNT(*) AS orders_count
       FROM orders o
       ${joinItems}
@@ -4418,9 +4426,14 @@ router.get("/top-customers", authRequired, async (req, res) => {
       `;
     const params = shopIds && shopIds.length ? [shopIds] : [];
 
+    const discountCols = await getOrdersDiscountColsCached(pool);
+    const netAmountExpr = discountCols?.admin_discount_amount
+      ? "GREATEST(0, oi_amt.amount - COALESCE(o.admin_discount_amount, 0))"
+      : "oi_amt.amount";
+
     const [rows] = await pool.query(
       `
-      SELECT o.id, o.user_id, o.contact, o.updated_at, oi_amt.amount
+      SELECT o.id, o.user_id, o.contact, o.updated_at, ${netAmountExpr} AS amount
       FROM orders o
       ${joinItems}
       WHERE o.status = 'DONE'
